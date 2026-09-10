@@ -374,8 +374,12 @@ class Daemon:
                                   f"{exc}. Fix the setting and run `voice reload`, or restart "
                                   f"{APP_NAME}.", "critical")
             return
-        self.listener, self.hotkey_backend = listener, backend
+        previous_backend, self.hotkey_backend = self.hotkey_backend, backend
+        self.listener = listener
         self._hotkey_settings = self._hotkey_snapshot()
+        if backend != previous_backend:
+            self._rebuild_settings_dialog()
+
         try:
             self.listener.start()
         except Exception:
@@ -725,14 +729,37 @@ class Daemon:
         else:
             self.handle({"cmd": action})
 
+    def _rebuild_settings_dialog(self) -> None:
+        """Throw the cached dialog away after a backend change.
+
+        The backend decides the Hotkeys tab's whole widget set - trigger fields
+        and the desktop's keys on the portal, a capture button on evdev - and
+        that is decided once, when the dialog is built. Reusing it after a
+        `hotkeys.backend` change showed the departed backend's fields. A window
+        the user is looking at is replaced rather than merely dropped: saving
+        the change from that very window is the commonest way to make it.
+        """
+        dialog, self._settings = self._settings, None
+        if dialog is None:
+            return
+        visible = dialog.isVisible()
+        dialog.close()
+        dialog.deleteLater()
+        if visible:
+            self.open_settings()
+
     def open_settings(self) -> None:
         # The window shows what the desktop currently holds beside the portal
         # trigger fields, so it is worth one round trip before it appears.
         self._refresh_shortcut_triggers()
         try:
             if self._settings is None:
-                self._settings = SettingsDialog(self.config, self.listener.capture_next, list_sources,
-                                                backend=self.hotkey_backend,
+                # Late-bound, both of them: this dialog outlives the listener
+                # it was built beside, and a bound `self.listener.capture_next`
+                # kept calling the stopped one - "Press a key..." for ever.
+                self._settings = SettingsDialog(self.config,
+                                                lambda cb: self.listener.capture_next(cb),
+                                                list_sources, backend=self.hotkey_backend,
                                                 triggers=self.effective_triggers)
                 self._settings.saved.connect(self.apply_config)
             elif not self._settings.isVisible():

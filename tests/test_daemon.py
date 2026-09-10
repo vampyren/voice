@@ -1363,6 +1363,125 @@ def test_a_changed_portal_trigger_rebinds_on_reload(isolated_xdg, qapp, monkeypa
     d.shutdown()
 
 
+def test_the_reused_settings_dialog_captures_with_the_current_listener(isolated_xdg, qapp, monkeypatch):
+    """The dialog is built once and kept. It used to capture the *bound method*
+    of the listener alive at that moment, so after any rebind "Capture key"
+    called a stopped listener and the button sat on "Press a key..." for ever."""
+    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    d = _portal_daemon(monkeypatch)
+    d.open_settings()
+    dialog = d._settings
+    first = d.listener
+    dialog.close()
+
+    external = Config.load()
+    external.set("hotkeys.portal_dictate", "CTRL+ALT+d")
+    external.save()
+    d.apply_config()
+    assert d.listener is not first                  # rebound, same backend
+
+    d.open_settings()
+    d._settings.shortcuts_button.click()            # the portal's own dialog path
+    assert hasattr(d.listener, "cb")                # the live listener was asked
+    assert not hasattr(first, "cb")                 # and the dead one was not
+    d._settings.close()
+    d.shutdown()
+
+
+def test_the_evdev_capture_button_follows_a_rebuilt_listener(isolated_xdg, qapp, monkeypatch):
+    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    d = _evdev_daemon(monkeypatch)
+    d.open_settings()
+    dialog, first = d._settings, d.listener
+    dialog.close()
+
+    external = Config.load()
+    external.set("hotkeys.backend", "auto")         # still evdev here, but rebuilt
+    external.save()
+    monkeypatch.setattr("voice.daemon.keyboards_are_readable", lambda: True)
+    monkeypatch.setattr("voice.daemon.has_local_seat", lambda: True)
+    d.apply_config()
+    assert d.listener is not first
+
+    d.open_settings()
+    d._settings.capture_button.click()
+    assert hasattr(d.listener, "cb")
+    assert not hasattr(first, "cb")
+    d._settings.close()
+    d.shutdown()
+
+
+def test_a_backend_change_rebuilds_the_settings_dialog_portal_to_evdev(isolated_xdg, qapp, monkeypatch):
+    """The backend is baked into the dialog's widget set, so a reused dialog
+    showed the old backend's fields - portal trigger boxes for a listener that
+    no longer reads them, and no way to capture the key that now applies."""
+    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    d = _portal_daemon(monkeypatch)
+    d.open_settings()
+    first_dialog = d._settings
+    assert set(first_dialog.portal_edits)
+    first_dialog.close()
+
+    monkeypatch.setattr("voice.daemon.EvdevListener", lambda tracker, on_event: FakeListener())
+    external = Config.load()
+    external.set("hotkeys.backend", "evdev")
+    external.save()
+    d.apply_config()
+
+    d.open_settings()
+    assert d._settings is not first_dialog
+    assert d._settings.portal_edits == {}
+    assert d._settings.shortcuts_button is None
+    assert d._settings.capture_button.isHidden() is False
+    d._settings.close()
+    d.shutdown()
+
+
+def test_a_backend_change_rebuilds_the_settings_dialog_evdev_to_portal(isolated_xdg, qapp, monkeypatch):
+    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    d = _evdev_daemon(monkeypatch)
+    d.open_settings()
+    first_dialog = d._settings
+    assert first_dialog.portal_edits == {}
+    first_dialog.close()
+
+    monkeypatch.setattr("voice.daemon.PortalListener", FakePortalListener)
+    external = Config.load()
+    external.set("hotkeys.backend", "portal")
+    external.save()
+    d.apply_config()
+
+    d.open_settings()
+    assert d._settings is not first_dialog
+    assert set(d._settings.portal_edits) == {"dictate", "recall", "cancel", "language_toggle"}
+    assert d._settings.capture_button.isHidden() is True
+    d._settings.close()
+    d.shutdown()
+
+
+def test_a_backend_change_replaces_the_window_the_user_is_looking_at(isolated_xdg, qapp, monkeypatch):
+    """Saving the backend change from this very window is the commonest way to
+    make it: the reload must not leave the old backend's fields on screen."""
+    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    d = _portal_daemon(monkeypatch)
+    d.open_settings()
+    first_dialog = d._settings
+    assert first_dialog.isVisible()
+
+    monkeypatch.setattr("voice.daemon.EvdevListener", lambda tracker, on_event: FakeListener())
+    external = Config.load()
+    external.set("hotkeys.backend", "evdev")
+    external.save()
+    d.apply_config()
+
+    assert d._settings is not first_dialog
+    assert d._settings.isVisible()
+    assert d._settings.portal_edits == {}
+    assert first_dialog.isVisible() is False
+    d._settings.close()
+    d.shutdown()
+
+
 def test_a_changed_hotkey_backend_rebuilds_the_listener(isolated_xdg, qapp, monkeypatch):
     d = _portal_daemon(monkeypatch)
     monkeypatch.setattr("voice.daemon.EvdevListener", lambda tracker, on_event: FakeListener())

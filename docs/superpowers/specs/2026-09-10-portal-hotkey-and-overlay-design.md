@@ -1,7 +1,7 @@
 # Portal hotkey backend and recording overlay
 
 Design addendum to `2026-09-10-voice-dictation-design.md`, written 2026-09-10 after the first
-live test. Status: awaiting owner review (visual mockup pending via /design).
+live test. Status: approved by the owner 2026-09-10 (visual reference supplied as a screenshot).
 
 ## Why
 
@@ -50,11 +50,16 @@ bind a shortcut for real, the owner presses it, the daemon records.
 
 ## 2. Recording overlay ("pill")
 
-**What the user sees.** When recording starts, a dark rounded capsule appears at the bottom
-centre of the screen: a red dot, the word "Listening", and 24 vertical bars whose heights
-follow the microphone level at ~30 fps. On release it switches to "Transcribing…" with a
-subtle pulse, then to a checkmark for 600 ms, then hides. On error it shows the message in
-amber for 2 s. Nothing is clickable; it never takes focus.
+**What the user sees** (reference: the owner's Vibe Typer screenshot, 2026-09-10). When
+recording starts, a dark rounded capsule (~210×48 px, near-black, subtle 1 px lighter border,
+fully rounded ends) appears at the bottom centre of the screen. Left/centre: a waveform of
+~28 thin vertical bars in violet (#a78bfa-ish, brighter in the middle, dimmer at the ends),
+each bar mirrored around the horizontal centre line so the shape reads as a sound wave; bar
+heights follow the microphone level at ~30 fps with a short decay, and the envelope tapers
+toward both ends. Right: an elapsed-time counter in white, `m:ss`, monospaced digits. On
+release the bars freeze and dim and the counter is replaced by "…" pulsing while transcribing;
+then a brief checkmark (600 ms), then the capsule hides. On error the counter area shows the
+message in amber for 2 s. Nothing is clickable; it never takes focus.
 
 **Process model.** A separate helper process, `voice-overlay` (entry point
 `voice.ui.overlay:main`), written with GTK4 through the already-installed PyGObject. The daemon

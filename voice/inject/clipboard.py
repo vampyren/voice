@@ -49,10 +49,12 @@ class Clipboard:
         if cp.returncode != 0:
             raise ClipboardError(f"wl-copy exited {cp.returncode}: {cp.stderr}")
 
-    def restore(self, snap: Snapshot) -> None:
+    def restore(self, snap: Snapshot) -> bool:
         if snap.text is None:
-            return
+            return False
         try:
             self.set_text(snap.text)
         except ClipboardError as exc:
             log.warning("clipboard restore failed: %s", exc)
+            return False
+        return True

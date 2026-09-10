@@ -52,6 +52,16 @@ def test_restore_noop_when_none_and_sets_otherwise():
     assert r.calls[-1][1] == "back"
 
 
+def test_restore_reports_true_only_when_set_text_actually_succeeds():
+    assert Clipboard(run=Runner({})).restore(Snapshot(None)) is False
+
+    failing = Runner({("wl-copy",): (1, "")})
+    assert Clipboard(run=failing).restore(Snapshot("back")) is False
+
+    working = Runner({("wl-copy",): (0, "")})
+    assert Clipboard(run=working).restore(Snapshot("back")) is True
+
+
 @pytest.mark.boundary
 def test_real_wl_clipboard_roundtrip():
     c = Clipboard()

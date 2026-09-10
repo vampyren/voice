@@ -1,5 +1,7 @@
+import subprocess
+
 from voice.inject.clipboard import Snapshot
-from voice.inject.injector import InjectResult, Injector
+from voice.inject.injector import InjectResult, Injector, run_window_command
 from voice.inject.keys import KeySendError
 
 SETTINGS = {"paste_chord": "ctrl+v", "terminal_chord": "ctrl+shift+v",
@@ -7,8 +9,8 @@ SETTINGS = {"paste_chord": "ctrl+v", "terminal_chord": "ctrl+shift+v",
 
 
 class FakeClipboard:
-    def __init__(self, existing="old"):
-        self.existing, self.log = existing, []
+    def __init__(self, existing="old", restore_succeeds=True):
+        self.existing, self.log, self.restore_succeeds = existing, [], restore_succeeds
 
     def snapshot(self):
         self.log.append("snapshot")
@@ -19,6 +21,7 @@ class FakeClipboard:
 
     def restore(self, snap):
         self.log.append(("restore", snap.text))
+        return self.restore_succeeds and snap.text is not None
 
 
 class FakeSender:
@@ -77,3 +80,50 @@ def test_restore_disabled():
     inj = Injector(clip, FakeSender(), {**SETTINGS, "restore_clipboard": False}, lambda: False, lambda: None, sleep=lambda s: None)
     assert inj.inject("x").restored is False
     assert not any(isinstance(x, tuple) and x[0] == "restore" for x in clip.log)
+
+
+def test_restore_failure_reported_as_not_restored():
+    clip = FakeClipboard(restore_succeeds=False)
+    inj = Injector(clip, FakeSender(), SETTINGS, lambda: False, lambda: None, sleep=lambda s: None)
+    res = inj.inject("x")
+    assert res.restored is False
+    assert ("restore", "old") in clip.log          # restore was attempted, just failed
+
+
+class RecordingRun:
+    def __init__(self, rc=0, stdout="", raise_exc=None):
+        self.rc, self.stdout, self.raise_exc = rc, stdout, raise_exc
+        self.calls = []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append((cmd, kw))
+        if self.raise_exc is not None:
+            raise self.raise_exc
+        return subprocess.CompletedProcess(cmd, self.rc, stdout=self.stdout, stderr="")
+
+
+def test_run_window_command_empty_returns_none_without_calling_run():
+    run = RecordingRun()
+    assert run_window_command("", run=run) is None
+    assert run.calls == []
+
+
+def test_run_window_command_returns_stripped_stdout_on_success():
+    run = RecordingRun(rc=0, stdout="Konsole\n")
+    assert run_window_command("xdotool getactivewindow", run=run) == "Konsole"
+    cmd, kw = run.calls[-1]
+    assert cmd == "xdotool getactivewindow"
+    assert kw["shell"] is True
+    assert kw["timeout"] == 1
+
+
+def test_run_window_command_empty_stdout_returns_none():
+    assert run_window_command("cmd", run=RecordingRun(rc=0, stdout="")) is None
+
+
+def test_run_window_command_nonzero_exit_returns_none():
+    assert run_window_command("cmd", run=RecordingRun(rc=1, stdout="whatever")) is None
+
+
+def test_run_window_command_oserror_returns_none():
+    assert run_window_command("cmd", run=RecordingRun(raise_exc=OSError("boom"))) is None

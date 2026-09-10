@@ -62,6 +62,5 @@ class Injector:
         self._sleep(SETTLE_S)
         restored = False
         if self._settings.get("restore_clipboard", True):
-            self._clip.restore(snap)
-            restored = snap.text is not None
+            restored = self._clip.restore(snap)
         return InjectResult(self._sender.name, chord, restored)

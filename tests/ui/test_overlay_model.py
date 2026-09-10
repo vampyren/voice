@@ -1,7 +1,6 @@
 import pytest
 
 from voice.ui.overlay_model import (
-    AMP,
     BAR_FLOOR,
     BREATH_PERIOD,
     COLLAPSE,
@@ -11,6 +10,7 @@ from voice.ui.overlay_model import (
     IDLE_GRACE,
     NOTICE_TTL,
     OverlayModel,
+    TAPER,
     ease_in_out,
     ease_out,
 )
@@ -43,6 +43,18 @@ def model(clock):
 def _fill(model, level=1.0, times=40):
     for _ in range(times):
         model.push_level(level)
+
+
+def taper(bars=21):
+    """The end-taper weight of each bar: 1 at the centre, 1 - TAPER at the ends."""
+    half = (bars + 1) // 2
+    return [1.0 - TAPER * (min(int(abs(i - (bars - 1) / 2.0)), half - 1) / (half - 1))
+            for i in range(bars)]
+
+
+def profile(level=1.0, bars=21, amplitude=1.0):
+    """Bar heights for a history holding `level` in every slot."""
+    return [min(1.0, t * level * amplitude) for t in taper(bars)]
 
 
 # -- easing ---------------------------------------------------------------
@@ -214,16 +226,36 @@ def test_the_badge_swaps_out_and_back_in_during_a_notice(model, clock):
 
 # -- waveform -------------------------------------------------------------
 
-def test_the_resting_envelope_is_the_designs_amplitude_array(model):
+def test_the_taper_runs_from_full_at_the_centre_to_65_percent_at_the_ends(model):
     model.set_state("recording")
     _fill(model, 1.0)
-    assert model.bar_heights == pytest.approx(list(AMP))
+    heights = model.bar_heights
+    assert heights[10] == pytest.approx(1.0)                # newest sample
+    assert heights[0] == pytest.approx(1.0 - TAPER)         # oldest, left end
+    assert heights[20] == pytest.approx(1.0 - TAPER)        # oldest, right end
+    assert heights[5] == pytest.approx(1.0 - TAPER / 2)     # halfway out
 
 
-def test_recording_bars_rest_at_a_fraction_of_the_envelope_when_silent(model):
+def test_a_steady_level_tapers_smoothly_instead_of_drawing_a_fixed_silhouette(model):
+    """The shape must come from the audio, not from a hard-coded silhouette.
+
+    The old model multiplied every bar by a fixed jagged amplitude array, so a
+    perfectly steady level still drew peaks and troughs at fixed indices and
+    the whole wave could only breathe as one shape. A steady level is a steady
+    wave: from the centre outward the heights may only fall away.
+    """
+    model.set_state("recording")
+    _fill(model, 1.0)
+    heights = model.bar_heights
+    centre_out = [heights[10 - k] for k in range(11)]
+    assert all(b <= a + 1e-9 for a, b in zip(centre_out, centre_out[1:])), centre_out
+    assert heights == pytest.approx(profile(1.0))
+
+
+def test_recording_bars_rest_at_a_fraction_of_the_taper_when_silent(model):
     model.set_state("recording")
     _fill(model, 0.0)
-    assert model.bar_heights == pytest.approx([a * BAR_FLOOR for a in AMP])
+    assert model.bar_heights == pytest.approx(profile(BAR_FLOOR))
 
 
 def test_push_level_feeds_the_centre_and_pushes_older_values_outward(model):
@@ -231,11 +263,54 @@ def test_push_level_feeds_the_centre_and_pushes_older_values_outward(model):
     _fill(model, 0.0)
     model.push_level(1.0)
     centre = 21 // 2
-    assert model.bar_heights[centre] == pytest.approx(AMP[centre])
+    assert model.bar_heights[centre] == pytest.approx(1.0)
     for _ in range(3):
         model.push_level(0.0)
-    assert model.bar_heights[centre] == pytest.approx(AMP[centre] * BAR_FLOOR)
-    assert max(model.bar_heights) > AMP[centre] * BAR_FLOOR      # it moved outward
+    assert model.bar_heights[centre] == pytest.approx(BAR_FLOOR)
+    assert max(model.bar_heights) > BAR_FLOOR                   # it moved outward
+
+
+def test_a_loud_syllable_travels_one_bar_outward_per_chunk(model):
+    """The newest sample is the centre bar; each chunk moves it one bar out."""
+    model.set_state("recording")
+    _fill(model, 0.0)
+    model.push_level(1.0)
+    for step in range(4):
+        heights = model.bar_heights
+        assert heights.index(max(heights)) == 10 - step, heights
+        model.push_level(0.0)
+
+
+def test_two_bars_are_not_locked_in_one_ratio(model):
+    """A silhouette scaled by one loudness holds every bar in a fixed ratio to
+    every other; a real waveform reshapes itself with each chunk."""
+    model.set_state("recording")
+    for level in (0.35, 0.62, 0.48, 0.71, 0.15, 0.55):
+        model.push_level(level)
+
+    def ratio():
+        heights = model.bar_heights
+        return heights[9] / heights[7]
+
+    before = ratio()
+    model.push_level(0.9)
+    after_loud = ratio()
+    assert after_loud != pytest.approx(before, rel=0.05)
+    model.push_level(0.1)
+    assert ratio() != pytest.approx(after_loud, rel=0.05)
+
+
+def test_loud_and_quiet_syllables_draw_a_wave_not_a_single_hump(model):
+    """Alternating syllables must leave more than one crest in the well."""
+    model.set_state("recording")
+    _fill(model, 0.0)
+    for level in (0.8, 0.1, 0.75, 0.12, 0.7):
+        model.push_level(level)
+    half = model.bar_heights[10:]              # centre out to the right end
+    crests = [k for k in range(1, len(half) - 1)
+              if half[k] > half[k - 1] and half[k] > half[k + 1]]
+    assert len(crests) >= 2, half
+    assert max(half) > 3 * min(half), half     # and the troughs really are quiet
 
 
 def test_bars_are_mirrored_around_the_centre(model):
@@ -261,20 +336,20 @@ def test_the_waveform_holds_its_shape_while_levels_keep_arriving(model, clock):
         model.push_level(1.0)
         for _ in range(3):
             model.tick(clock.advance(FRAME))
-    assert model.bar_heights == pytest.approx(list(AMP))
+    assert model.bar_heights == pytest.approx(profile(1.0))
 
 
 def test_bars_settle_toward_the_floor_once_the_levels_stop(model, clock):
     model.set_state("recording")
     _fill(model, 1.0)
     model.tick(clock.advance(IDLE_GRACE))
-    assert model.bar_heights == pytest.approx(list(AMP)), "the grace holds the shape"
+    assert model.bar_heights == pytest.approx(profile(1.0)), "the grace holds the shape"
     model.tick(clock.advance(FRAME))
-    expected = AMP[10] * (BAR_FLOOR + (1 - BAR_FLOOR) * 0.85)
+    expected = BAR_FLOOR + (1 - BAR_FLOOR) * 0.85
     assert model.bar_heights[10] == pytest.approx(expected, rel=1e-6)
     for _ in range(60):
         model.tick(clock.advance(FRAME))
-    assert model.bar_heights == pytest.approx([a * BAR_FLOOR for a in AMP], abs=0.01)
+    assert model.bar_heights == pytest.approx(profile(BAR_FLOOR), abs=0.01)
 
 
 def test_decay_is_frame_rate_independent(clock):
@@ -283,7 +358,7 @@ def test_decay_is_frame_rate_independent(clock):
     _fill(a, 1.0)
     a.tick(clock.advance(IDLE_GRACE))
     a.tick(clock.advance(FRAME * 4))
-    expected = AMP[10] * (BAR_FLOOR + (1 - BAR_FLOOR) * 0.85 ** 4)
+    expected = BAR_FLOOR + (1 - BAR_FLOOR) * 0.85 ** 4
     assert a.bar_heights[10] == pytest.approx(expected, rel=1e-6)
 
 
@@ -294,17 +369,17 @@ def test_a_fresh_recording_starts_its_grace_period(model, clock):
     model.set_state("recording", now=clock.t)
     _fill(model, 1.0)
     model.tick(clock.advance(FRAME))
-    assert model.bar_heights == pytest.approx(list(AMP))
+    assert model.bar_heights == pytest.approx(profile(1.0))
 
 
 def test_bars_collapse_into_the_track_when_transcribing_starts(model, clock):
     model.set_state("recording")
     _fill(model, 1.0)
     model.set_state("transcribing", now=clock.t)
-    assert model.bar_heights == pytest.approx(list(AMP)), "no floor once capture ends"
+    assert model.bar_heights == pytest.approx(profile(1.0)), "no floor once capture ends"
     model.tick(clock.advance(COLLAPSE / 2))
     half = model.bar_heights
-    assert 0.0 < max(half) < max(AMP)
+    assert 0.0 < max(half) < 1.0
     model.tick(clock.advance(COLLAPSE / 2))
     assert max(model.bar_heights) == pytest.approx(0.0, abs=1e-9)
 
@@ -317,15 +392,15 @@ def test_hiding_clears_the_waveform(model, clock):
     assert model.text is None
 
 
-def test_bar_count_is_configurable_and_resamples_the_envelope(clock):
+def test_bar_count_is_configurable_and_the_taper_stretches_to_fit(clock):
     m = OverlayModel(bars=9, clock=clock)
     m.set_state("recording")
     _fill(m, 1.0)
     heights = m.bar_heights
     assert len(heights) == 9
-    assert heights[0] == pytest.approx(AMP[0])
-    assert heights[-1] == pytest.approx(AMP[-1])
-    assert heights[2] == pytest.approx(AMP[5])           # resampled, not truncated
+    assert heights == pytest.approx(profile(1.0, bars=9))
+    assert heights[4] == pytest.approx(1.0)              # centre is still newest
+    assert heights[0] == pytest.approx(1.0 - TAPER)      # and the ends still taper
     assert heights == list(reversed(heights))
 
 
@@ -389,7 +464,7 @@ def test_reduced_motion_stills_the_animations_and_lowers_the_waveform(clock):
     m = OverlayModel(reduced_motion=True, clock=clock)
     m.set_state("recording")
     _fill(m, 1.0)
-    assert m.bar_heights == pytest.approx([a * 0.6 for a in AMP])
+    assert m.bar_heights == pytest.approx(profile(1.0, amplitude=0.6))
     still = m.breath
     m.tick(clock.advance(BREATH_PERIOD / 2))
     assert m.breath == still, "the dot must not breathe"
@@ -482,7 +557,7 @@ def test_silence_still_rests_at_the_floor(model):
         model.push_level(level)
     for _ in range(40):
         model.push_level(0.0)
-    assert model.bar_heights == pytest.approx([a * BAR_FLOOR for a in AMP])
+    assert model.bar_heights == pytest.approx(profile(BAR_FLOOR))
 
 
 def test_the_gain_reference_decays_so_a_quiet_talker_catches_up(model, clock):
@@ -494,7 +569,7 @@ def test_the_gain_reference_decays_so_a_quiet_talker_catches_up(model, clock):
     model.tick(clock.advance(2 * PEAK_HALF_LIFE))
     reference = PEAK_FLOOR + (1.0 - PEAK_FLOOR) * 0.25
     model.push_level(reference)
-    assert model.bar_heights[model.bars // 2] == pytest.approx(AMP[model.bars // 2], abs=0.02)
+    assert model.bar_heights[model.bars // 2] == pytest.approx(1.0, abs=0.02)
 
 
 def test_a_bar_never_collapses_to_a_hairline_while_recording(model):
@@ -503,7 +578,7 @@ def test_a_bar_never_collapses_to_a_hairline_while_recording(model):
     assert floor >= 0.25
     model.set_state("recording")
     model.push_level(0.0)
-    assert min(model.bar_heights) >= min(AMP) * floor - 1e-9
+    assert min(model.bar_heights) >= (1.0 - TAPER) * floor - 1e-9
 
 
 def test_room_noise_is_not_amplified_into_a_waveform(model):
@@ -512,7 +587,7 @@ def test_room_noise_is_not_amplified_into_a_waveform(model):
     model.set_state("recording")
     for _ in range(40):
         model.push_level(0.04)             # a quiet room, after rms_level's curve
-    assert model.bar_heights == pytest.approx([a * BAR_FLOOR for a in AMP])
+    assert model.bar_heights == pytest.approx(profile(BAR_FLOOR))
 
 
 def test_a_close_microphone_is_not_clipped_flat(model):

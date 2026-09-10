@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections import deque
 from typing import Callable
 
 #: Every state the daemon can put the pill in. `notice` is an overlay state:
@@ -50,14 +51,25 @@ LABEL_DELAY, LABEL_DUR = 0.5, 0.4    # "Inserted" rising in
 RISE = 0.3                   # notice text rising in
 SWAP = 0.3                   # language badge swapping out and back in
 
-#: Waveform: 21 bars, resting amplitude envelope, symmetric left to right.
+#: Waveform: 21 bars fed from a rolling history of recent levels. The newest
+#: sample is the centre bar and older ones move outward, one bar per chunk, so
+#: the pill draws a wave travelling out of the microphone instead of a fixed
+#: shape that breathes. 21 bars is 11 distinct moments: bar `i` and bar
+#: `20 - i` are the same slot, mirrored, which is how the design's artboards
+#: read - we have one broadband RMS per chunk rather than the per-band levels
+#: the design assumes, so a mirror is the honest way to fill both halves.
 BARS = 21
-AMP = (.18, .3, .45, .7, .5, .9, .6, .8, 1., .7, .85,
-       .7, 1., .8, .6, .9, .5, .7, .45, .3, .18)
+
+#: The wave still tapers toward the ends of the well, as the design draws it,
+#: but the taper is a mild weight on the *history* rather than a silhouette
+#: painted over it: the newest slot keeps all of its height, the oldest 65%.
+#: Anything stronger and the older half of the wave stops being readable.
+TAPER = 0.35
 
 #: A recording bar never sits fully flat: the design animates each bar between
-#: `amp * 0.22` and `amp`. Measured against a real pill, 0.22 left the quiet
-#: between words reading as hairlines, so the resting height is 25%.
+#: 22% and 100% of its tapered height. Measured against a real pill, 0.22 left
+#: the quiet between words reading as hairlines, so the resting height is 25%.
+#: It is what stops the wave collapsing to a row of dots between syllables.
 BAR_FLOOR = 0.25
 
 #: Automatic gain. Drawn against full scale, ordinary speech gave a wave a few
@@ -121,11 +133,13 @@ def _stage(age: float, delay: float, duration: float) -> float:
 class OverlayModel:
     """What the pill shows, and when it stops showing it.
 
-    The waveform is symmetric: `push_level` puts the newest sample in the
-    middle and the previous samples ripple outward toward both ends, so the
-    shape reads as a wave travelling out of the microphone. The design calls
-    for per-band levels; we have one broadband RMS per chunk, so the bins are
-    mirrored around the centre instead (see the report for the deviation).
+    The waveform is a history, not a silhouette: `push_level` puts the newest
+    sample in the middle and the previous samples ripple outward toward both
+    ends, so neighbouring bars are different moments of audio and the shape
+    reads as a wave. The only fixed weight left is a mild taper toward the
+    ends. The design calls for per-band levels; we have one broadband RMS per
+    chunk, so both halves show the same history, mirrored around the centre
+    (see the report for the deviation).
     """
 
     def __init__(self, bars: int = BARS, decay: float = 0.85,
@@ -140,8 +154,8 @@ class OverlayModel:
         self.prev_lang = lang
         self._clock = clock
         self._half = (bars + 1) // 2          # history slots: centre out to one end
-        self._history = [0.0] * self._half
-        self._envelope = [self._amp(i) for i in range(bars)]
+        self._history = deque([0.0] * self._half, maxlen=self._half)
+        self._taper = [self._weight(k) for k in range(self._half)]
         self.state = "hidden"
         self.text: str | None = None
         self._now = clock()
@@ -162,14 +176,10 @@ class OverlayModel:
 
     # -- geometry ---------------------------------------------------------
 
-    def _amp(self, index: int) -> float:
-        """Resting envelope weight for bar `index`, resampled for any bar count."""
-        if self.bars == len(AMP):
-            return AMP[index]
-        pos = index / (self.bars - 1) * (len(AMP) - 1)
-        low = min(len(AMP) - 1, int(pos))
-        high = min(len(AMP) - 1, low + 1)
-        return AMP[low] + (AMP[high] - AMP[low]) * (pos - low)
+    def _weight(self, slot: int) -> float:
+        """End-taper for history `slot`: 1 at the centre, `1 - TAPER` at the ends."""
+        span = self._half - 1
+        return 1.0 - TAPER * (slot / span) if span > 0 else 1.0
 
     def _slot(self, index: int) -> int:
         distance = abs(index - (self.bars - 1) / 2.0)
@@ -185,8 +195,7 @@ class OverlayModel:
         hump - that is what makes the shape read as a wave.
         """
         level = min(1.0, max(0.0, float(level)))
-        self._history.insert(0, self._gain(level))
-        self._history.pop()
+        self._history.appendleft(self._gain(level))   # bounded: drops the oldest
         self._last_push = self._now
 
     def _gain(self, level: float) -> float:
@@ -230,7 +239,7 @@ class OverlayModel:
                 self._elapsed = 0.0
             self._last_push = now
         if state == "hidden":
-            self._history = [0.0] * self._half
+            self._history = deque([0.0] * self._half, maxlen=self._half)
             self._elapsed = 0.0
         self.state = state
         self.text = text
@@ -249,7 +258,8 @@ class OverlayModel:
         fading = min(dt, max(0.0, idle - IDLE_GRACE))
         if self.state not in ("transcribing", "notice") and fading > 0.0:
             factor = self.decay ** (fading / FRAME)
-            self._history = [h * factor for h in self._history]
+            self._history = deque((h * factor for h in self._history),
+                                  maxlen=self._half)
         if self.state == "notice" and self.state_age >= NOTICE_TTL:
             state, text, age = self._return
             self._enter(state, text, now, reset_counter=False)
@@ -291,19 +301,23 @@ class OverlayModel:
 
     @property
     def bar_heights(self) -> list[float]:
-        """Bar scale factors 0..1, mirrored about the centre and enveloped.
+        """Bar scale factors 0..1: the level history, mirrored and tapered.
 
-        While recording the bars rest at `BAR_FLOOR` of the envelope and rise
-        to it with the level, exactly like the design's idle animation.
+        Bar `i` shows history slot `|i - centre|`, so the centre bar is the
+        newest chunk and the ends are the oldest - the height of one bar says
+        nothing about the height of the next, which is what makes it a wave.
+        While recording the bars rest at `BAR_FLOOR` and rise from there with
+        the level, exactly like the design's idle animation.
         """
         live = self.state == "recording"
         amplitude = 0.6 if self.reduced_motion else 1.0
         heights = []
         for i in range(self.bars):
-            level = self._history[self._slot(i)]
+            slot = self._slot(i)
+            level = self._history[slot]
             if live:
                 level = BAR_FLOOR + (1.0 - BAR_FLOOR) * level
-            heights.append(min(1.0, self._envelope[i] * level * amplitude))
+            heights.append(min(1.0, self._taper[slot] * level * amplitude))
         if self.state == "transcribing":
             remaining = 1.0 - ease_out(_clamp01(self.state_age / COLLAPSE))
             heights = [h * remaining for h in heights]

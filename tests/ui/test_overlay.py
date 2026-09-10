@@ -10,7 +10,7 @@ from voice.ui.overlay import (
     parse_line,
     reduced_motion,
 )
-from voice.ui.overlay_model import AMP, BAR_FLOOR, OverlayModel
+from voice.ui.overlay_model import BAR_FLOOR, TAPER, OverlayModel
 
 
 class Clock:
@@ -53,13 +53,14 @@ def test_a_level_message_feeds_the_waveform(model):
     apply_message(model, {"state": "recording"})
     for _ in range(30):
         apply_message(model, {"level": 1.0})
-    assert model.bar_heights == pytest.approx(list(AMP))
+    assert max(model.bar_heights) == pytest.approx(1.0)
+    assert min(model.bar_heights) == pytest.approx(1.0 - TAPER)
 
 
 def test_a_level_arriving_as_a_string_is_still_a_number(model):
     apply_message(model, {"state": "recording"})
     assert apply_message(model, {"level": "0.5"}) is True
-    assert model.bar_heights[10] > AMP[10] * BAR_FLOOR
+    assert model.bar_heights[10] > BAR_FLOOR
 
 
 def test_an_unusable_level_is_ignored(model, caplog):
@@ -67,7 +68,7 @@ def test_an_unusable_level_is_ignored(model, caplog):
     with caplog.at_level("WARNING"):
         assert apply_message(model, {"level": "loud"}) is False
     assert "bad level" in caplog.text
-    assert model.bar_heights == pytest.approx([a * BAR_FLOOR for a in AMP])
+    assert max(model.bar_heights) == pytest.approx(BAR_FLOOR)
 
 
 def test_an_unknown_state_is_logged_and_survived(model, caplog):

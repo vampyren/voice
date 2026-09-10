@@ -12,7 +12,7 @@ cairo = pytest.importorskip("cairo")
 
 from voice.ui import overlay_draw as od                        # noqa: E402
 from voice.ui.overlay_draw import natural_width, render_png    # noqa: E402
-from voice.ui.overlay_model import AMP, COLLAPSE, OverlayModel  # noqa: E402
+from voice.ui.overlay_model import COLLAPSE, OverlayModel  # noqa: E402
 
 
 class Clock:
@@ -25,6 +25,12 @@ class Clock:
     def advance(self, dt):
         self.t += dt
         return self.t
+
+
+#: A speech-like run of levels: loud syllables, short gaps, one near-silence.
+#: A steady level draws a steady wave, which is correct but tells us nothing
+#: about whether the bars follow the audio, so the shape tests use this.
+SPEECH = (0.35, 0.62, 0.48, 0.71, 0.15, 0.55, 0.28, 0.66, 0.09, 0.58, 0.44)
 
 
 def _model(state, levels=(1.0,) * 30, text=None, age=0.0, lang="en", to=None,
@@ -239,18 +245,39 @@ def test_recording_draws_a_waveform_that_runs_violet_to_teal(tmp_path):
     assert img.count(violet, x0=well_end - 20, x1=well_end) == 0
 
 
-def test_the_waveform_follows_the_amplitude_envelope(tmp_path):
+def bar_columns(img, s=1.0, n=21):
+    """Rendered height in pixels of every bar, measured down its centre line."""
+    gap, well = 3.0 * s, 132.0 * s
+    bar_w = (well - gap * (n - 1)) / n
+    x0 = 36.0 * s
+    return [sum(1 for y in range(img.height)
+                if wave(img(int(x0 + i * (bar_w + gap) + bar_w / 2), y)))
+            for i in range(n)]
+
+
+def test_the_waveform_tapers_from_the_newest_sample_out_to_the_ends(tmp_path):
     img = Image(render_png(_model("recording"), tmp_path / "rec.png"))
+    bars = bar_columns(img)
+    assert bars[10] > 20, f"the newest sample should fill the 24 px well, got {bars}"
+    assert bars[0] == pytest.approx(bars[10] * 0.65, abs=3), bars
+    assert bars[20] == pytest.approx(bars[10] * 0.65, abs=3), bars
 
-    def bar_height(index):
-        gap, bar_w = 3.0, (132 - 20 * 3) / 21
-        x = int(36 + index * (bar_w + gap) + bar_w / 2)
-        return sum(1 for y in range(img.height) if wave(img(x, y)))
 
-    tall = bar_height(AMP.index(1.0))            # a full-height bar in the design
-    short = bar_height(0)                        # the .18 bar at the very left
-    assert tall > 20, f"the tallest bar should fill the 24 px well, got {tall}"
-    assert short < tall / 2
+def test_neighbouring_bars_differ_because_each_is_a_different_moment(tmp_path):
+    """The defect this replaces: one loudness scaling a fixed silhouette, so
+    the pill could only ever be the same shape breathing. Real audio must put
+    visibly different heights side by side, and move them between frames."""
+    model = _model("recording", levels=SPEECH)
+    first = bar_columns(Image(render_png(model, tmp_path / "f1.png", height=88)), s=2.0)
+    steps = [abs(b - a) for a, b in zip(first, first[1:])]
+    assert max(steps) >= 8, f"the bars are all but flat against each other: {first}"
+    assert len(set(first)) >= 6, f"only {len(set(first))} distinct heights: {first}"
+
+    model.push_level(0.05)                       # one more chunk: a gap in speech
+    second = bar_columns(Image(render_png(model, tmp_path / "f2.png", height=88)), s=2.0)
+    assert second != first, "the wave froze between frames"
+    ratios = [b / a for a, b in zip(first, second) if a > 0]
+    assert max(ratios) - min(ratios) > 0.3, f"the whole shape merely scaled: {ratios}"
 
 
 def test_a_silent_recording_rests_at_the_floor_instead_of_going_flat(tmp_path):

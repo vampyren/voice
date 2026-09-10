@@ -265,12 +265,18 @@ class PortalListener:
             log.exception("hotkey readiness callback failed")
 
     def _listen(self) -> None:
+        # stop() closes the connection and drops it, and this thread can be
+        # anywhere - including right here, on its way into the loop. Take the
+        # connection once and give up if it has already gone.
+        conn = self._conn
+        if conn is None or self._stop.is_set():
+            return
         # bufsize: a chord pressed while the loop is busy must not drop its release.
-        with self._conn.filter(self._signal_rule(), bufsize=64) as queue:
+        with conn.filter(self._signal_rule(), bufsize=64) as queue:
             while not self._stop.is_set():
                 try:
                     with self._bus_lock:
-                        msg = self._conn.recv_until_filtered(queue, timeout=RECV_SLICE_S)
+                        msg = conn.recv_until_filtered(queue, timeout=RECV_SLICE_S)
                 except TimeoutError:
                     continue
                 except Exception:

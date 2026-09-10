@@ -462,3 +462,24 @@ def test_module_exposes_the_evdev_listener_interface():
     for name in ("start", "stop", "capture_next", "held", "modifiers_held", "devices_ok"):
         assert callable(getattr(portal_listener.PortalListener, name)), name
         assert hasattr(EvdevListener, name)
+
+
+def test_listening_after_stop_closed_the_connection_is_not_an_error(caplog):
+    """stop() closes the connection and drops it; the listener thread can still
+    be between _open() and _listen(), where self._conn is already None."""
+    listener, conn, _ = make()
+    listener._conn = None                      # exactly what _close() leaves behind
+    listener._stop.set()
+    with caplog.at_level("ERROR", logger="voice.hotkey.portal_listener"):
+        listener._listen()                     # must not raise AttributeError
+    assert caplog.records == []
+
+
+def test_a_connection_dropped_mid_loop_ends_the_listener_quietly():
+    listener, conn, _ = make()
+    listener.start()
+    started(listener)
+    listener.stop()                            # closes and drops the connection
+    assert conn.closed
+    assert listener._conn is None
+    listener._listen()                         # a late loop entry stays quiet

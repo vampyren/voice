@@ -52,7 +52,24 @@ There is no key to capture on this backend - the compositor consumes the chord b
 else sees it - so the settings window replaces the capture button with text fields for the four
 triggers themselves. Saving a changed trigger (or a changed `hotkeys.backend`) rebuilds the
 listener on `apply_config`, which creates a new portal session: the desktop may ask for
-permission again, and that is the price of applying it without restarting the daemon.
+permission again, and that is the price of applying it without restarting the daemon. Only a
+trigger the *running* backend binds forces that rebuild - a portal trigger edited while evdev
+is active must not drop the evdev listener's device descriptors - and a listener that cannot be
+built (the portal refuses the session) is reported as "Hotkeys are off" rather than left as a
+stopped listener, with the next reload free to try again.
+
+**The trigger the user confirms belongs to the desktop, and `hotkeys.portal_*` is only a
+request.** Verified live on GNOME Shell 50: the confirmed trigger is stored in dconf under
+`/org/gnome/settings-daemon/global-shortcuts/<app-id>/shortcuts`, and a later change to
+`hotkeys.portal_dictate` does not move it - the daemon asks for the new trigger and GNOME keeps
+binding the stored one. It must be changed in GNOME Settings, or by rewriting the key
+(`dconf write /org/gnome/settings-daemon/global-shortcuts/io.github.vampyren.voice/shortcuts
+"[('dictate', {'description': <'Voice dictation'>, 'shortcuts': <['F14']>})]"`, GTK accelerator
+syntax, one entry per shortcut id, the write replacing the whole list). KDE Plasma implements
+version 2 of the interface and exposes a reconfigure dialog instead, which the settings window
+can ask it to open. `voice doctor` has a **portal shortcuts** line saying which of the two
+applies here, and prints the stored value where `dconf read` can be run (no new dependency, and
+its absence is not an error). README documents the same thing for users.
 
 **Tests.** Unit: a fake bus that emits `Activated`/`Deactivated` messages drives the listener
 and the daemon receives press/release; backend selection table for `auto`. Boundary (VM):

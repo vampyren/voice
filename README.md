@@ -286,6 +286,34 @@ it. Changing `hotkeys.backend` or a portal trigger applies on `voice reload` (an
 in the settings window): the daemon closes the portal session and creates a new one, so
 the desktop may ask for permission again.
 
+**A trigger you have already confirmed belongs to the desktop, not to `config.toml`.** The
+first time the portal binds a shortcut, your desktop asks you to confirm or choose the
+combination — and it stores what you confirmed. `hotkeys.portal_*` is only what `voice`
+*asks* for, so once that copy exists, editing the config (or the Hotkeys tab) changes
+nothing on its own:
+
+- **GNOME** keeps it in dconf, under
+  `/org/gnome/settings-daemon/global-shortcuts/io.github.vampyren.voice/shortcuts`. Change
+  it in GNOME Settings where your build lists the app's shortcuts, or write the key
+  yourself — this is the exact command that makes **F14** the dictation key:
+
+  ```
+  dconf write /org/gnome/settings-daemon/global-shortcuts/io.github.vampyren.voice/shortcuts \
+    "[('dictate', {'description': <'Voice dictation'>, 'shortcuts': <['F14']>})]"
+  ```
+
+  Triggers there use GTK accelerator syntax (`F14`, `<Shift><Control>l`), and the write
+  replaces the whole list — read it back first (`dconf read` on the same key) and keep the
+  ids you still want, one entry per shortcut (`dictate`, `recall`, `cancel`,
+  `language_toggle`). GNOME binds what the key says; restart `voice` if the new trigger
+  does not answer.
+- **KDE Plasma** implements version 2 of the portal interface, which has a reconfigure
+  dialog: the settings window can ask KDE to open it, and KDE System Settings →
+  Shortcuts lists the binding as well.
+
+`voice doctor`'s **portal shortcuts** line prints whichever of these applies on this
+machine, including the trigger GNOME has stored.
+
 **Hotkeys.** On the evdev backend, use the settings window's "Capture key" button — press
 the physical key and it fills in the exact evdev name it received. Combinations are typed
 by hand, e.g. `KEY_LEFTMETA+KEY_SPACE`. If a Keychron spare key (the circle/triangle/square
@@ -326,6 +354,10 @@ are restored after the paste.
 - **hotkey backend** — informational: which listener the daemon would use here and why
   (`evdev`, or `portal (no local seat)`). Never fails the run; see
   [Configuration](#configuration).
+- **portal shortcuts** — informational: on the portal backend, where the trigger you
+  confirmed actually lives — the dconf key on GNOME (with its current value), or the
+  desktop's own reconfigure dialog. Never fails the run; see
+  [Configuration](#configuration).
 - **overlay** — informational: whether the recording pill can run here, which
   interpreter starts its helper, and whether `gtk4-layer-shell` was found. Never fails
   the run; see [Recording pill](#recording-pill).
@@ -348,6 +380,12 @@ Two more common issues doctor doesn't cover directly:
   something else; make sure the window class is in `inject.terminal_classes` (already
   includes `konsole`, `kitty`, `alacritty`, `foot`, `wezterm`, `gnome-terminal`) so
   `voice` sends Ctrl+Shift+V there instead.
+- **The portal shortcut ignores `hotkeys.portal_dictate`.** Once you have confirmed a
+  trigger, the desktop keeps it: on GNOME it is stored in dconf and a later config change
+  is simply not followed (the daemon asks for the new one, GNOME keeps the confirmed one).
+  Change it where the desktop keeps it — see the dconf command under
+  [Configuration](#configuration), or KDE's reconfigure dialog — and use
+  `voice doctor`'s **portal shortcuts** line to see what is stored.
 - **A clipboard manager is recording every dictation.** Klipper (and similar) keeps a
   history entry per dictation, since `voice` pastes via the clipboard. Exclude
   `voice`-owned changes in Klipper's settings, or live with the history.

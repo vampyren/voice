@@ -162,3 +162,67 @@ def test_language_profiles_probe_marks_a_profile_that_is_gone(isolated_xdg):
     cfg.save()
     assert default_probes()["language profiles"]() == (True, "sv → local-swedish (not defined)")
     assert "language profiles" not in __import__("voice.doctor", fromlist=["REQUIRED"]).REQUIRED
+
+
+def _portal_here(monkeypatch):
+    """Make the backend probe resolve to the portal without touching devices."""
+    monkeypatch.setattr("voice.doctor._readable_keyboards", lambda: True)
+    monkeypatch.setattr("voice.daemon.has_local_seat", lambda: False)
+
+
+def test_portal_shortcuts_probe_reports_the_trigger_the_desktop_stored(monkeypatch, isolated_xdg):
+    """GNOME keeps the trigger the user confirmed and does not follow a later
+    change to hotkeys.portal_dictate; doctor is where that becomes visible."""
+    from voice.doctor import GNOME_SHORTCUTS_KEY, default_probes
+
+    _portal_here(monkeypatch)
+    monkeypatch.setattr("voice.doctor.shutil.which", lambda b: f"/usr/bin/{b}")
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(argv)
+        return type("R", (), {"returncode": 0, "stdout": "[('dictate', {'shortcuts': <['F14']>})]\n"})()
+
+    monkeypatch.setattr("voice.doctor.subprocess.run", fake_run)
+    ok, detail = default_probes()["portal shortcuts"]()
+    assert ok is True                                  # informational: never fails the run
+    assert seen == [["dconf", "read", GNOME_SHORTCUTS_KEY]]
+    assert "[('dictate', {'shortcuts': <['F14']>})]" in detail
+    assert GNOME_SHORTCUTS_KEY in detail
+    assert "portal shortcuts" not in __import__("voice.doctor", fromlist=["REQUIRED"]).REQUIRED
+
+
+def test_portal_shortcuts_probe_says_where_to_change_it_without_dconf(monkeypatch, isolated_xdg):
+    from voice.doctor import GNOME_SHORTCUTS_KEY, default_probes
+
+    _portal_here(monkeypatch)
+    monkeypatch.setattr("voice.doctor.shutil.which", lambda b: None)
+    monkeypatch.setattr("voice.doctor.subprocess.run", _never_run)
+    ok, detail = default_probes()["portal shortcuts"]()
+    assert ok is True
+    assert GNOME_SHORTCUTS_KEY in detail and "KDE" in detail
+
+
+def test_portal_shortcuts_probe_is_quiet_on_the_evdev_backend(monkeypatch, isolated_xdg):
+    monkeypatch.setattr("voice.doctor._readable_keyboards", lambda: True)
+    monkeypatch.setattr("voice.daemon.has_local_seat", lambda: True)
+    monkeypatch.setattr("voice.doctor.subprocess.run", _never_run)
+    from voice.doctor import default_probes
+    ok, detail = default_probes()["portal shortcuts"]()
+    assert ok is True and "evdev" in detail
+
+
+def test_the_stored_trigger_is_not_reported_when_dconf_has_no_key(monkeypatch, isolated_xdg):
+    """A KDE machine (or a portal shortcut never confirmed) has no such key."""
+    from voice.doctor import GNOME_SHORTCUTS_KEY, default_probes
+
+    _portal_here(monkeypatch)
+    monkeypatch.setattr("voice.doctor.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("voice.doctor.subprocess.run",
+                        lambda argv, **kw: type("R", (), {"returncode": 0, "stdout": "\n"})())
+    detail = default_probes()["portal shortcuts"]()[1]
+    assert GNOME_SHORTCUTS_KEY in detail and "KDE" in detail
+
+
+def _never_run(argv, **kwargs):
+    raise AssertionError(f"doctor must not run {argv} here")

@@ -273,13 +273,12 @@ restore_clipboard = true
 - `portal` asks the desktop to bind a global shortcut through
   `org.freedesktop.portal.GlobalShortcuts` (KDE Plasma, GNOME 48+). No device
   permissions, and it works in a remote-desktop session, because the compositor sees the
-  keystroke before anything else does. `hotkeys.portal_dictate` (**Ctrl+Space** by
-  default) is only what `voice` asks for the **first** time the desktop meets a shortcut;
-  `portal_recall` and `portal_cancel` are asked for too when set. From then on the desktop
-  owns the key and you change it there — see
-  [The desktop owns the trigger](#the-desktop-owns-the-trigger) below. Compositors refuse
-  a bare modifier as a global shortcut, so a first-run preference must be a combination —
-  a lone `CTRL` will not bind.
+  keystroke before anything else does. **The key itself is the desktop's**, not
+  `config.toml`'s: `hotkeys.portal_dictate` (**Ctrl+Space** by default) is at most a
+  first-run preference, and on GNOME it is never applied at all — see
+  [The desktop owns the trigger](#the-desktop-owns-the-trigger) below, which is where you
+  set the key. Compositors also refuse a bare modifier as a global shortcut, so where a
+  preference *is* used it must be a combination — a lone `CTRL` will not bind.
 - `auto` (the default) picks `evdev` when at least one keyboard is readable *and* the
   session has a local seat, and `portal` otherwise. `voice doctor` prints the choice and
   the reason (`hotkey backend: portal (no local seat)`), and so does `voice status`.
@@ -297,15 +296,21 @@ Once your desktop knows a shortcut id, **the key attached to it is the desktop's
 `config.toml`'s**, and `voice` deliberately stops asking for one. Re-requesting a trigger
 for a shortcut the desktop already knows is worse than useless: on GNOME 50 it makes the
 stored entry lose its key entirely, so the shortcut stays listed with nothing bound to it
-and every press does nothing. `hotkeys.portal_*` (and the Hotkeys tab) is therefore a
-**first-run preference only** — editing it never moves a shortcut the desktop has already
-seen, no matter how often you reload or restart.
+and every press does nothing. That is what used to happen on **every daemon start**, which
+is why a key you had set could quietly stop working.
 
-To change the key, or to set one that was never assigned:
+`voice` only expresses a preference when the desktop can tell it the shortcut is genuinely
+new. **On GNOME it never can** — the portal's `ListShortcuts` is scoped to the session
+`voice` has just created, so it reports nothing whether or not GNOME has held a key for
+months — so on GNOME `hotkeys.portal_*` (and the Hotkeys tab) is never applied and the key
+is always yours to set below. Editing it changes nothing, no matter how often you reload
+or restart.
+
+To set the key, or change one:
 
 - **GNOME** — open **Settings → Keyboard → Keyboard Shortcuts**, where `voice` appears
   under its own name, and set the key there. It takes effect immediately; nothing needs
-  restarting.
+  restarting. The desktop's own dialog on the first bind is the other place to set it.
 - **KDE Plasma** — implements version 2 of the portal interface, which has a reconfigure
   dialog: the settings window's "Capture key" button asks KDE to open it, and KDE System
   Settings → Shortcuts lists the binding as well.

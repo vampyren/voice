@@ -77,6 +77,19 @@ reply with no `shortcuts` member - **every id counts as known**, because the cos
 expressing a preference is one trip to Keyboard Settings and the cost of expressing it wrongly
 is the user's binding.
 
+**An empty listing counts as "cannot say", not as "never seen".** Measured against the live
+portal on GNOME 50 - `Registry.Register`, `CreateSession`, then `ListShortcuts` with nothing
+yet bound - the reply is `{'shortcuts': ('a(sa{sv})', [])}` while dconf held three assigned
+shortcuts for the same app id. The call is scoped to *the session*, and the session is
+necessarily new when we ask, so on GNOME it can never separate a first run from a desktop that
+has held our key for months. The practical consequence is that **on GNOME `hotkeys.portal_*`
+is never applied**: the user sets the key in the desktop's own bind dialog or in Settings ->
+Keyboard -> Keyboard Shortcuts, and status, doctor and the one-shot notification exist to say
+so plainly. The per-id logic is kept for a backend whose listing is informative. Restoring an
+automatic first-run default would need durable state of our own ("we have asked this desktop
+about these ids"), which is deliberately not built here: it is one more thing that can be
+wrong, and being wrong costs the user's binding.
+
 **Reporting follows the effective trigger, never the requested one.** Each shortcut's
 `trigger_description` is read back from the `BindShortcuts` response (falling back to a second
 `ListShortcuts` where a backend answers with a bare vardict) and kept as

@@ -3,6 +3,7 @@ import time
 
 from evdev import ecodes as e
 
+from voice.hotkey import evdev_listener
 from voice.hotkey.evdev_listener import EvdevListener
 from voice.hotkey.keyspec import Tracker, parse_keyspec
 
@@ -14,6 +15,7 @@ class FakeDevice:
         import os
         self.path = path
         self.name = "fake kbd"
+        self.closed = False
         self._r, self._w = os.pipe()
         self._queue = []
         self._lock = threading.Lock()
@@ -37,6 +39,9 @@ class FakeDevice:
 
     def close(self):
         import os
+        if self.closed:
+            return
+        self.closed = True
         os.close(self._r)
         os.close(self._w)
 
@@ -110,5 +115,35 @@ def test_callback_exception_does_not_kill_the_listener_thread():
         dev.push(e.KEY_F13, 0)
         # The raising press must not have taken the thread down with it.
         assert wait_for(lambda: got == [("dictate", "press"), ("dictate", "release")])
+    finally:
+        listener.stop()
+
+
+def test_rescan_dedupes_by_device_path(tmp_path, monkeypatch):
+    # Every /dev/input change re-opens each keyboard. Registering those fresh
+    # objects again would leak fds and deliver every keystroke once per copy.
+    monkeypatch.setattr(evdev_listener, "INPUT_DIR", str(tmp_path))
+    monkeypatch.setattr(evdev_listener, "RESCAN_SECONDS", 0.05)
+    made, got = [], []
+
+    def factory():
+        made.append(FakeDevice())          # a new object for the same event node
+        return [made[-1]]
+
+    tracker = Tracker({"dictate": parse_keyspec("KEY_F13")})
+    listener = EvdevListener(tracker, lambda n, k: got.append((n, k)), device_factory=factory)
+    listener.start()
+    try:
+        for i in range(2):
+            (tmp_path / f"event{i}").write_text("")        # looks like a hotplug
+            assert wait_for(lambda: len(made) >= i + 2)
+        assert len(listener._devices) == 1                  # only the first stays registered
+        assert all(d.closed for d in made[1:])              # the re-opened copies were closed
+        assert not made[0].closed
+
+        made[0].push(e.KEY_F13, 1)
+        assert wait_for(lambda: got == [("dictate", "press")])
+        time.sleep(0.1)
+        assert got == [("dictate", "press")]                # exactly one event
     finally:
         listener.stop()

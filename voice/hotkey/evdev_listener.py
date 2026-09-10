@@ -88,12 +88,28 @@ class EvdevListener:
         return self._devices_ok
 
     # -- thread -----------------------------------------------------------
+    @staticmethod
+    def _close(dev: object) -> None:
+        try:
+            dev.close()
+        except Exception:
+            log.debug("closing %s failed", getattr(dev, "path", "?"), exc_info=True)
+
     def _rescan(self) -> None:
+        # Dedupe on the device node, not the fd: the factory hands back freshly
+        # opened InputDevices every time, so a fileno check registered each
+        # keyboard again on every /dev/input change - leaking fds and delivering
+        # each keystroke once per registration.
+        registered = {getattr(d, "path", None) for d in self._devices.values()}
         for dev in self._factory():
-            if dev.fileno() not in self._devices:
-                self._devices[dev.fileno()] = dev
-                self._sel.register(dev.fileno(), selectors.EVENT_READ, data=dev)
-                log.info("listening on %s (%s)", dev.path, dev.name)
+            path = getattr(dev, "path", None)
+            if path in registered:
+                self._close(dev)
+                continue
+            self._devices[dev.fileno()] = dev
+            registered.add(path)
+            self._sel.register(dev.fileno(), selectors.EVENT_READ, data=dev)
+            log.info("listening on %s (%s)", path, dev.name)
         self._devices_ok = bool(self._devices)
         self._known_nodes = set(os.listdir(INPUT_DIR)) if os.path.isdir(INPUT_DIR) else set()
 
@@ -119,13 +135,11 @@ class EvdevListener:
                     sel.unregister(key.fd)
                     self._devices.pop(key.fd, None)
                     self._devices_ok = bool(self._devices)
+                    self._close(dev)       # release the fd so a re-plug can be re-opened
             if os.path.isdir(INPUT_DIR) and set(os.listdir(INPUT_DIR)) != self._known_nodes:
                 self._rescan()
         for dev in self._devices.values():
-            try:
-                dev.close()
-            except Exception:
-                pass
+            self._close(dev)
         sel.close()
 
     def _handle(self, code: int, value: int) -> None:

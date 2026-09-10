@@ -46,9 +46,11 @@ SEAT_TIMEOUT_S = 2
 def profile_for_status(config: Config) -> tuple[str, str | None]:
     """The active profile and the language that selected it.
 
-    The language is None whenever the profile was not the one general.language
-    maps to - chosen by hand with `voice profile`, or no map at all - so the
-    status line only claims a language chose the model when one actually did.
+    The language is None whenever the active profile is not the one
+    general.language maps to - no map at all, or a `voice profile` switch away
+    from it - so the status line cannot claim a language chose a model it did
+    not. It is a comparison, not a record of who set it: picking exactly the
+    mapped profile by hand reads the same as the language having chosen it.
     """
     active = str(config.get("stt.active", "") or "")
     language = str(config.get("general.language", "en") or "en")

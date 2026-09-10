@@ -424,3 +424,21 @@ def test_a_profile_another_language_chose_does_not_follow_the_language_picked_he
     again = Config.load()
     assert again.get("general.language") == "en"
     assert again.get("stt.active") == "local"      # not the profile sv chose
+
+
+def test_an_external_language_switch_still_carries_its_paired_profile(qapp):
+    """The other half of the guard above: when the dialog did *not* choose a
+    language, the pair the daemon wrote must survive intact - dropping the
+    profile leaves Swedish transcribed with the English model."""
+    _with_map({"sv": "openai"})                     # language en, active local
+    cfg, dlg, _ = make(qapp)
+    external = Config.load()
+    external.set("general.language", "sv")
+    external.set("stt.active", "openai")            # the daemon writes the pair
+    external.save()
+
+    dlg.hotkey_edit.setText("KEY_RIGHTCTRL")        # unrelated edit, language untouched
+    dlg.save_button.click()
+    again = Config.load()
+    assert again.get("general.language") == "sv"
+    assert again.get("stt.active") == "openai"

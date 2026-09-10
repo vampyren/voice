@@ -370,7 +370,7 @@ class SettingsDialog(QDialog):
         active = on_disk.get("stt.active")
         if not active or active == self._cfg.get("stt.active"):
             return
-        if self._chosen_for_another_language(on_disk, active):
+        if self._language_changed and self._chosen_for_another_language(on_disk, active):
             return
         # Only if this document actually defines it; otherwise the write would
         # produce a config errors() rejects and the save would be blocked.
@@ -383,7 +383,9 @@ class SettingsDialog(QDialog):
         this dialog is about to write a different language.
 
         Carrying it over then pairs the Swedish model with English: the switch
-        that wrote the two was a pair, and only half of it would survive here.
+        that wrote the two wrote them as a pair, and only half of it would
+        survive here. Asked only when the user picked a language in this dialog -
+        otherwise the pair is carried over whole, language included.
         """
         on_disk_language = str(on_disk.get("general.language", "") or "").strip().lower()
         if on_disk.profile_for_language(on_disk_language) != active:

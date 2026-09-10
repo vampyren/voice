@@ -279,6 +279,37 @@ def test_a_helper_that_refuses_to_steal_focus_disables_the_overlay(helper_proces
     client.stop()
 
 
+def test_a_helper_given_up_on_for_no_layer_shell_is_closed_and_reaped(helper_processes):
+    """Giving up is not a reason to hold the pipe: the daemon runs for days, and
+    an unclosed stdin fd plus an unreaped child would outlive every dictation."""
+    client = _client(helper_processes)
+    client.start()
+    proc = helper_processes.made[0]
+    proc.exit(NO_LAYER_SHELL_EXIT)
+    client.send({"state": "recording"})
+    assert client.status() == "disabled: no layer-shell"
+    assert proc.stdin.closed is True, "the helper's stdin fd was leaked"
+    assert proc.waits, "the helper was never reaped"
+    client.stop()
+
+
+def test_a_helper_given_up_on_after_its_second_exit_is_closed_and_reaped(helper_processes):
+    """The other give-up path in _alive(): the restart budget is spent and the
+    helper that exited again is dropped - it has to be let go of too."""
+    client = _client(helper_processes)
+    client.start()
+    helper_processes.made[0].exit(1)
+    client.send({"state": "recording"})                    # spends the one restart
+    assert client.flush(2.0)
+    second = helper_processes.made[1]
+    second.exit(1)
+    client.send({"state": "transcribing"})                 # ... and now it stays off
+    assert client.status() == "disabled: helper exited (1)"
+    assert second.stdin.closed is True, "the helper's stdin fd was leaked"
+    assert second.waits, "the helper was never reaped"
+    client.stop()
+
+
 def test_status_follows_the_helper(helper_processes):
     client = _client(helper_processes)
     assert client.status() == "not started"

@@ -434,11 +434,13 @@ class OverlayClient:
             # The helper refused to show a window that would take the focus.
             # Restarting it would only reproduce that, so the pill stays off.
             self.enabled = False
+            self._let_go()
             self._die(NO_LAYER_SHELL_STATUS,
                       "overlay disabled: no layer-shell; install gtk4-layer-shell or set "
                       "ui.overlay_allow_fallback = true")
             return False
         if self._restarts >= 1:
+            self._let_go()
             self._die(f"disabled: helper exited ({code})",
                       f"recording overlay: helper exited again ({code}); it stays off")
             return False
@@ -453,6 +455,18 @@ class OverlayClient:
             return False                    # nothing was spent; the next send retries
         log.warning("recording overlay helper exited (%s); restarting it once", code)
         return True
+
+    def _let_go(self) -> None:
+        """Caller holds the lock. Drop a helper we have given up on for good.
+
+        Without this its stdin fd and its process entry are held until the
+        daemon exits, which is days. Only ever reached for a helper whose
+        `poll()` already returned, so the close cannot park behind a writer
+        still holding the buffer lock: the dead child's read end is gone and
+        any parked write has been released with EPIPE.
+        """
+        proc, self._proc = self._proc, None
+        self._close(proc)
 
     def _queue_respawn(self) -> bool:
         """Caller holds the lock. Ask the writer thread to bring the helper back.

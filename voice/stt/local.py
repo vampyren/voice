@@ -70,7 +70,10 @@ class LocalTranscriber:
         return f"local {self._profile.get('model')} ({self._device}/{self._compute})"
 
     def transcribe(self, pcm: np.ndarray, language: str | None, prompt: str | None) -> Transcript:
-        self.warmup()
+        try:
+            self.warmup()
+        except Exception as exc:
+            raise TranscriptionError(f"model load failed: {exc}") from exc
         lang = None if language in (None, "", "auto") else language
         start = time.time()
         try:

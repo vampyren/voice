@@ -80,6 +80,16 @@ def test_model_loaded_once_and_errors_wrapped():
     assert len(FakeModel.calls) == 1
 
 
+def test_model_load_failure_is_wrapped():
+    class BoomFactory:
+        def __init__(self, name, device, compute_type, **kw):
+            raise RuntimeError("404")
+
+    t = LocalTranscriber({"model": "small"}, model_factory=BoomFactory, cuda_available=lambda: True)
+    with pytest.raises(TranscriptionError, match="404"):
+        t.transcribe(np.zeros(1600, dtype=np.int16), None, None)
+
+
 @pytest.mark.gpu
 def test_real_cuda_transcribes_fixture_under_one_second():
     import time

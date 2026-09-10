@@ -103,8 +103,14 @@ class PortalListener:
 
         The callback gets a sentence for the user rather than a key name - the
         settings dialog shows it instead of writing it into the hotkey field.
+
+        `_bound is not True` covers the window while the compositor's permission
+        dialog is up: _open() is then driving this connection from the listener
+        thread without _bus_lock (taking it there would park the Qt thread for as
+        long as the dialog stays open), and jeepney does no locking of its own.
         """
-        if self._conn is None or self._session is None or self._version < CONFIGURE_VERSION:
+        if (self._conn is None or self._session is None or self._bound is not True
+                or self._version < CONFIGURE_VERSION):
             callback(NO_CAPTURE_MESSAGE)
             return
         try:

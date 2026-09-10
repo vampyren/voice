@@ -404,6 +404,27 @@ def test_capture_next_falls_back_when_configure_shortcuts_errors():
         listener.stop()
 
 
+def test_capture_next_stands_down_while_the_binding_is_still_pending():
+    """While the compositor's dialog is up, the listener thread is using the
+    connection without the lock (_open takes none), so a second user of it would
+    drive the same jeepney parser and socket from two threads."""
+    listener, conn, _ = make(version=2, open_delay=0.5)
+    listener.start()
+    try:
+        assert wait_for(lambda: conn.bodies("BindShortcuts"), timeout=2)   # sent, answer pending
+        assert listener.devices_ok() is None
+        got: list[str] = []
+        listener.capture_next(got.append)
+        assert got == [NO_CAPTURE_MESSAGE]
+        assert conn.bodies("ConfigureShortcuts") == []
+        started(listener)                                                  # bind resolved
+        got.clear()
+        listener.capture_next(got.append)
+        assert conn.bodies("ConfigureShortcuts") and got[0] != NO_CAPTURE_MESSAGE
+    finally:
+        listener.stop()
+
+
 def test_capture_next_without_a_session_still_answers():
     listener, _, _ = make()
     got: list[str] = []

@@ -255,14 +255,19 @@ def _load_gtk():
         gi.require_version("Gtk4LayerShell", "1.0")
         from gi.repository import Gtk4LayerShell as layer_shell
     except (ImportError, ValueError):
-        log.warning(
-            "overlay: gtk4-layer-shell is not available. Falling back to a plain "
-            "window: the compositor places it, and it WILL take keyboard focus "
-            "when it appears - GTK 4 dropped the accept-focus and focus-on-map "
-            "hints, so only a layer-shell surface can refuse focus. Install "
-            "gtk4-layer-shell, or start the helper with --require-layer-shell to "
-            "have it exit instead.")
+        log.info("overlay: gtk4-layer-shell is not available")
     return Gtk, Gdk, GLib, layer_shell
+
+
+def _warn_about_focus() -> None:
+    """Said once, only when we really are about to show a plain window."""
+    log.warning(
+        "overlay: falling back to a plain window - the compositor places it, and "
+        "it WILL take keyboard focus when it appears, so a paste can land in the "
+        "pill instead of your window. GTK 4 dropped the accept-focus and "
+        "focus-on-map hints, so only a layer-shell surface can refuse focus: "
+        "install gtk4-layer-shell, or pass --require-layer-shell to have the "
+        "helper exit instead of showing this window.")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -279,6 +284,8 @@ def main(argv: list[str] | None = None) -> int:
         log.error("overlay: --require-layer-shell was given but gtk4-layer-shell "
                   "is not installed; not showing a focus-stealing window")
         return refused
+    if layer_shell is None:
+        _warn_about_focus()
     return _Pill(args, gtk, gdk, glib, layer_shell).run()
 
 

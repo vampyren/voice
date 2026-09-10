@@ -206,6 +206,19 @@ Two more common issues doctor doesn't cover directly:
 - **A clipboard manager is recording every dictation.** Klipper (and similar) keeps a
   history entry per dictation, since `voice` pastes via the clipboard. Exclude
   `voice`-owned changes in Klipper's settings, or live with the history.
+- **Remote-desktop sessions (RDP, VNC, GNOME Remote Desktop, a VM console reached
+  remotely).** Two limits apply when your desktop session is not on the machine's
+  physical seat. First, the udev rule grants keyboard access to the *active local seat*
+  user, which in a remote session is usually the login greeter, so `voice doctor` keeps
+  reporting no keyboard access: add yourself to the `input` group instead
+  (`sudo usermod -aG input $USER`, then log out and in; `sudo setfacl -m u:$USER:rw
+  /dev/input/event*` works immediately for the current boot). Second, keystrokes in a
+  remote session arrive through the remote-desktop server, not the kernel input devices,
+  so the push-to-talk key is never seen, and the portal paste keystroke is not delivered
+  to the focused window either. Workaround: drive dictation from the command line
+  (`voice toggle`, or `voice start` with a short `audio.max_seconds`), set
+  `inject.restore_clipboard = false`, and paste with Ctrl+V yourself. A portal-based
+  hotkey that works in remote sessions is on the roadmap.
 
 ## Uninstall
 

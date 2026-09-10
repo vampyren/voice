@@ -56,13 +56,22 @@ ERROR_SIZE = 11.0
 FONT_STACK = ("JetBrains Mono", "DejaVu Sans Mono", "Liberation Mono",
               "Noto Sans Mono", "monospace")
 _FAMILY: str | None = None
+_PROBE: cairo.Context | None = None
+
+
+def _probe_context() -> cairo.Context:
+    """A 1x1 scratch context for measuring text, reused across frames."""
+    global _PROBE
+    if _PROBE is None:
+        _PROBE = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
+    return _PROBE
 
 
 def font_family() -> str:
     """First family in the stack that is actually monospaced, measured once."""
     global _FAMILY
     if _FAMILY is None:
-        probe = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
+        probe = _probe_context()
         for family in FONT_STACK:
             probe.select_font_face(family, cairo.FONT_SLANT_NORMAL,
                                    cairo.FONT_WEIGHT_NORMAL)
@@ -127,7 +136,7 @@ def _badge_width(ctx: cairo.Context, model: OverlayModel, s: float) -> float:
 def natural_width(model: OverlayModel, height: float = PILL_H) -> int:
     """Width the pill needs for this model's counter and badge, in pixels."""
     s = height / PILL_H
-    ctx = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
+    ctx = _probe_context()
     return int(math.ceil(
         (PAD_L + DOT + GAP + WELL_W + GAP + GAP + PAD_R) * s
         + _counter_width(ctx, model, s) + _badge_width(ctx, model, s)))
@@ -274,7 +283,7 @@ def _done_well(ctx, model: OverlayModel, x: float, cy: float, s: float) -> None:
 def _notice_well(ctx, model: OverlayModel, x: float, cy: float, s: float) -> None:
     """`EN -> SV`: where we came from, dim; where we are going, bright."""
     text = model.text or f"{model.prev_lang.upper()} → {model.lang.upper()}"
-    parts = [p.strip() for p in text.split("→")]
+    parts = [p.strip() for p in text.replace("->", "→").split("→")]
     if len(parts) != 2:
         _centred_text(ctx, x + WELL_W * s / 2, cy, text, NOTICE_SIZE * s,
                       NOTICE_TRACK, DIM, model.notice_rise)
@@ -301,6 +310,7 @@ def _error_well(ctx, model: OverlayModel, x: float, cy: float, s: float,
 
 
 def _elide(ctx, text: str, room: float, size: float) -> str:
+    text = text[:200]                       # no point measuring a runaway message
     if text_width(ctx, text, size) <= room:
         return text
     while text and text_width(ctx, text + "…", size) > room:
@@ -329,8 +339,10 @@ def _badge(ctx, model: OverlayModel, x: float, cy: float, s: float, width: float
         return
     size = BADGE_SIZE * s
     height = size + 2 * BADGE_PAD_Y * s + 2 * s
-    border = BADGE_BORDER_BRIGHT if model.state == "notice" else BADGE_BORDER
-    colour = TEXT if model.state == "notice" else DIM
+    leaving = model.state == "notice" and swap < 0.5
+    text = model.prev_lang.upper() if leaving else model.badge_text
+    border = BADGE_BORDER if leaving or model.state != "notice" else BADGE_BORDER_BRIGHT
+    colour = DIM if leaving or model.state != "notice" else TEXT
     top = cy - height / 2 + offset
     ctx.set_line_width(s)
     ctx.set_source_rgba(*border[:3], border[3] * alpha)
@@ -338,7 +350,7 @@ def _badge(ctx, model: OverlayModel, x: float, cy: float, s: float, width: float
     ctx.stroke()
     ctx.set_source_rgba(*colour, alpha)
     _show_text(ctx, x + BADGE_PAD_X * s + s, top + height / 2 + _cap_height(ctx, size) / 2,
-               model.badge_text, size, BADGE_TRACK)
+               text, size, BADGE_TRACK)
 
 
 def _ttl_hairline(ctx, model: OverlayModel, x: float, y: float, w: float, s: float) -> None:
@@ -401,12 +413,26 @@ def draw(ctx: cairo.Context, width: int, height: int, model: OverlayModel) -> No
     ctx.stroke()
 
 
-def render_png(model: OverlayModel, path, width: int | None = None,
-               height: int = int(PILL_H)):
-    """Render one frame to a PNG - used by the tests and to eyeball the design."""
+def render_surface(model: OverlayModel, width: int | None = None,
+                   height: int = int(PILL_H)) -> cairo.ImageSurface:
+    """One frame on its own ARGB32 surface.
+
+    The helper uploads this as a GDK texture rather than drawing into a
+    `Gtk.DrawingArea` context: PyGObject can only hand a `cairo.Context` to a
+    draw function when its cairo foreign-struct converter is installed
+    (Debian's `python3-gi-cairo`), and this way the pill renders identically
+    with or without it.
+    """
     if width is None:
         width = natural_width(model, height)
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, int(width), int(height))
     draw(cairo.Context(surface), int(width), int(height), model)
-    surface.write_to_png(str(path))
+    surface.flush()
+    return surface
+
+
+def render_png(model: OverlayModel, path, width: int | None = None,
+               height: int = int(PILL_H)):
+    """Render one frame to a PNG - used by the tests and to eyeball the design."""
+    render_surface(model, width, height).write_to_png(str(path))
     return path

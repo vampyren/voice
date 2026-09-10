@@ -300,6 +300,23 @@ def test_the_notice_lifetime_hairline_shrinks(tmp_path):
     assert reach(1.99) < reach(0.2) / 4
 
 
+def test_the_notice_well_accepts_an_ascii_arrow(tmp_path):
+    unicode_arrow = render_png(_model("notice", to="sv", text="EN → SV", age=0.5),
+                               tmp_path / "u.png")
+    ascii_arrow = render_png(_model("notice", to="sv", text="EN -> SV", age=0.5),
+                             tmp_path / "a.png")
+    assert open(unicode_arrow, "rb").read() == open(ascii_arrow, "rb").read()
+
+
+def test_the_badge_still_reads_the_old_language_on_its_way_out(tmp_path):
+    leaving = Image(render_png(_model("notice", to="sv", age=0.05), tmp_path / "out.png"))
+    arrived = Image(render_png(_model("notice", to="sv", age=0.5), tmp_path / "in.png"))
+    box = dict(x0=leaving.width - 40, x1=leaving.width - 6)
+    # "EN" leaving and "SV" arriving put ink in different places
+    assert leaving.count(lambda p: p[3] > 60 and max(p[:3]) > 90, **box) > 0
+    assert [p[:3] for p in leaving.pixels(**box)] != [p[:3] for p in arrived.pixels(**box)]
+
+
 def test_the_notice_badge_shows_the_new_language(tmp_path):
     before = Image(render_png(_model("recording"), tmp_path / "before.png"))
     during = Image(render_png(_model("notice", to="sv", age=0.5), tmp_path / "during.png"))

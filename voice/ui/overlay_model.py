@@ -1,9 +1,15 @@
-"""State and waveform model for the recording overlay.
+"""State, waveform and motion model for the recording pill.
 
 Pure Python on purpose: no GTK, no cairo, no real clock. The helper process
 feeds it JSON events and a frame timer, the drawing code reads it, and the
 tests drive it with an injected clock, so every timing rule below is testable
 without a display.
+
+Geometry, colour and motion follow the owner's high-fidelity design
+(`.superpowers/sdd/2026-09-10-phase1-dictation-core/pill-design/README.md`);
+this module owns the *timing* half of it - every animation is exposed as a
+0..1 progress derived from the injected clock - and `overlay_draw` owns the
+shapes.
 """
 from __future__ import annotations
 
@@ -11,62 +17,135 @@ import math
 import time
 from typing import Callable
 
-#: Every state the daemon can put the capsule in.
-STATES = ("hidden", "recording", "transcribing", "done", "error")
+#: Every state the daemon can put the pill in. `notice` is an overlay state:
+#: it remembers what was on screen and goes back to it when it expires.
+STATES = ("hidden", "recording", "transcribing", "done", "notice", "error")
 
-#: One frame at the helper's ~30 fps redraw rate. Decay is expressed per frame
-#: but applied per elapsed second, so a slow or jittery frame still fades by
-#: the same visible amount.
+#: One frame at the helper's ~30 fps redraw rate.
 FRAME = 1.0 / 30.0
 
-#: How long the finished-checkmark and the error message stay on screen.
-DONE_HOLD = 0.6
+#: How long the waveform holds its shape after the last level before it starts
+#: to settle. Levels arrive once per captured chunk - about eight times a
+#: second - while the helper redraws thirty times a second, so a decay applied
+#: on every frame would flatten the history between two chunks and leave a
+#: smooth hump instead of a wave. The stored history is therefore left alone
+#: while audio is flowing, and fades only once the source has gone quiet on us
+#: (capture ended, pw-record died, the helper was starved).
+IDLE_GRACE = 0.2
+
+#: State lifetimes (seconds). `done` auto-dismisses, `notice` returns to
+#: whatever was on screen before it, `error` hides itself.
+DONE_HOLD = 1.2
+NOTICE_TTL = 2.0
 ERROR_HOLD = 2.0
 
-#: Waveform envelope: the fraction of full height the outermost bar may reach,
-#: and the curve that gets it there. Together they give the reference's shape -
-#: tall in the middle, tapering to a whisper at both ends.
-EDGE = 0.10
-TAPER = 0.75
+#: Motion timings, straight from the design.
+BREATH_PERIOD = 2.4          # recording dot, ease-in-out, infinite
+SWEEP_PERIOD = 2.6           # transcribing fill line, indeterminate loop
+SWEEP_HOLD = 0.85            # fraction of the loop spent growing; then it fades
+COLLAPSE = 0.2               # bars melting into the track when transcribing starts
+POP_IN = 0.35                # checkmark container pop
+DASH_DELAY, DASH_DUR = 0.2, 0.5      # checkmark stroke drawing itself in
+LABEL_DELAY, LABEL_DUR = 0.5, 0.4    # "Inserted" rising in
+RISE = 0.3                   # notice text rising in
+SWAP = 0.3                   # language badge swapping out and back in
+
+#: Waveform: 21 bars, resting amplitude envelope, symmetric left to right.
+BARS = 21
+AMP = (.18, .3, .45, .7, .5, .9, .6, .8, 1., .7, .85,
+       .7, 1., .8, .6, .9, .5, .7, .45, .3, .18)
+
+#: A recording bar never sits fully flat: the design animates each bar between
+#: `amp * 0.22` and `amp`, so silence rests at 22% of the envelope.
+BAR_FLOOR = 0.22
 
 #: A jump larger than this means the helper was stalled (or the machine slept);
 #: fade to silence rather than raising the decay to an absurd power.
 MAX_STEP = 2.0
 
 
+def _bezier(x: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    """Evaluate a CSS cubic-bezier(x1, y1, x2, y2) easing at progress `x`."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    t = x
+    for _ in range(8):                      # Newton: the curve is well behaved
+        u = 1 - t
+        cx = 3 * u * u * t * x1 + 3 * u * t * t * x2 + t ** 3
+        dx = 3 * u * u * (x1) + 6 * u * t * (x2 - x1) + 3 * t * t * (1 - x2)
+        if abs(cx - x) < 1e-6 or dx == 0:
+            break
+        t -= (cx - x) / dx
+    t = min(1.0, max(0.0, t))
+    u = 1 - t
+    return 3 * u * u * t * y1 + 3 * u * t * t * y2 + t ** 3
+
+
+def ease_out(t: float) -> float:
+    """The design's cubic-bezier(.16, 1, .3, 1) - everything settles with it."""
+    return _bezier(t, .16, 1., .3, 1.)
+
+
+def ease_in_out(t: float) -> float:
+    """cubic-bezier(.4, 0, .2, 1), used by the transcribing fill line."""
+    return _bezier(t, .4, 0., .2, 1.)
+
+
+def _clamp01(value: float) -> float:
+    return min(1.0, max(0.0, value))
+
+
+def _stage(age: float, delay: float, duration: float) -> float:
+    """Eased 0..1 progress of an animation that starts `delay` after entry."""
+    return ease_out(_clamp01((age - delay) / duration)) if duration > 0 else 1.0
+
+
 class OverlayModel:
-    """What the capsule shows, and when it stops showing it.
+    """What the pill shows, and when it stops showing it.
 
     The waveform is symmetric: `push_level` puts the newest sample in the
     middle and the previous samples ripple outward toward both ends, so the
-    shape reads as a wave travelling out of the microphone.
+    shape reads as a wave travelling out of the microphone. The design calls
+    for per-band levels; we have one broadband RMS per chunk, so the bins are
+    mirrored around the centre instead (see the report for the deviation).
     """
 
-    def __init__(self, bars: int = 28, decay: float = 0.85,
+    def __init__(self, bars: int = BARS, decay: float = 0.85,
+                 lang: str = "en", reduced_motion: bool = False,
                  clock: Callable[[], float] = time.monotonic):
         if bars < 3:
             raise ValueError(f"a waveform needs at least 3 bars, got {bars}")
         self.bars = bars
         self.decay = decay
+        self.reduced_motion = reduced_motion
+        self.lang = lang
+        self.prev_lang = lang
         self._clock = clock
         self._half = (bars + 1) // 2          # history slots: centre out to one end
         self._history = [0.0] * self._half
-        self._envelope = [self._taper(i) for i in range(bars)]
+        self._envelope = [self._amp(i) for i in range(bars)]
         self.state = "hidden"
         self.text: str | None = None
+        self._return_state = "hidden"
         self._now = clock()
         self._state_since = self._now
         self._last_tick = self._now
+        self._last_push = self._now
         self._started_at = self._now
         self._elapsed = 0.0
 
     # -- geometry ---------------------------------------------------------
 
-    def _taper(self, index: int) -> float:
-        """Envelope weight for bar `index`, 1.0 in the middle down to EDGE."""
-        distance = abs(index - (self.bars - 1) / 2.0)
-        curve = math.cos(math.pi / 2 * min(1.0, distance / self._half)) ** TAPER
-        return EDGE + (1.0 - EDGE) * curve
+    def _amp(self, index: int) -> float:
+        """Resting envelope weight for bar `index`, resampled for any bar count."""
+        if self.bars == len(AMP):
+            return AMP[index]
+        pos = index / (self.bars - 1) * (len(AMP) - 1)
+        low = min(len(AMP) - 1, int(pos))
+        high = min(len(AMP) - 1, low + 1)
+        return AMP[low] + (AMP[high] - AMP[low]) * (pos - low)
 
     def _slot(self, index: int) -> int:
         distance = abs(index - (self.bars - 1) / 2.0)
@@ -75,20 +154,42 @@ class OverlayModel:
     # -- input ------------------------------------------------------------
 
     def push_level(self, level: float) -> None:
-        """Feed one microphone level (0..1) into the centre of the waveform."""
+        """Feed one microphone level (0..1) into the centre of the waveform.
+
+        Every level shifts the whole history one place outward, so the bars
+        are a true record of the last `bars // 2` chunks rather than a decayed
+        hump - that is what makes the shape read as a wave.
+        """
         level = min(1.0, max(0.0, float(level)))
         self._history.insert(0, level)
         self._history.pop()
+        self._last_push = self._now
+
+    def set_language(self, code: str) -> None:
+        """Record a language switch; the badge and any notice read from here."""
+        code = (code or "").strip() or self.lang
+        if code != self.lang:
+            self.prev_lang = self.lang
+        self.lang = code
 
     def set_state(self, state: str, text: str | None = None,
                   now: float | None = None) -> None:
         if state not in STATES:
             raise ValueError(f"unknown overlay state: {state!r}")
         now = self._clock() if now is None else now
+        if state == "notice" and self.state != "notice":
+            self._return_state = self.state
+            text = text or f"{self.prev_lang.upper()} → {self.lang.upper()}"
+        self._enter(state, text, now, reset_counter=True)
+
+    def _enter(self, state: str, text: str | None, now: float,
+               reset_counter: bool) -> None:
         self._now = self._last_tick = self._state_since = now
         if state == "recording" and self.state != "recording":
-            self._started_at = now
-            self._elapsed = 0.0
+            if reset_counter:                  # a notice restores, it never restarts
+                self._started_at = now
+                self._elapsed = 0.0
+            self._last_push = now
         if state == "hidden":
             self._history = [0.0] * self._half
             self._elapsed = 0.0
@@ -100,13 +201,19 @@ class OverlayModel:
         now = self._clock() if now is None else now
         dt = min(MAX_STEP, max(0.0, now - self._last_tick))
         self._now = self._last_tick = now
-        if self.state == "recording":
+        if self._counting:
             self._elapsed = max(0.0, now - self._started_at)
-        # Transcribing freezes the last shape on screen; every other state
-        # lets it settle back toward the centre line.
-        if self.state != "transcribing" and dt > 0.0:
-            factor = self.decay ** (dt / FRAME)
+        # Transcribing freezes the last shape on screen (it collapses into the
+        # progress track instead); every other state lets it settle back toward
+        # the centre line once the levels stop arriving.
+        idle = now - self._last_push
+        fading = min(dt, max(0.0, idle - IDLE_GRACE))
+        if self.state not in ("transcribing", "notice") and fading > 0.0:
+            factor = self.decay ** (fading / FRAME)
             self._history = [h * factor for h in self._history]
+        if self.state == "notice" and self.state_age >= NOTICE_TTL:
+            self._enter(self._return_state, None, now, reset_counter=False)
+            return
         hold = {"done": DONE_HOLD, "error": ERROR_HOLD}.get(self.state)
         if hold is not None and self.state_age >= hold:
             self.set_state("hidden", now=now)
@@ -116,6 +223,12 @@ class OverlayModel:
     @property
     def visible(self) -> bool:
         return self.state != "hidden"
+
+    @property
+    def _counting(self) -> bool:
+        """Capture is still running - a notice on top of it does not pause it."""
+        return self.state == "recording" or (
+            self.state == "notice" and self._return_state == "recording")
 
     @property
     def state_age(self) -> float:
@@ -132,7 +245,79 @@ class OverlayModel:
         return f"{whole // 60}:{whole % 60:02d}"
 
     @property
+    def badge_text(self) -> str:
+        return self.lang.upper()
+
+    @property
     def bar_heights(self) -> list[float]:
-        """Bar heights 0..1, mirrored around the centre and tapered at the ends."""
-        return [min(1.0, self._history[self._slot(i)] * self._envelope[i])
-                for i in range(self.bars)]
+        """Bar scale factors 0..1, mirrored about the centre and enveloped.
+
+        While recording the bars rest at `BAR_FLOOR` of the envelope and rise
+        to it with the level, exactly like the design's idle animation.
+        """
+        live = self.state == "recording"
+        amplitude = 0.6 if self.reduced_motion else 1.0
+        heights = []
+        for i in range(self.bars):
+            level = self._history[self._slot(i)]
+            if live:
+                level = BAR_FLOOR + (1.0 - BAR_FLOOR) * level
+            heights.append(min(1.0, self._envelope[i] * level * amplitude))
+        if self.state == "transcribing":
+            remaining = 1.0 - ease_out(_clamp01(self.state_age / COLLAPSE))
+            heights = [h * remaining for h in heights]
+        return heights
+
+    # -- motion (pure functions of the injected clock) ---------------------
+
+    @property
+    def breath(self) -> float:
+        """0..1 breathing phase of the recording dot: 0 at rest, 1 at the peak."""
+        if self.reduced_motion:
+            return 0.5
+        phase = (self.state_age % BREATH_PERIOD) / BREATH_PERIOD
+        return (1.0 - math.cos(2 * math.pi * phase)) / 2
+
+    @property
+    def sweep(self) -> tuple[float, float]:
+        """Transcribing fill line as (width 0..1, opacity 0..1)."""
+        if self.reduced_motion:
+            return 0.35, 1.0
+        phase = (self.state_age % SWEEP_PERIOD) / SWEEP_PERIOD
+        width = ease_in_out(_clamp01(phase / SWEEP_HOLD))
+        fade = 1.0 if phase <= SWEEP_HOLD else 1.0 - (phase - SWEEP_HOLD) / (1 - SWEEP_HOLD)
+        return width, _clamp01(fade)
+
+    @property
+    def check_pop(self) -> tuple[float, float]:
+        """Checkmark container as (scale, opacity) during its .35 s pop-in."""
+        progress = ease_out(_clamp01(self.state_age / POP_IN))
+        scale = 0.6 + (1.08 - 0.6) * (progress / 0.6) if progress < 0.6 else \
+            1.08 + (1.0 - 1.08) * ((progress - 0.6) / 0.4)
+        return scale, progress
+
+    @property
+    def check_draw(self) -> float:
+        """0..1 of the checkmark stroke that has been drawn in."""
+        return _stage(self.state_age, DASH_DELAY, DASH_DUR)
+
+    @property
+    def label_rise(self) -> float:
+        """0..1 progress of the "Inserted" label rising into place."""
+        return _stage(self.state_age, LABEL_DELAY, LABEL_DUR)
+
+    @property
+    def notice_rise(self) -> float:
+        return _stage(self.state_age, 0.0, RISE)
+
+    @property
+    def badge_swap(self) -> float:
+        """0..1 of the badge's out-and-back-in swap while a notice is showing."""
+        if self.state != "notice":
+            return 1.0
+        return _clamp01(self.state_age / SWAP)
+
+    @property
+    def ttl(self) -> float:
+        """The notice's remaining lifetime, 1 down to 0 over exactly NOTICE_TTL."""
+        return _clamp01(1.0 - self.state_age / NOTICE_TTL)

@@ -128,17 +128,17 @@ class Daemon:
     # -- runtime ------------------------------------------------------------
     def run(self) -> int:
         if is_running():
-            log.info("%s already running; opening settings instead", APP_NAME)
-            try:
-                send({"cmd": "settings"})
-            except IPCError:
-                pass
-            return 0
+            return self._hand_over()
         app = QApplication.instance() or QApplication(sys.argv)
         app.setQuitOnLastWindowClosed(False)
         app.setApplicationName(APP_NAME)
         self.build()
-        self._server.start()
+        try:
+            self._server.start()
+        except IPCError:
+            # Another instance claimed the socket between the check above and the
+            # bind. Hand over without starting the listener or touching its socket.
+            return self._hand_over()
         self.listener.start()
         self.tray.show()
         from voice.pipeline import _thread_executor
@@ -149,6 +149,15 @@ class Daemon:
         code = app.exec()
         self.shutdown()
         return code
+
+    def _hand_over(self) -> int:
+        """Defer to the daemon that already owns the socket."""
+        log.info("%s already running; opening settings instead", APP_NAME)
+        try:
+            send({"cmd": "settings"})
+        except IPCError:
+            pass
+        return 0
 
     def _warmup(self) -> None:
         try:

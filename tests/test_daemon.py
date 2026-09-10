@@ -218,3 +218,31 @@ def test_run_is_noop_when_already_running(isolated_xdg, qapp, monkeypatch):
     d.build = fail_build
     assert d.run() == 0
     assert sent and sent[-1]["cmd"] == "settings"
+
+
+def test_run_hands_over_when_the_socket_is_taken_after_the_initial_check(isolated_xdg, qapp, monkeypatch):
+    """A second instance that passes is_running() but loses the bind race must hand
+    over to the live daemon, never unlink its socket."""
+    from PySide6.QtWidgets import QApplication
+
+    from voice import ipc
+
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    # If run() ever reaches the event loop here it has already taken over the
+    # socket; 99 makes that unmistakable instead of hanging the suite.
+    monkeypatch.setattr(QApplication, "exec", lambda self: 99)
+    live = ipc.Server(lambda req: {"ok": True, "echo": req.get("cmd")})
+    live.start()
+    monkeypatch.setattr("voice.daemon.is_running", lambda: False)      # simulate losing the race
+    sent = []
+    monkeypatch.setattr("voice.daemon.send", lambda req: sent.append(req) or {"ok": True})
+    listener = FakeListener()
+    d = Daemon(Config.load(), listener=listener, sender=FakeSender(), tray=FakeTray())
+    try:
+        assert d.run() == 0
+        assert sent and sent[-1]["cmd"] == "settings"
+        assert listener.started is False                               # never took over the keyboard
+        assert ipc.send({"cmd": "ping"}) == {"ok": True, "echo": "ping"}   # live socket survived
+    finally:
+        live.stop()

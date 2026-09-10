@@ -18,6 +18,9 @@ log = logging.getLogger(__name__)
 # the single-threaded accept loop forever - it gets dropped after this timeout.
 CLIENT_READ_TIMEOUT_S = 5.0
 
+# How long the "is a daemon listening?" probe waits for connect() to complete.
+CONNECT_PROBE_TIMEOUT_S = 1.0
+
 
 class IPCError(RuntimeError):
     pass
@@ -32,6 +35,10 @@ class Server:
 
     def start(self) -> None:
         if self.path.exists():
+            # Only a socket nothing is listening on may be unlinked: a busy daemon
+            # still accepts connections, and removing its socket would strand it.
+            if _listening(self.path):
+                raise IPCError("daemon already running")
             self.path.unlink()
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.bind(str(self.path))
@@ -92,8 +99,24 @@ def send(command: dict, path: Path | None = None, timeout: float = 5.0) -> dict:
     return json.loads(line.decode()) if line else {"ok": False, "error": "empty reply"}
 
 
-def is_running(path: Path | None = None) -> bool:
+def _listening(path: Path) -> bool:
+    """True when something is accepting connections on `path`.
+
+    A bare connect() is the right probe: the kernel accepts it into the listen
+    backlog even while the single-threaded server is stuck inside a handler, so
+    a busy daemon cannot be mistaken for a dead one (a ping round-trip could be).
+    """
     try:
-        return send({"cmd": "ping"}, path, timeout=1.0).get("ok", False)
-    except IPCError:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(CONNECT_PROBE_TIMEOUT_S)
+            s.connect(str(path))
+        return True
+    except (FileNotFoundError, ConnectionRefusedError):
         return False
+    except OSError as exc:
+        log.debug("socket probe of %s failed: %s", path, exc)
+        return False
+
+
+def is_running(path: Path | None = None) -> bool:
+    return _listening(path or paths.socket_path())

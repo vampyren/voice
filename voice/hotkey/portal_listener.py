@@ -94,7 +94,7 @@ class PortalListener:
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=RECV_SLICE_S * 4)
+            self._thread.join(timeout=RECV_SLICE_S * 2)
             self._thread = None
         self._close()
 
@@ -136,12 +136,29 @@ class PortalListener:
         return self._bound
 
     # -- setup --------------------------------------------------------------
+    @staticmethod
+    def _signal_rule() -> MatchRule:
+        return MatchRule(type="signal", interface=INTERFACE)
+
+    def _subscribe(self) -> None:
+        """Ask the bus for the shortcut signals.
+
+        Done inside _open() so a single path decides `_bound`: without the match
+        rule no Activated can ever arrive, and reporting a healthy backend then
+        would leave `voice status` saying "ok" while every hotkey is dead.
+        """
+        reply = self._conn.send_and_get_reply(message_bus.AddMatch(self._signal_rule()),
+                                              timeout=CALL_TIMEOUT_S)
+        if reply.header.message_type.name == "error":
+            raise PortalError(f"could not subscribe to portal shortcut signals: {reply.body}")
+
     def _open(self) -> None:
         if not self._shortcuts:
             # BindShortcuts with an empty list succeeds, which would report a
             # healthy backend that can never fire.
             raise PortalError("no portal shortcut trigger configured (hotkeys.portal_dictate is empty)")
         self._conn = self._bus_factory(bus="SESSION")
+        self._subscribe()
         self._register_app_id()
         self._version = self._portal_version()
         try:
@@ -220,7 +237,10 @@ class PortalListener:
         except Exception as exc:
             # No hotkeys is bad, but a daemon that refuses to start is worse: the
             # user still has the tray and the CLI, and devices_ok() says why.
-            log.error("portal global shortcuts unavailable: %s", exc)
+            # Quitting mid-open lands here too (stop() closes the socket under
+            # us): that is not a portal problem and must stay quiet.
+            log.log(logging.DEBUG if self._stop.is_set() else logging.ERROR,
+                    "portal global shortcuts unavailable: %s", exc)
             self._bound = False
             self._close()
             self._announce()
@@ -229,7 +249,9 @@ class PortalListener:
         self._listen()
 
     def _announce(self) -> None:
-        if self._on_ready is None:
+        # Shutting down: the user quit, the desktop refused nothing. Announcing
+        # here pops a critical "shortcut not registered" notification on quit.
+        if self._on_ready is None or self._stop.is_set():
             return
         try:
             self._on_ready(bool(self._bound))
@@ -237,15 +259,8 @@ class PortalListener:
             log.exception("hotkey readiness callback failed")
 
     def _listen(self) -> None:
-        rule = MatchRule(type="signal", interface=INTERFACE)
-        try:
-            with self._bus_lock:
-                self._conn.send_and_get_reply(message_bus.AddMatch(rule), timeout=CALL_TIMEOUT_S)
-        except Exception:
-            log.exception("could not subscribe to portal shortcut signals")
-            return
         # bufsize: a chord pressed while the loop is busy must not drop its release.
-        with self._conn.filter(rule, bufsize=64) as queue:
+        with self._conn.filter(self._signal_rule(), bufsize=64) as queue:
             while not self._stop.is_set():
                 try:
                     with self._bus_lock:

@@ -55,12 +55,13 @@ class FakeConn:
     """
 
     def __init__(self, *, bind_code=0, create_code=0, version=1, registry=True, configure_error=False,
-                 create_error=None, open_delay=0.0, drop_after_bind=False):
+                 create_error=None, open_delay=0.0, drop_after_bind=False, subscribe_error=False):
         self.unique_name = ":1.99"
         self.bind_code, self.create_code = bind_code, create_code
         self.version, self.registry, self.configure_error = version, registry, configure_error
         self.create_error = create_error
         self.open_delay, self.drop_after_bind = open_delay, drop_after_bind
+        self.subscribe_error = subscribe_error
         self.calls: list[tuple[str, tuple]] = []
         self.closed = False
         self._pending: str | None = None
@@ -81,6 +82,8 @@ class FakeConn:
         member = msg.header.fields.get(HeaderFields.member)
         with self._lock:
             self.calls.append((member, msg.body))
+        if member == "AddMatch" and self.subscribe_error and "Response" not in str(msg.body[0]):
+            return _Reply("error", ("match rule refused",))   # the signal subscription, not a Request
         if member == "Introspect":
             return _Reply(body=(WITH_REGISTRY if self.registry else WITHOUT_REGISTRY,))
         if member == "Get":
@@ -250,6 +253,34 @@ def test_a_lost_portal_connection_stops_reporting_healthy():
         assert wait_for(lambda: listener.devices_ok() is False)
     finally:
         listener.stop()
+
+
+def test_a_failed_signal_subscription_is_a_bind_failure():
+    """Without the match rule no Activated can ever arrive, so reporting a healthy
+    backend would leave `voice status` saying ok while every hotkey is dead."""
+    ready: list[bool] = []
+    listener, _, _ = make(on_ready=ready.append, subscribe_error=True)
+    listener.start()
+    started(listener)
+    try:
+        assert listener.devices_ok() is False
+        assert ready == [False]
+        assert wait_for(lambda: not any(t.name == "portal-listener" for t in threading.enumerate()))
+    finally:
+        listener.stop()
+
+
+def test_quitting_while_the_permission_dialog_is_open_says_nothing():
+    """stop() during the compositor's dialog must not fire the "not registered"
+    notification: the user quit, the desktop did not refuse anything."""
+    ready: list[bool] = []
+    listener, _, _ = make(on_ready=ready.append, open_delay=0.3)
+    listener.start()
+    time.sleep(0.02)                                         # thread is inside _open
+    begin = time.time()
+    listener.stop()
+    assert time.time() - begin < 1.5, "stop() stalled while quitting"
+    assert wait_for(lambda: True, timeout=0.4) and ready == [], f"announced {ready} after stop()"
 
 
 # -- signals -------------------------------------------------------------------

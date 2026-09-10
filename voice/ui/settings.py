@@ -15,7 +15,8 @@ from voice.audio.capture import Source
 from voice.config import INJECT_MODES, Config, is_language_code
 from voice.hotkey.keyspec import parse_keyspec
 from voice.hotkey.portal_listener import DIALOG_MESSAGE, NO_TRIGGER
-from voice.ui.placement import HORIZONTALS, MARGIN_LIMIT, VERTICALS, split_position
+from voice.ui.pill_placer import PillPlacer
+from voice.ui.placement import placement_summary
 
 log = logging.getLogger(__name__)
 
@@ -33,14 +34,13 @@ _LANGUAGES = [("English", "en"), ("Swedish", "sv"), ("Auto-detect", "auto")]
 #: inject.mode, in the order the combo shows it; the data is the config value.
 _INJECT_MODE_LABELS = {"paste": "Paste automatically",
                        "clipboard": "Copy only (press Ctrl+V yourself)"}
-#: The pill's placement, as two combos: the halves in the order they read.
-_PILL_VERTICALS = [(name.capitalize(), name) for name in VERTICALS]
-_PILL_HORIZONTALS = [(name.capitalize(), name) for name in HORIZONTALS]
-#: Under those two rows: what an anchored pill can and cannot do.
+#: Under the preview: what dragging it there can and cannot do.
 PILL_PLACEMENT_NOTE = (
-    "The pill is anchored to the screen rather than dragged. A \"middle\" or \"center\" half "
-    "is centred by the compositor and ignores its margin, and placement needs "
-    "gtk4-layer-shell - without it the compositor decides where the pill goes.")
+    "Drag the pill to where it should appear; arrow keys nudge it a pixel at a time, "
+    "Shift+arrow ten. Dropping it near one of the nine anchors takes that anchor exactly. "
+    "It is the anchor and the gap that are saved, not a free position, because that is "
+    "what a compositor can be asked for - and it needs gtk4-layer-shell: without one the "
+    "compositor decides where the pill goes and this setting does nothing.")
 #: The "leave stt.active alone for this language" row of the profile table.
 KEEP_CURRENT = "(keep current)"
 #: The portal shortcuts, in the order they are shown, with their labels.
@@ -198,35 +198,18 @@ class SettingsDialog(QDialog):
         # Connected after the items exist, and for the same reason as the language
         # combo: only a change made *here* may overwrite what the file says.
         self.inject_mode_combo.currentIndexChanged.connect(self._on_inject_mode_picked)
-        self.pill_vertical_combo = QComboBox()
-        for label, name in _PILL_VERTICALS:
-            self.pill_vertical_combo.addItem(label, name)
-        self.pill_horizontal_combo = QComboBox()
-        for label, name in _PILL_HORIZONTALS:
-            self.pill_horizontal_combo.addItem(label, name)
-        self.pill_margin_x = QSpinBox()
-        self.pill_margin_y = QSpinBox()
-        for spin in (self.pill_margin_x, self.pill_margin_y):
-            spin.setRange(-MARGIN_LIMIT, MARGIN_LIMIT)     # the range errors() accepts
-        # Connected after the items exist, and for the same reason as the two
-        # combos above: only a change made *here* may overwrite the file, which
-        # can be hand-edited while this window sits open.
-        for combo in (self.pill_vertical_combo, self.pill_horizontal_combo):
-            combo.currentIndexChanged.connect(self._on_pill_placement_picked)
-        for spin in (self.pill_margin_x, self.pill_margin_y):
-            spin.valueChanged.connect(self._on_pill_placement_picked)
+        # This screen in miniature, with the pill in it. Only a drag or a nudge
+        # *here* may overwrite what the file says - it can be hand-edited while
+        # this window sits open - so the widget stays quiet when it is merely
+        # shown a placement.
+        self.pill_placer = PillPlacer()
+        self.pill_placer.placement_changed.connect(self._on_pill_placement_picked)
+        self.pill_placement_label = QLabel()
+        self.pill_placement_label.setWordWrap(True)
         placement = QHBoxLayout()
-        placement.addWidget(self.pill_vertical_combo)
-        placement.addWidget(self.pill_horizontal_combo)
-        margins = QHBoxLayout()
-        margins.addWidget(QLabel("x"))
-        margins.addWidget(self.pill_margin_x)
-        margins.addSpacing(12)
-        margins.addWidget(QLabel("y"))
-        margins.addWidget(self.pill_margin_y)
-        # Two small boxes and their labels, not two half-width fields: the row
-        # keeps each spin box beside the letter it belongs to.
-        margins.addStretch()
+        placement.addWidget(self.pill_placer)
+        placement.addWidget(self.pill_placement_label, 1,
+                            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.language_profile_table = QTableWidget(0, 2)
         self.language_profile_table.setHorizontalHeaderLabels(["Language", "Profile"])
         self.language_profile_table.horizontalHeader().setStretchLastSection(True)
@@ -238,7 +221,6 @@ class SettingsDialog(QDialog):
         form.addRow("Notifications", self.notifications_combo)
         form.addRow("Text insertion", self.inject_mode_combo)
         form.addRow("Pill position", placement)
-        form.addRow("Pill margins", margins)
         form.addRow(_wrapped(PILL_PLACEMENT_NOTE))
         form.addRow("Profile per language", self.language_profile_table)
         form.addRow(hint)
@@ -411,22 +393,18 @@ class SettingsDialog(QDialog):
         self._pill_placement_changed = False
 
     def _show_pill_placement(self, position: str, margin_x: int, margin_y: int) -> None:
-        """Put a placement into the four widgets. Normalised on the way in, so a
-        file holding one of the two older values - or something that is not a
-        placement at all - still shows the pill somewhere real."""
-        vertical, horizontal = split_position(position)
-        self.pill_vertical_combo.setCurrentIndex(
-            max(0, self.pill_vertical_combo.findData(vertical)))
-        self.pill_horizontal_combo.setCurrentIndex(
-            max(0, self.pill_horizontal_combo.findData(horizontal)))
-        self.pill_margin_x.setValue(margin_x)
-        self.pill_margin_y.setValue(margin_y)
+        """Put a placement into the preview and say it in words beside it.
+
+        Fed from `Config.overlay_placement()`, so a file holding one of the two
+        older values - or something that is not a placement at all - still shows
+        the pill somewhere real.
+        """
+        self.pill_placer.set_placement(position, margin_x, margin_y)
+        self.pill_placement_label.setText(placement_summary(position, margin_x, margin_y))
 
     def _chosen_pill_placement(self) -> tuple[str, int, int]:
         """The placement as this dialog would save it."""
-        return (f"{self.pill_vertical_combo.currentData()}-"
-                f"{self.pill_horizontal_combo.currentData()}",
-                self.pill_margin_x.value(), self.pill_margin_y.value())
+        return self.pill_placer.placement()
 
     def _load_language_profiles(self, mapping: dict[str, str] | None = None) -> None:
         """One row per general.languages entry, each with the profiles that exist.
@@ -474,9 +452,10 @@ class SettingsDialog(QDialog):
     def _on_inject_mode_picked(self, index: int) -> None:
         self._inject_mode_changed = True
 
-    def _on_pill_placement_picked(self, _value) -> None:
-        """Any of the four widgets: the placement is one setting to the user."""
+    def _on_pill_placement_picked(self) -> None:
+        """The owner dragged or nudged the pill in the preview."""
         self._pill_placement_changed = True
+        self.pill_placement_label.setText(placement_summary(*self.pill_placer.placement()))
 
     def set_replacement_row(self, row: int, src: str, dst: str, flags: str = "") -> None:
         for col, val in enumerate((src, dst, flags)):

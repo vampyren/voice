@@ -24,8 +24,11 @@ from voice.ui.placement import (DEFAULT_MARGIN_X, DEFAULT_MARGIN_Y, DEFAULT_POSI
 #: what `overlay_draw.natural_width` gives a recording pill. The preview is to
 #: scale, so this only has to be right enough to aim with.
 PILL_SIZE = (280, 44)
-#: The preview's height in widget pixels; the width follows the screen's shape.
-PREVIEW_H = 150
+#: The preview's box in widget pixels: the screen is fitted inside it, keeping
+#: its own shape, so an ultrawide gets shorter rather than pushing the dialog
+#: sideways.
+PREVIEW_H = 170
+PREVIEW_MAX_W = 320
 #: How near an anchor a drop must land to take it exactly, in widget pixels.
 SNAP_PX = 6
 #: Arrow keys, in screen pixels; Shift multiplies by ten.
@@ -102,7 +105,8 @@ class PillPlacer(QWidget):
 
     def sizeHint(self) -> QSize:
         width, height = self._screen
-        return QSize(max(1, round(PREVIEW_H * width / height)), PREVIEW_H)
+        scale = min(PREVIEW_MAX_W / width, PREVIEW_H / height)
+        return QSize(max(1, round(width * scale)), max(1, round(height * scale)))
 
     def _screen_rect(self) -> QRectF:
         """The screen, drawn as large as fits while keeping its own shape."""

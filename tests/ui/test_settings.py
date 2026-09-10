@@ -694,54 +694,76 @@ def _with_config(qapp, **values):
     return make(qapp)
 
 
+def _drag_pill_to(dlg, position, margin_x, margin_y):
+    """As if the owner had dragged the pill there in the preview."""
+    dlg.pill_placer.set_placement(position, margin_x, margin_y)
+    dlg.pill_placer.placement_changed.emit()
+
+
 def test_the_general_tab_loads_the_pill_placement(qapp):
     cfg, dlg, _ = _with_config(qapp, **{"ui.overlay_position": "top-right",
                                         "ui.overlay_margin_x": 12,
                                         "ui.overlay_margin_y": 60})
-    assert dlg.pill_vertical_combo.currentData() == "top"
-    assert dlg.pill_horizontal_combo.currentData() == "right"
-    assert (dlg.pill_margin_x.value(), dlg.pill_margin_y.value()) == (12, 60)
+    assert dlg.pill_placer.placement() == ("top-right", 12, 60)
+    assert "top-right" in dlg.pill_placement_label.text()
+    assert "12" in dlg.pill_placement_label.text()
+    assert "60" in dlg.pill_placement_label.text()
 
 
-def test_the_placement_combos_offer_every_half(qapp):
+def test_the_preview_starts_on_the_shipped_placement(qapp):
     cfg, dlg, _ = make(qapp)
-    assert [dlg.pill_vertical_combo.itemData(i)
-            for i in range(dlg.pill_vertical_combo.count())] == ["top", "middle", "bottom"]
-    assert [dlg.pill_horizontal_combo.itemData(i)
-            for i in range(dlg.pill_horizontal_combo.count())] == ["left", "center", "right"]
-    assert dlg.pill_vertical_combo.currentData() == "bottom"      # the shipped default
-    assert dlg.pill_horizontal_combo.currentData() == "center"
-    assert (dlg.pill_margin_x.value(), dlg.pill_margin_y.value()) == (0, 48)
+    assert dlg.pill_placer.placement() == ("bottom-center", 0, 48)
+    width, height = dlg.pill_placer.screen_size()
+    assert width > 0 and height > 0
 
 
 def test_an_older_position_shows_as_the_placement_it_means(qapp):
     cfg, dlg, _ = _with_config(qapp, **{"ui.overlay_position": "top"})
-    assert (dlg.pill_vertical_combo.currentData(),
-            dlg.pill_horizontal_combo.currentData()) == ("top", "center")
+    assert dlg.pill_placer.placement() == ("top-center", 0, 48)
 
 
-def test_saving_writes_the_placement_and_the_margins(qapp):
+def test_saving_writes_the_placement_the_pill_was_dragged_to(qapp):
     cfg, dlg, _ = make(qapp)
-    dlg.pill_vertical_combo.setCurrentIndex(dlg.pill_vertical_combo.findData("middle"))
-    dlg.pill_horizontal_combo.setCurrentIndex(dlg.pill_horizontal_combo.findData("left"))
-    dlg.pill_margin_x.setValue(-24)
-    dlg.pill_margin_y.setValue(0)
+    _drag_pill_to(dlg, "middle-left", 24, 0)
+    assert "middle-left" in dlg.pill_placement_label.text()
     dlg.save_button.click()
     assert dlg.error_label.text() == ""
     again = Config.load()
     assert again.get("ui.overlay_position") == "middle-left"
-    assert (again.get("ui.overlay_margin_x"), again.get("ui.overlay_margin_y")) == (-24, 0)
+    assert (again.get("ui.overlay_margin_x"), again.get("ui.overlay_margin_y")) == (24, 0)
     assert again.errors() == []
 
 
-def test_the_margin_spin_boxes_stop_at_the_range_the_config_accepts(qapp):
-    cfg, dlg, _ = make(qapp)
-    dlg.pill_margin_x.setValue(9999)
-    dlg.pill_margin_y.setValue(-9999)
-    assert (dlg.pill_margin_x.value(), dlg.pill_margin_y.value()) == (2000, -2000)
+def test_nudging_the_pill_with_the_keyboard_reaches_the_config(qapp):
+    """The whole path, driven the way a user drives it: a key on the preview,
+    then Save."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    cfg, dlg, _ = _with_config(qapp, **{"ui.overlay_position": "bottom-right",
+                                        "ui.overlay_margin_x": 10,
+                                        "ui.overlay_margin_y": 10})
+    dlg.show()
+    QTest.qWaitForWindowExposed(dlg)
+    QTest.keyClick(dlg.pill_placer, Qt.Key.Key_Up)
+    QTest.keyClick(dlg.pill_placer, Qt.Key.Key_Left, Qt.KeyboardModifier.ShiftModifier)
+    assert dlg.pill_placer.placement() == ("bottom-right", 20, 11)
     dlg.save_button.click()
-    assert dlg.error_label.text() == ""
-    assert Config.load().errors() == []
+    again = Config.load()
+    assert again.get("ui.overlay_position") == "bottom-right"
+    assert (again.get("ui.overlay_margin_x"), again.get("ui.overlay_margin_y")) == (20, 11)
+    dlg.close()
+
+
+def test_a_placement_no_one_touched_is_written_back_unchanged(qapp):
+    """Opening the window and pressing Save must not move the pill."""
+    cfg, dlg, _ = _with_config(qapp, **{"ui.overlay_position": "middle-center",
+                                        "ui.overlay_margin_x": 0,
+                                        "ui.overlay_margin_y": 48})
+    dlg.save_button.click()
+    again = Config.load()
+    assert again.get("ui.overlay_position") == "middle-center"
+    assert (again.get("ui.overlay_margin_x"), again.get("ui.overlay_margin_y")) == (0, 48)
 
 
 def test_save_does_not_revert_a_placement_changed_elsewhere(qapp):
@@ -760,37 +782,28 @@ def test_save_does_not_revert_a_placement_changed_elsewhere(qapp):
     assert again.get("ui.overlay_position") == "bottom-right"
     assert again.get("ui.overlay_margin_x") == 30
     assert again.get("hotkeys.dictate") == "KEY_RIGHTCTRL"
-    assert dlg.pill_horizontal_combo.currentData() == "right"    # and it shows what was saved
-    assert dlg.pill_margin_x.value() == 30
+    # and the preview shows what was really saved
+    assert dlg.pill_placer.placement() == ("bottom-right", 30, 48)
+    assert "bottom-right" in dlg.pill_placement_label.text()
 
 
-def test_a_placement_chosen_here_wins_over_the_on_disk_value(qapp):
+def test_a_placement_dragged_here_wins_over_the_on_disk_value(qapp):
     cfg, dlg, _ = make(qapp)
-    dlg.pill_vertical_combo.setCurrentIndex(dlg.pill_vertical_combo.findData("top"))
+    _drag_pill_to(dlg, "top-center", 0, 20)
 
     external = Config.load()
     external.set("ui.overlay_position", "bottom-right")
     external.save()
 
     dlg.save_button.click()
-    assert Config.load().get("ui.overlay_position") == "top-center"
-
-
-def test_a_margin_typed_here_wins_over_the_on_disk_value(qapp):
-    cfg, dlg, _ = make(qapp)
-    dlg.pill_margin_y.setValue(96)
-
-    external = Config.load()
-    external.set("ui.overlay_margin_y", 10)
-    external.save()
-
-    dlg.save_button.click()
-    assert Config.load().get("ui.overlay_margin_y") == 96
+    again = Config.load()
+    assert again.get("ui.overlay_position") == "top-center"
+    assert again.get("ui.overlay_margin_y") == 20
 
 
 def test_reload_from_disk_clears_the_placement_flag(qapp):
     cfg, dlg, _ = make(qapp)
-    dlg.pill_vertical_combo.setCurrentIndex(dlg.pill_vertical_combo.findData("top"))
+    _drag_pill_to(dlg, "top-left", 5, 5)
     dlg.reload_from_disk()
 
     external = Config.load()
@@ -804,8 +817,7 @@ def test_a_nonsense_placement_on_disk_does_not_block_a_save(qapp):
     """errors() rejects it, so the dialog has to show something sane and write
     that back rather than refusing every save until the file is hand-fixed."""
     cfg, dlg, _ = _with_config(qapp, **{"ui.overlay_position": "sideways"})
-    assert (dlg.pill_vertical_combo.currentData(),
-            dlg.pill_horizontal_combo.currentData()) == ("bottom", "center")
+    assert dlg.pill_placer.placement() == ("bottom-center", 0, 48)
     dlg.save_button.click()
     assert dlg.error_label.text() == ""
     assert Config.load().get("ui.overlay_position") == "bottom-center"

@@ -138,3 +138,19 @@ def _half(value: int, extent: int, size: int, names: tuple[str, str, str],
         return centre_name, 0
     name, margin = (near, value) if value <= centre else (far, extent - size - value)
     return name, 0 if abs(margin) <= snap else clamp_margin(int(margin), 0)
+
+
+def placement_summary(position: str, margin_x: int, margin_y: int) -> str:
+    """A placement in words, for the settings window to show beside the preview.
+
+    A centred half's margin is left out: it does nothing, and printing it would
+    invite the owner to change a number that cannot move the pill.
+    """
+    position = normalise_position(position)
+    vertical, horizontal = split_position(position)
+    parts = []
+    if HORIZONTALS[horizontal]:
+        parts.append(f"{int(margin_x)} px from the {horizontal}")
+    if VERTICALS[vertical]:
+        parts.append(f"{int(margin_y)} px from the {vertical}")
+    return f"{position} - " + (", ".join(parts) if parts else "centred both ways")

@@ -14,6 +14,7 @@ from voice.ui.placement import (
     pill_origin,
     placement_at,
     placement_note,
+    placement_summary,
 )
 
 
@@ -169,3 +170,18 @@ def test_a_pill_dropped_past_the_far_edge_is_still_a_sane_margin():
     """Nothing in the settings window can drop it there, but a hand-edited
     config can, and the arithmetic must not hand back a margin errors() rejects."""
     assert placement_at(-500, 5000, SCREEN, PILL) == ("bottom-left", -500, -MARGIN_LIMIT)
+
+
+# -- saying it in words ---------------------------------------------------
+
+@pytest.mark.parametrize("placement,expected", [
+    (("top-right", 12, 60), "top-right - 12 px from the right, 60 px from the top"),
+    (("bottom-center", 0, 48), "bottom-center - 48 px from the bottom"),
+    (("middle-left", 24, 99), "middle-left - 24 px from the left"),
+    (("middle-center", 5, 5), "middle-center - centred both ways"),
+    (("bottom", 0, 48), "bottom-center - 48 px from the bottom"),
+])
+def test_a_placement_reads_back_as_a_sentence(placement, expected):
+    """The settings window shows this beside the preview: the margin that does
+    nothing on a centred half is not mentioned, because it does nothing."""
+    assert placement_summary(*placement) == expected

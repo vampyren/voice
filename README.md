@@ -145,12 +145,21 @@ Changing any of the three takes effect on `voice reload` and on Save in the
 settings window - the daemon restarts the pill helper - without restarting the
 daemon itself.
 
-**The pill cannot be dragged.** It is deliberately input-transparent - it never
-takes a click, which is also what keeps it from stealing focus mid-dictation -
-and a layer-shell surface has no position to drag, only anchors and margins.
-Placement is the setting instead. Where there is no layer-shell (GNOME, see
-below) not even that applies: the compositor places the window, and the helper
-says so once in the log rather than pretending the setting was honoured.
+**Drag it where you want it.** The settings window's General tab shows this
+screen in miniature with the pill in it: drag the pill, and the drop is saved as
+the nearest anchor plus the gap it was left with. Dropping it near one of the
+nine anchors takes that anchor exactly; the ghosts that appear while dragging
+are where those anchors sit. Arrow keys nudge it a pixel at a time and
+Shift+arrow ten, and the placement is spelled out in words beside the preview.
+
+**The pill on screen cannot itself be dragged.** It is deliberately
+input-transparent - it never takes a click, which is also what keeps it from
+stealing focus mid-dictation - and a layer-shell surface has no position to
+drag, only anchors and margins. That is why the dragging happens in the
+preview, and why what is stored is an anchor and a margin. Where there is no
+layer-shell (GNOME, see below) not even that applies: the compositor places the
+window, and the helper says so once in the log rather than pretending the
+setting was honoured.
 
 #### The pill and auto-paste, per desktop
 

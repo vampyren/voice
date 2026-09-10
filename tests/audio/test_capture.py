@@ -66,6 +66,16 @@ def test_recorder_reports_process_failure():
     assert "no such target" in (rec.error or "")
 
 
+def test_recorder_tolerates_nonzero_exit_after_capturing_data():
+    pcm = np.arange(1600, dtype=np.int16)
+    proc = FakeProc(pcm.tobytes(), rc=1, stderr=b"pw-record: some warning\n")
+    rec = Recorder(popen=lambda *a, **k: proc)
+    rec.start(None)
+    out = rec.stop()
+    assert rec.error is None
+    assert np.array_equal(out, pcm)
+
+
 def test_recorder_spawn_failure_raises():
     def boom(*a, **k):
         raise FileNotFoundError("pw-record")

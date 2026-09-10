@@ -112,10 +112,12 @@ class Recorder:
         if self._reader:
             self._reader.join(timeout=2)
         rc = proc.returncode
-        if rc not in (0, None, -15):
+        if rc and not self._chunks:
             tail = proc.stderr.read().decode(errors="replace")[-400:]
             self.error = tail.strip() or f"pw-record exited with {rc}"
             log.warning("pw-record failed: %s", self.error)
+        elif rc not in (0, None, -15):
+            log.debug("pw-record exited with %s after capturing audio; ignoring", rc)
         self._proc = None
         data = b"" if self._cancelled else b"".join(self._chunks)
         self._chunks = []

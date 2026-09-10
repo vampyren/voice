@@ -287,6 +287,8 @@ class Config:
             return [f"general.language_profiles must be a table of language = profile, got {mapping!r}"]
         errs: list[str] = []
         for code, name in mapping.items():
+            if isinstance(name, str) and not name.strip():
+                continue          # "leave the profile alone", same as no entry
             if not is_language_code(code):
                 errs.append(f"general.language_profiles key {code!r} must be "
                             '"auto" or a two-letter code')

@@ -339,3 +339,13 @@ def test_a_language_profile_map_that_is_not_a_table_is_rejected(isolated_xdg):
     cfg = Config.load()
     cfg.set("general.language_profiles", "local")
     assert any("general.language_profiles must be a table" in e for e in cfg.errors())
+
+
+def test_an_empty_mapping_value_means_no_profile_for_that_language(isolated_xdg):
+    """`sv = ""` is a hand edit saying "leave the profile alone"; the daemon
+    already reads it that way, so validation must not reject the file for it."""
+    cfg = Config.load()
+    cfg.set("general.language_profiles", {"sv": "  "})
+    assert cfg.language_profiles() == {}
+    assert cfg.profile_for_language("sv") is None
+    assert [e for e in cfg.errors() if "language_profiles" in e] == []

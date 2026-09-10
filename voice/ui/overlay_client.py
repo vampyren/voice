@@ -221,10 +221,9 @@ class OverlayClient:
         self._idle.set()
         self._dead = False
         self._stopped = False
-        #: Set by stop(): what actually ends the writer thread. A queued sentinel
-        #: can be dropped by a full queue, and then the pipe would stay open on a
-        #: thread parked in queue.get() forever. Read under the lock, so that a
-        #: restart() clearing it cannot cross a pump that has already left.
+        #: Set by stop(), and never cleared: what actually ends the writer thread.
+        #: A queued sentinel can be dropped by a full queue, and then the pipe
+        #: would stay open on a thread parked in queue.get() forever.
         self._halt = threading.Event()
         self._status = "not started" if self.enabled else "off"
         self._restarts = 0
@@ -255,22 +254,6 @@ class OverlayClient:
             if not self.enabled or self._stopped or self._proc is not None:
                 return
             self._spawn()
-
-    def restart(self) -> None:
-        """Explicitly bring the helper back after it was given up on."""
-        with self._lock:
-            self._close(self._proc)
-            self._proc = None
-            self._dead = False
-            self._stopped = False
-            self._restarts = 0
-            self._respawn_queued = False
-            self._pending_level = None
-            self._halt.clear()              # a surviving pump goes back to work
-            self._drain()                   # ... but not on the old helper's backlog
-            if self.enabled:
-                self._status = "not started"
-                self._spawn()
 
     def stop(self) -> None:
         """Close the helper's stdin - its cue to exit - and reap it."""
@@ -307,7 +290,7 @@ class OverlayClient:
         finished = writer is None or not writer.is_alive()
         with self._lock:
             if finished:
-                self._writer = None           # a later restart() gets a fresh pump
+                self._writer = None           # the pump is gone; forget it
                 self._drain()                 # nothing is left to write it away
         # Never close stdin under a live writer thread - that is the deadlock.
         self._close(proc, close_stdin=finished)
@@ -516,17 +499,10 @@ class OverlayClient:
         while True:
             item = self._queue.get()
             try:
-                with self._lock:
-                    if self._halt.is_set():
-                        # Read *and* published under the lock: a restart() that
-                        # clears the flag either gets here first (and this pump
-                        # stays) or finds no writer at all (and starts one). It
-                        # must never see a pump that is already on its way out.
-                        if self._writer is threading.current_thread():
-                            self._writer = None
-                        return
+                if self._halt.is_set():
+                    return                  # stop() sets it once, and never clears it
                 if item is None:
-                    continue                # a wake-up from a stop() restart() undid
+                    continue                # defensive: a wake-up is not a message
                 if item is _RESPAWN:
                     self._respawn()
                 else:
@@ -559,7 +535,7 @@ class OverlayClient:
         with self._lock:
             if generation != self._generation:
                 # The process was swapped while this write was in flight (a
-                # restart, or an earlier failure): closing the old stdin is what
+                # respawn, or an earlier failure): closing the old stdin is what
                 # raised, and it says nothing about the helper running now.
                 log.debug("overlay write to a replaced helper failed (%s)", exc)
                 return

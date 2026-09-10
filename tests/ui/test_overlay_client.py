@@ -101,12 +101,17 @@ def test_a_dead_helper_is_restarted_once_and_then_stays_silent(helper_processes,
     assert helper_processes.made[1].lines() == [{"state": "recording"}]
     assert sum("overlay" in r.getMessage() for r in caplog.records) >= 1
 
-    client.restart()
-    assert len(helper_processes.made) == 3
-    client.send({"state": "done"})
-    assert client.flush()
-    assert helper_processes.made[2].lines() == [{"state": "done"}]
     client.stop()
+
+    # The pill comes back the way the daemon brings it back - a fresh client on
+    # the same launcher (`_rebuild_overlay_if_needed`), not a revival of this one.
+    revived = _client(helper_processes)
+    revived.start()
+    assert len(helper_processes.made) == 3
+    revived.send({"state": "done"})
+    assert revived.flush()
+    assert helper_processes.made[2].lines() == [{"state": "done"}]
+    revived.stop()
 
 
 def test_a_write_failure_never_reaches_the_caller(helper_processes):
@@ -432,8 +437,9 @@ def test_a_helper_that_stops_taking_writes_is_restarted_once(helper_processes):
 
 
 def test_a_swap_under_an_in_flight_write_does_not_kill_the_new_helper(helper_processes):
-    """restart() closes the old stdin while the writer may be inside write();
-    the ValueError that raises belongs to the process that is already gone."""
+    """`status()` respawns inline, on its own thread: it closes the old stdin
+    while the writer may still be inside write(). The ValueError that raises
+    belongs to the process that is already gone."""
     client = _client(helper_processes)
     client.start()
     slow = _SlowStdin()
@@ -441,7 +447,8 @@ def test_a_swap_under_an_in_flight_write_does_not_kill_the_new_helper(helper_pro
     client.send({"state": "recording"})
     assert slow.entered.wait(2.0)                   # the writer is inside write()
 
-    client.restart()                                # closes the old stdin under it
+    helper_processes.made[0].exit(1)
+    assert client.status() == "running"             # closes the old stdin under it
     assert len(helper_processes.made) == 2
     slow.release.set()                              # the stale write now raises
 
@@ -540,52 +547,6 @@ def test_a_respawn_that_cannot_be_queued_can_still_be_retried(helper_processes):
 
 
 # -- stop() must not leak the writer thread ------------------------------------
-class _ParkedPipe:
-    """A pipe whose write parks until the test releases it, and whose helper
-    ignores signals: nothing stop() can do frees the writer thread."""
-
-    def __init__(self):
-        self.data = b""
-        self.closed = False
-        self.entered = threading.Event()
-        self.release = threading.Event()
-
-    def write(self, blob: bytes) -> int:
-        self.entered.set()
-        self.release.wait(10)
-        raise BrokenPipeError(32, "Broken pipe")
-
-    def flush(self) -> None:
-        pass
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class _StuckHelper:
-    """A helper that neither reads its stdin nor dies when it is signalled."""
-
-    def __init__(self):
-        self.stdin = _ParkedPipe()
-        self.returncode = None
-        self.terminated = False
-
-    def poll(self):
-        return self.returncode
-
-    def wait(self, timeout=None):
-        raise subprocess.TimeoutExpired("voice-overlay", timeout)
-
-    def terminate(self):
-        self.terminated = True
-
-    kill = terminate
-
-
-def _writer_threads():
-    return [t for t in threading.enumerate() if t.name == "overlay-writer" and t.is_alive()]
-
-
 def test_stop_releases_the_writer_even_when_the_queue_is_full():
     """put_nowait(None) is dropped on a full queue, so the sentinel never
     arrives: the writer thread survives stop() and stdin is never closed."""
@@ -605,77 +566,3 @@ def test_stop_releases_the_writer_even_when_the_queue_is_full():
     writer.join(2.0)
     assert not writer.is_alive(), "stop() leaked the writer thread"
     assert proc.stdin.closed is True, "stop() left the helper's stdin open"
-
-
-def test_restart_after_a_stop_that_timed_out_starts_no_second_pump(helper_processes):
-    """A writer that outlived stop() still owns the queue; a second pump on it
-    would race the first for every message."""
-    before = _writer_threads()
-    stuck = _StuckHelper()
-    calls = []
-
-    def launcher():
-        calls.append(None)
-        return stuck if len(calls) == 1 else helper_processes()
-
-    client = _client(launcher)
-    client.start()
-    client.send({"state": "recording"})
-    assert stuck.stdin.entered.wait(2.0)
-    parked = client._writer
-
-    client.stop()                                   # times out: nothing frees the writer
-    assert parked.is_alive()
-
-    client.restart()
-    extra = [t for t in _writer_threads() if t not in before]
-    assert len(extra) == 1, f"{len(extra)} pumps on one queue"
-    assert extra[0] is parked
-
-    stuck.stdin.release.set()                       # let the parked write fail out
-    assert client.flush(2.0)
-    client.send({"state": "done"})                  # the surviving pump serves the new helper
-    assert client.flush(2.0)
-    assert helper_processes.made[0].lines() == [{"state": "done"}]
-    client.stop()
-    parked.join(2.0)
-    assert not parked.is_alive()
-
-
-class _LateHalt(threading.Event):
-    """An event that reports the value the pump read, then dawdles - so the pump
-    is committed to exiting while restart() is deciding whether it still lives."""
-
-    def __init__(self):
-        super().__init__()
-        self.at_check = threading.Event()
-        self.dawdle = 0.0
-
-    def is_set(self) -> bool:
-        value = super().is_set()
-        if self.dawdle and value:
-            delay, self.dawdle = self.dawdle, 0.0
-            self.at_check.set()
-            time.sleep(delay)
-        return value
-
-
-def test_restart_leaves_a_pump_on_the_queue_when_the_old_one_is_exiting(helper_processes):
-    """A pump that has read the halt flag is already gone, whatever is_alive()
-    says. restart() must not hand it the queue and start nothing of its own."""
-    client = _client(helper_processes)
-    halt = _LateHalt()
-    client._halt = halt
-    client.start()
-    client.send({"state": "recording"})
-    assert client.flush(2.0)                        # the pump is back in queue.get()
-
-    halt.dawdle = 2.0                               # outlast stop()'s joins
-    client.stop()
-    assert halt.at_check.wait(2.0)                  # the pump has read "halt" and is leaving
-    client.restart()                                # ... exactly while restart() looks at it
-
-    client.send({"state": "done"})
-    assert client.flush(2.0), "restart() left no pump on the queue"
-    assert helper_processes.made[1].lines() == [{"state": "done"}]
-    client.stop()

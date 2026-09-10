@@ -140,6 +140,38 @@ the command line (`voice language sv`, `voice language next`), and `voice status
 which one is active. Every switch is saved to `config.toml` and applies to the next
 dictation.
 
+#### Model per language
+
+One model rarely wins in two languages, so `general.language_profiles` names the
+transcription profile each language selects:
+
+```toml
+[general]
+language = "en"
+languages = ["en", "sv"]
+
+[general.language_profiles]
+en = "local"
+sv = "local-swedish"
+```
+
+Both entries are commented out in a shipped config, so nothing changes until you opt in.
+Add the `local-swedish` profile first — settings window, Transcription tab, **Add from
+template** — then uncomment the mapping, or fill in the **Profile per language** table on
+the General tab, which writes it for you.
+
+On the CachyOS box that pairs `local` = `large-v3-turbo` (English) with `local-swedish` =
+`KBLab/kb-whisper-large` (Swedish), both `device = "cuda"`. KB-Whisper also publishes
+`KBLab/kb-whisper-small`, `-base` and `-medium` if the large model is too slow on your
+machine.
+
+Every path switches the pair together — the toggle hotkey, the tray, `voice language sv`,
+and Save in the settings window — in a single write, so the model is loaded once. A
+profile the map chose is shown as `profile: local-swedish (for sv)` by `voice status` and
+in the tray tooltip, and `voice doctor` prints the whole map. `voice profile <name>` still
+switches the model on its own and leaves the language alone. If the mapped profile is
+missing, voice says so once and keeps the model it has.
+
 ## Configuration
 
 `~/.config/voice/config.toml` is created with defaults and comments on first run (mode
@@ -270,7 +302,9 @@ environment variable named by `api_key_env` (`OPENAI_API_KEY`, `GROQ_API_KEY`,
 `OPENROUTER_API_KEY`) and keep the config file free of secrets. Switch with
 `voice profile openai` or from the tray/settings. For Swedish, use the `local-swedish`
 template in the settings window's profile picker (or set a profile's `model` to
-`KBLab/kb-whisper-large` by hand) and `general.language = "sv"`.
+`KBLab/kb-whisper-large` by hand) and `general.language = "sv"`. Map the two together with
+`general.language_profiles` (see [Model per language](#model-per-language)) and the
+language switch carries the model with it.
 
 **Paste behaviour.** Text is copied to the clipboard then pasted with Ctrl+V through the
 desktop portal (`org.freedesktop.portal.RemoteDesktop`); KDE asks permission once and

@@ -223,7 +223,8 @@ class OverlayClient:
         self._stopped = False
         #: Set by stop(): what actually ends the writer thread. A queued sentinel
         #: can be dropped by a full queue, and then the pipe would stay open on a
-        #: thread parked in queue.get() forever.
+        #: thread parked in queue.get() forever. Read under the lock, so that a
+        #: restart() clearing it cannot cross a pump that has already left.
         self._halt = threading.Event()
         self._status = "not started" if self.enabled else "off"
         self._restarts = 0
@@ -507,11 +508,18 @@ class OverlayClient:
 
     # -- writer thread ------------------------------------------------------
     def _pump(self) -> None:
-        while not self._halt.is_set():
+        while True:
             item = self._queue.get()
             try:
-                if self._halt.is_set():
-                    return
+                with self._lock:
+                    if self._halt.is_set():
+                        # Read *and* published under the lock: a restart() that
+                        # clears the flag either gets here first (and this pump
+                        # stays) or finds no writer at all (and starts one). It
+                        # must never see a pump that is already on its way out.
+                        if self._writer is threading.current_thread():
+                            self._writer = None
+                        return
                 if item is None:
                     continue                # a wake-up from a stop() restart() undid
                 if item is _RESPAWN:

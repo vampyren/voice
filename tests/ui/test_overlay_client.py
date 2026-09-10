@@ -640,3 +640,42 @@ def test_restart_after_a_stop_that_timed_out_starts_no_second_pump(helper_proces
     client.stop()
     parked.join(2.0)
     assert not parked.is_alive()
+
+
+class _LateHalt(threading.Event):
+    """An event that reports the value the pump read, then dawdles - so the pump
+    is committed to exiting while restart() is deciding whether it still lives."""
+
+    def __init__(self):
+        super().__init__()
+        self.at_check = threading.Event()
+        self.dawdle = 0.0
+
+    def is_set(self) -> bool:
+        value = super().is_set()
+        if self.dawdle and value:
+            delay, self.dawdle = self.dawdle, 0.0
+            self.at_check.set()
+            time.sleep(delay)
+        return value
+
+
+def test_restart_leaves_a_pump_on_the_queue_when_the_old_one_is_exiting(helper_processes):
+    """A pump that has read the halt flag is already gone, whatever is_alive()
+    says. restart() must not hand it the queue and start nothing of its own."""
+    client = _client(helper_processes)
+    halt = _LateHalt()
+    client._halt = halt
+    client.start()
+    client.send({"state": "recording"})
+    assert client.flush(2.0)                        # the pump is back in queue.get()
+
+    halt.dawdle = 2.0                               # outlast stop()'s joins
+    client.stop()
+    assert halt.at_check.wait(2.0)                  # the pump has read "halt" and is leaving
+    client.restart()                                # ... exactly while restart() looks at it
+
+    client.send({"state": "done"})
+    assert client.flush(2.0), "restart() left no pump on the queue"
+    assert helper_processes.made[1].lines() == [{"state": "done"}]
+    client.stop()

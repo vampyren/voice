@@ -58,22 +58,50 @@ is active must not drop the evdev listener's device descriptors - and a listener
 built (the portal refuses the session) is reported as "Hotkeys are off" rather than left as a
 stopped listener, with the next reload free to try again.
 
-**The trigger the user confirms belongs to the desktop, and `hotkeys.portal_*` is only a
-request.** Verified live on GNOME Shell 50: the confirmed trigger is stored in dconf under
-`/org/gnome/settings-daemon/global-shortcuts/<app-id>/shortcuts`, and a later change to
-`hotkeys.portal_dictate` does not move it - the daemon asks for the new trigger and GNOME keeps
-binding the stored one. It must be changed in GNOME Settings, or by rewriting the key
-(`dconf write /org/gnome/settings-daemon/global-shortcuts/io.github.vampyren.voice/shortcuts
-"[('dictate', {'description': <'Voice dictation'>, 'shortcuts': <['F14']>})]"`, GTK accelerator
-syntax, one entry per shortcut id, the write replacing the whole list). KDE Plasma implements
-version 2 of the interface and exposes a reconfigure dialog instead, which the settings window
-can ask it to open. `voice doctor` has a **portal shortcuts** line saying which of the two
-applies here, and prints the stored value where `dconf read` can be run (no new dependency, and
-its absence is not an error). README documents the same thing for users.
+**The trigger belongs to the desktop, and `hotkeys.portal_*` is a first-run preference we must
+stop re-sending.** Verified live on GNOME Shell 50 (portal `GlobalShortcuts` version 1): the
+confirmed trigger is stored in dconf under
+`/org/gnome/settings-daemon/global-shortcuts/<app-id>/shortcuts` as
+`[('dictate', {'shortcuts': <['F13']>, 'description': <'Voice dictation'>}), ...]`. Calling
+`BindShortcuts` again with `preferred_trigger` for that same id does not merely fail to move
+it - GNOME answers success and **drops the `shortcuts` member from the stored entry**, leaving
+`('dictate', {'description': <'Voice dictation'>})`: the shortcut stays registered with no key
+attached, every press does nothing, and both the log line and `devices_ok()` used to call that
+"bound". Our own restart was destroying the user's binding.
+
+So `ListShortcuts` (present in version 1; `oa{sv}` in, a `Response` carrying
+`shortcuts a(sa{sv})` back) is called before binding and decides per id: an id the portal
+already knows is bound with `description` only, and `preferred_trigger` goes out solely for an
+id it has never seen. Where `ListShortcuts` cannot be reached - an older backend, an error, a
+reply with no `shortcuts` member - **every id counts as known**, because the cost of not
+expressing a preference is one trip to Keyboard Settings and the cost of expressing it wrongly
+is the user's binding.
+
+**Reporting follows the effective trigger, never the requested one.** Each shortcut's
+`trigger_description` is read back from the `BindShortcuts` response (falling back to a second
+`ListShortcuts` where a backend answers with a bare vardict) and kept as
+`effective_triggers()`. `shortcut_state()` is then one of `bound` / `unassigned` / `denied`,
+`devices_ok()` is True only for `bound`, the startup log prints the effective triggers, and
+`on_ready` carries the state word rather than a bool. `voice status` renders `unassigned` as
+"registered, no key assigned"; `voice doctor`'s **portal shortcuts** line asks the running
+daemon and prints the trigger per id (or `no key assigned`), falling back to `dconf read` when
+nothing is running (no new dependency, and its absence is not an error). The daemon sends one
+notification per run when a shortcut comes back unassigned - once, because a reload rebuilds
+the listener and a repeated critical notification for a state the user is already looking at is
+noise they cannot switch off.
+
+The user assigns the key in GNOME Settings -> Keyboard -> Keyboard Shortcuts (the app appears
+there by name). KDE Plasma implements version 2 of the interface and exposes a reconfigure
+dialog instead, which the settings window can ask it to open. Hand-writing GNOME's dconf key
+remains possible but is documented as a last resort only: it is GNOME's private storage, and
+the write replaces the whole list. README documents the same thing for users.
 
 **Tests.** Unit: a fake bus that emits `Activated`/`Deactivated` messages drives the listener
-and the daemon receives press/release; backend selection table for `auto`. Boundary (VM):
-bind a shortcut for real, the owner presses it, the daemon records.
+and the daemon receives press/release; backend selection table for `auto`; the same fake bus
+answers `ListShortcuts` and `BindShortcuts` with triggers, covering a known id bound without a
+preference, an unknown id bound with one, a failed `ListShortcuts` falling back to the safe
+binding, and a bind response with no trigger reaching status, doctor and a single notification.
+Boundary (VM): bind a shortcut for real, the owner presses it, the daemon records.
 
 ## 2. Recording overlay ("pill")
 

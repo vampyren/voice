@@ -273,11 +273,13 @@ restore_clipboard = true
 - `portal` asks the desktop to bind a global shortcut through
   `org.freedesktop.portal.GlobalShortcuts` (KDE Plasma, GNOME 48+). No device
   permissions, and it works in a remote-desktop session, because the compositor sees the
-  keystroke before anything else does. The trigger comes from `hotkeys.portal_dictate`,
-  **Ctrl+Space** by default; `portal_recall` and `portal_cancel` are bound too when set.
-  Compositors refuse a bare modifier as a global shortcut, so these must be
-  combinations — a lone `CTRL` will not bind. Your desktop may also let you rebind the
-  shortcut in its own settings, which wins over the config file.
+  keystroke before anything else does. `hotkeys.portal_dictate` (**Ctrl+Space** by
+  default) is only what `voice` asks for the **first** time the desktop meets a shortcut;
+  `portal_recall` and `portal_cancel` are asked for too when set. From then on the desktop
+  owns the key and you change it there — see
+  [The desktop owns the trigger](#the-desktop-owns-the-trigger) below. Compositors refuse
+  a bare modifier as a global shortcut, so a first-run preference must be a combination —
+  a lone `CTRL` will not bind.
 - `auto` (the default) picks `evdev` when at least one keyboard is readable *and* the
   session has a local seat, and `portal` otherwise. `voice doctor` prints the choice and
   the reason (`hotkey backend: portal (no local seat)`), and so does `voice status`.
@@ -285,37 +287,52 @@ restore_clipboard = true
 The portal backend needs the desktop entry `install.sh` writes
 (`~/.local/share/applications/io.github.vampyren.voice.desktop`): the portal resolves the
 app id through it, and refuses the shortcut session with "An app id is required" without
-it. Changing `hotkeys.backend` or a portal trigger applies on `voice reload` (and on Save
-in the settings window): the daemon closes the portal session and creates a new one, so
-the desktop may ask for permission again.
+it. Changing `hotkeys.backend` applies on `voice reload` (and on Save in the settings
+window): the daemon closes the portal session and creates a new one, so the desktop may
+ask for permission again.
 
-**A trigger you have already confirmed belongs to the desktop, not to `config.toml`.** The
-first time the portal binds a shortcut, your desktop asks you to confirm or choose the
-combination — and it stores what you confirmed. `hotkeys.portal_*` is only what `voice`
-*asks* for, so once that copy exists, editing the config (or the Hotkeys tab) changes
-nothing on its own:
+### The desktop owns the trigger
 
-- **GNOME** keeps it in dconf, under
-  `/org/gnome/settings-daemon/global-shortcuts/io.github.vampyren.voice/shortcuts`. Change
-  it in GNOME Settings where your build lists the app's shortcuts, or write the key
-  yourself — this is the exact command that makes **F14** the dictation key:
+Once your desktop knows a shortcut id, **the key attached to it is the desktop's, not
+`config.toml`'s**, and `voice` deliberately stops asking for one. Re-requesting a trigger
+for a shortcut the desktop already knows is worse than useless: on GNOME 50 it makes the
+stored entry lose its key entirely, so the shortcut stays listed with nothing bound to it
+and every press does nothing. `hotkeys.portal_*` (and the Hotkeys tab) is therefore a
+**first-run preference only** — editing it never moves a shortcut the desktop has already
+seen, no matter how often you reload or restart.
 
-  ```
-  dconf write /org/gnome/settings-daemon/global-shortcuts/io.github.vampyren.voice/shortcuts \
-    "[('dictate', {'description': <'Voice dictation'>, 'shortcuts': <['F14']>})]"
-  ```
+To change the key, or to set one that was never assigned:
 
-  Triggers there use GTK accelerator syntax (`F14`, `<Shift><Control>l`), and the write
-  replaces the whole list — read it back first (`dconf read` on the same key) and keep the
-  ids you still want, one entry per shortcut (`dictate`, `recall`, `cancel`,
-  `language_toggle`). GNOME binds what the key says; restart `voice` if the new trigger
-  does not answer.
-- **KDE Plasma** implements version 2 of the portal interface, which has a reconfigure
-  dialog: the settings window can ask KDE to open it, and KDE System Settings →
-  Shortcuts lists the binding as well.
+- **GNOME** — open **Settings → Keyboard → Keyboard Shortcuts**, where `voice` appears
+  under its own name, and set the key there. It takes effect immediately; nothing needs
+  restarting.
+- **KDE Plasma** — implements version 2 of the portal interface, which has a reconfigure
+  dialog: the settings window's "Capture key" button asks KDE to open it, and KDE System
+  Settings → Shortcuts lists the binding as well.
 
-`voice doctor`'s **portal shortcuts** line prints whichever of these applies on this
-machine, including the trigger GNOME has stored.
+`voice doctor`'s **portal shortcuts** line shows the effective trigger per shortcut id, or
+`no key assigned` where the desktop registered a shortcut without one; `voice status` says
+the same in one line. If a shortcut comes back with no key, `voice` also tells you once,
+with a notification pointing here.
+
+<details>
+<summary>Last resort: writing GNOME's dconf key by hand</summary>
+
+Only if Settings will not show or set the shortcut. This is GNOME's private storage, not a
+`voice` interface, and a wrong write silently unbinds every shortcut in the list:
+
+```
+dconf read /org/gnome/settings-daemon/global-shortcuts/io.github.vampyren.voice/shortcuts
+dconf write /org/gnome/settings-daemon/global-shortcuts/io.github.vampyren.voice/shortcuts \
+  "[('dictate', {'description': <'Voice dictation'>, 'shortcuts': <['F14']>})]"
+```
+
+Triggers use GTK accelerator syntax (`F14`, `<Shift><Control>l`). The write **replaces the
+whole list**, so read it back first and keep every id you still want, one entry each
+(`dictate`, `recall`, `cancel`, `language_toggle`). Restart `voice` afterwards if the new
+trigger does not answer.
+
+</details>
 
 **Hotkeys.** On the evdev backend, use the settings window's "Capture key" button — press
 the physical key and it fills in the exact evdev name it received. Combinations are typed
@@ -325,7 +342,9 @@ keys) sends nothing, remap it in Keychron Launcher to F13 and bind `KEY_F13` her
 On the portal backend there is no key to capture — the compositor consumes the chord
 before anything else sees it — so the Hotkeys tab shows the four triggers themselves
 (`portal_dictate`, `portal_recall`, `portal_cancel`, `portal_language_toggle`) as text
-fields in the desktop's own syntax: `F14`, `CTRL+space`, `CTRL+SHIFT+l`.
+fields in the desktop's own syntax: `F14`, `CTRL+space`, `CTRL+SHIFT+l`. They are what
+`voice` asks for the first time the desktop meets each shortcut and nothing after that —
+see [The desktop owns the trigger](#the-desktop-owns-the-trigger).
 
 **Profiles.** `stt.active` picks one of the `[stt.profiles.*]` tables. Add a cloud
 profile by pasting an API key: either `api_key = "sk-..."` inline, or set the
@@ -357,10 +376,12 @@ are restored after the paste.
 - **hotkey backend** — informational: which listener the daemon would use here and why
   (`evdev`, or `portal (no local seat)`). Never fails the run; see
   [Configuration](#configuration).
-- **portal shortcuts** — informational: on the portal backend, where the trigger you
-  confirmed actually lives — the dconf key on GNOME (with its current value), or the
-  desktop's own reconfigure dialog. Never fails the run; see
-  [Configuration](#configuration).
+- **portal shortcuts** *(optional)* — on the portal backend, the trigger the desktop
+  actually holds for each shortcut id, read from the running daemon. `no key assigned`
+  means the shortcut is registered and no key is attached to it, so nothing will ever fire
+  it — fix that in your desktop's keyboard settings, not in `config.toml`. With no daemon
+  running it falls back to GNOME's stored copy. See
+  [The desktop owns the trigger](#the-desktop-owns-the-trigger).
 - **overlay** — informational: whether the recording pill can run here, which
   interpreter starts its helper, and whether `gtk4-layer-shell` was found. Never fails
   the run; see [Recording pill](#recording-pill).
@@ -383,12 +404,12 @@ Two more common issues doctor doesn't cover directly:
   something else; make sure the window class is in `inject.terminal_classes` (already
   includes `konsole`, `kitty`, `alacritty`, `foot`, `wezterm`, `gnome-terminal`) so
   `voice` sends Ctrl+Shift+V there instead.
-- **The portal shortcut ignores `hotkeys.portal_dictate`.** Once you have confirmed a
-  trigger, the desktop keeps it: on GNOME it is stored in dconf and a later config change
-  is simply not followed (the daemon asks for the new one, GNOME keeps the confirmed one).
-  Change it where the desktop keeps it — see the dconf command under
-  [Configuration](#configuration), or KDE's reconfigure dialog — and use
-  `voice doctor`'s **portal shortcuts** line to see what is stored.
+- **The portal shortcut does nothing, and `hotkeys.portal_dictate` changes nothing.** Both
+  have the same cause: the desktop owns the key once it knows the shortcut, and it may be
+  holding the shortcut with no key attached at all. Check `voice status` — `registered, no
+  key assigned` is that state — or `voice doctor`'s **portal shortcuts** line, then set the
+  key in **Settings → Keyboard → Keyboard Shortcuts**. See
+  [The desktop owns the trigger](#the-desktop-owns-the-trigger).
 - **A clipboard manager is recording every dictation.** Klipper (and similar) keeps a
   history entry per dictation, since `voice` pastes via the clipboard. Exclude
   `voice`-owned changes in Klipper's settings, or live with the history.
@@ -402,8 +423,9 @@ Two more common issues doctor doesn't cover directly:
   remote session arrive through the remote-desktop server, not the kernel input devices,
   so the push-to-talk key is never seen. **The portal hotkey backend is the answer here,
   and `hotkeys.backend = "auto"` already switches to it**: no local seat means the daemon
-  binds Ctrl+Space (`hotkeys.portal_dictate`) through the desktop instead of reading
-  `/dev/input`, so no `input` group membership is needed either. Run `./install.sh` first
+  binds its shortcuts through the desktop instead of reading `/dev/input`, so no `input`
+  group membership is needed either (the first run asks for Ctrl+Space,
+  `hotkeys.portal_dictate`; after that the key lives in your desktop's keyboard settings). Run `./install.sh` first
   — the portal needs the desktop entry it installs to resolve this app's id. What remains
   is the paste: the portal keystroke is not delivered to the focused window in some remote
   sessions, so if Ctrl+V never arrives, set `inject.restore_clipboard = false` and paste

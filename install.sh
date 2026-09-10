@@ -3,9 +3,14 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP=voice
+# Must equal voice.APP_ID: the desktop portal resolves our app id (needed by the
+# GlobalShortcuts hotkey backend) through a desktop entry with exactly this name.
+APP_ID=io.github.vampyren.voice
 BIN="$HOME/.local/bin/$APP"
-APPS="$HOME/.local/share/applications/$APP.desktop"
-AUTOSTART="$HOME/.config/autostart/$APP.desktop"
+APPS="$HOME/.local/share/applications/$APP_ID.desktop"
+AUTOSTART="$HOME/.config/autostart/$APP_ID.desktop"
+LEGACY_APPS="$HOME/.local/share/applications/$APP.desktop"
+LEGACY_AUTOSTART="$HOME/.config/autostart/$APP.desktop"
 RULE_SRC="$ROOT/packaging/70-voice-input.rules"
 RULE_DST="/etc/udev/rules.d/70-voice-input.rules"
 MODE=install; UDEV=1; EXTRA=auto
@@ -25,7 +30,7 @@ run() { if [ "${DRY_RUN:-0}" = 1 ]; then echo "+ $*"; else echo "+ $*"; "$@"; fi
 sudo_run() { if [ "${DRY_RUN:-0}" = 1 ]; then echo "+ sudo $*"; else echo "+ sudo $*"; sudo "$@"; fi; }
 
 if [ "$MODE" = uninstall ]; then
-  run rm -f "$BIN" "$APPS" "$AUTOSTART"
+  run rm -f "$BIN" "$APPS" "$AUTOSTART" "$LEGACY_APPS" "$LEGACY_AUTOSTART"
   [ -e "$RULE_DST" ] || [ "${DRY_RUN:-0}" = 1 ] && sudo_run rm -f "$RULE_DST" || true
   echo "left in place (delete if you want a clean slate): $HOME/.config/$APP $HOME/.local/state/$APP $HOME/.cache/huggingface"
   exit 0
@@ -57,6 +62,7 @@ if [ "${DRY_RUN:-0}" = 1 ]; then
 else
   sed "s|^Exec=.*|Exec=$BIN daemon|" "$ROOT/packaging/$APP.desktop" > "$APPS"
   cp "$APPS" "$AUTOSTART"
+  rm -f "$LEGACY_APPS" "$LEGACY_AUTOSTART"        # from installs before the app id rename
 fi
 
 if [ "$UDEV" = 1 ]; then

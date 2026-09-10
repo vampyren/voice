@@ -35,3 +35,19 @@ def test_packaging_files_reference_app():
     assert 'SUBSYSTEM=="input"' in rules and "uaccess" in rules
     desktop = (ROOT / "packaging" / "voice.desktop").read_text()
     assert "Exec=voice" in desktop and "X-GNOME-Autostart" not in desktop
+
+
+def test_desktop_entry_is_installed_under_the_app_id():
+    """The portal resolves our app id through this file name; anything else and
+    GlobalShortcuts refuses the session with "An app id is required"."""
+    from voice import APP_ID
+    cp = run("--cpu", "--no-udev")
+    assert f"/tmp/voice-home/.local/share/applications/{APP_ID}.desktop" in cp.stdout
+    assert f"/tmp/voice-home/.config/autostart/{APP_ID}.desktop" in cp.stdout
+
+
+def test_uninstall_removes_the_app_id_entry_and_the_legacy_name():
+    from voice import APP_ID
+    cp = run("--uninstall")
+    assert f"{APP_ID}.desktop" in cp.stdout
+    assert "applications/voice.desktop" in cp.stdout      # pre-app-id installs

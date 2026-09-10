@@ -97,6 +97,11 @@ class Dictation:
                 self.recall()
         except Exception as exc:
             log.exception("hotkey %s/%s failed", name, kind)
+            with self._lock:
+                if self._state == State.RECORDING:
+                    # Failing part-way through stop()/cancel() must not leave
+                    # pw-record running for the rest of the session.
+                    self._cancel_recorder()
             self._fail(f"unexpected error: {exc}")
 
     # -- commands -------------------------------------------------------------

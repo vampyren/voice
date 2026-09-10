@@ -337,3 +337,34 @@ def test_a_later_dictation_clears_the_previous_failures_retry_audio():
     assert sv.injector.texts == ["hello world"]    # nothing re-pasted
     assert len(stt.calls) == 2                     # and nothing re-transcribed
     assert sv.history.take_audio() is None
+
+
+class ExplodingStopRecorder(FakeRecorder):
+    """A recorder whose stop() blows up mid-dictation, leaving pw-record running."""
+
+    def stop(self):
+        raise RuntimeError("pw-record wedged")
+
+
+def test_a_failing_stop_still_cancels_the_recorder():
+    rec = ExplodingStopRecorder()
+    d, sv, states, notes = make(rec=rec)
+    d.on_hotkey("dictate", "press")
+    assert d.state == State.RECORDING
+
+    d.on_hotkey("dictate", "release")            # stop() raises on the listener thread
+    assert d.state == State.IDLE
+    assert rec.cancelled == 1 and rec.is_recording is False
+    assert d.last_error and "pw-record wedged" in d.last_error
+
+
+def test_the_catch_all_does_not_cancel_when_no_recording_is_in_flight():
+    d, sv, states, notes = make()
+
+    def boom(key, default=None):
+        raise RuntimeError("config gone")
+
+    d.sv.config_getter = boom
+    d.on_hotkey("dictate", "press")              # fails before anything was recorded
+    assert sv.recorder.cancelled == 0
+    assert d.state == State.IDLE

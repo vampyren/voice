@@ -240,6 +240,16 @@ class SettingsDialog(QDialog):
         profiles = list(self._cfg.get("stt.profiles", {}) or {})
         codes = self._cfg.languages()
         table = self.language_profile_table
+        # Take the old combos out by hand: replacing a cell widget only schedules
+        # the previous one for deletion, and until that runs it stays parented to
+        # the viewport and paints over the first cell.
+        for row in range(table.rowCount()):
+            for col in range(table.columnCount()):
+                widget = table.cellWidget(row, col)
+                if widget is not None:
+                    table.removeCellWidget(row, col)
+                    widget.setParent(None)
+                    widget.deleteLater()
         self.language_profile_combos = {}
         table.setRowCount(len(codes))
         for row, code in enumerate(codes):

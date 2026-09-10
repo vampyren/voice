@@ -369,3 +369,18 @@ def test_a_profile_added_from_a_template_can_be_mapped_at_once(qapp):
     again = Config.load()
     assert again.get("general.language_profiles") == {"sv": "local-swedish"}
     assert again.errors() == []
+
+
+def test_rebuilding_the_table_leaves_no_stray_combo_behind(qapp):
+    """A replaced cell widget is only scheduled for deletion, and until that runs
+    it paints over the first cell of the table."""
+    from PySide6.QtWidgets import QComboBox
+
+    cfg, dlg, _ = make(qapp)
+    table = dlg.language_profile_table
+    assert len(table.viewport().findChildren(QComboBox)) == table.rowCount() == 2
+    dlg.add_profile_combo.setCurrentText("local-swedish")
+    dlg.add_profile_button.click()
+    assert len(table.viewport().findChildren(QComboBox)) == table.rowCount() == 2
+    dlg.reload_from_disk()
+    assert len(table.viewport().findChildren(QComboBox)) == table.rowCount() == 2

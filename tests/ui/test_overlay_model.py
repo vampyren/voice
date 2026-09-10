@@ -226,7 +226,7 @@ def test_the_badge_swaps_out_and_back_in_during_a_notice(model, clock):
 
 # -- waveform -------------------------------------------------------------
 
-def test_the_taper_runs_from_full_at_the_centre_to_65_percent_at_the_ends(model):
+def test_the_taper_runs_from_full_at_the_centre_to_85_percent_at_the_ends(model):
     model.set_state("recording")
     _fill(model, 1.0)
     heights = model.bar_heights
@@ -573,12 +573,17 @@ def test_the_gain_reference_decays_so_a_quiet_talker_catches_up(model, clock):
 
 
 def test_a_bar_never_collapses_to_a_hairline_while_recording(model):
-    from voice.ui.overlay_model import BAR_FLOOR as floor
+    """Stated in pixels, because that is what "hairline" means.
 
-    assert floor >= 0.25
+    The floor and the taper compose, so the shortest bar while recording is
+    `(1 - TAPER) * BAR_FLOOR` of the 24 px well; either constant can move as
+    long as the quiet between words still draws a dot you can see.
+    """
+    well_px = 24.0
+    assert (1.0 - TAPER) * BAR_FLOOR * well_px >= 4.0
     model.set_state("recording")
     model.push_level(0.0)
-    assert min(model.bar_heights) >= (1.0 - TAPER) * floor - 1e-9
+    assert min(model.bar_heights) >= (1.0 - TAPER) * BAR_FLOOR - 1e-9
 
 
 def test_room_noise_is_not_amplified_into_a_waveform(model):
@@ -597,3 +602,99 @@ def test_a_close_microphone_is_not_clipped_flat(model):
     heights = model.bar_heights
     assert max(heights) >= 0.8
     assert min(heights[8:13]) < 0.75          # the quiet syllables still dip
+
+
+# -- amplitude: the wave has to be tall enough to read as a wave --------------
+#: A realistic minute of dictation as `rms_level` actually reports it, one
+#: number per 125 ms chunk: two syllables peaking at 0.33, the gaps between
+#: them down at 0.08. These are measured units, not fractions of the well -
+#: `rms_level` square-roots the RMS and applies a 1.25 gain, so a desk
+#: microphone at a normal speaking distance lands here.
+DESK_MIC = (0.196, 0.331, 0.305, 0.222, 0.115, 0.081, 0.245, 0.331, 0.286, 0.148)
+
+#: The same voice, half a metre further away or half as loud.
+QUIET_SPEECH = (0.105, 0.177, 0.163, 0.119, 0.061, 0.068, 0.131, 0.177, 0.153, 0.079)
+
+#: One captured chunk, and the four helper frames drawn between two of them.
+CHUNK = 0.125
+
+
+def _speak(model, clock, levels, seconds):
+    """Push `levels` on a loop for `seconds`, ticking at the helper's 30 fps.
+
+    Returns the bar heights as of every chunk, so a test can look at the wave
+    over a passage rather than at one lucky frame.
+    """
+    frames = []
+    for _ in range(int(round(seconds / (len(levels) * CHUNK)))):
+        for level in levels:
+            model.push_level(level)
+            for _ in range(4):
+                model.tick(clock.advance(FRAME))
+            frames.append(model.bar_heights)
+    return frames
+
+
+def test_ordinary_speech_fills_most_of_the_well(model, clock):
+    """The owner's complaint: the wave reacts correctly but is too flat.
+
+    Averaged over every bar of every frame of a passage - not over one crest -
+    ordinary speech has to occupy most of the 24 px well, and its syllables
+    have to reach the top of it.
+    """
+    model.set_state("recording")
+    frames = _speak(model, clock, DESK_MIC, 10.0)[-10:]
+    every_bar = [h for frame in frames for h in frame]
+    mean = sum(every_bar) / len(every_bar)
+    assert mean >= 0.65, f"the wave only uses {mean:.2f} of the well"
+    centres = sorted(frame[10] for frame in frames)
+    assert centres[len(centres) // 2] >= 0.84, f"a typical syllable is {centres}"
+    assert max(centres) >= 0.95, f"no syllable reaches the top: {centres}"
+
+
+def test_the_wave_stays_tall_out_to_the_ends_of_the_well(model):
+    """The end taper is a hint, not a fade: the oldest chunk is real audio.
+
+    A third off the outer half was most of why the wave read as flat - ten of
+    the twenty-one bars live there.
+    """
+    model.set_state("recording")
+    _fill(model, 1.0)
+    heights = model.bar_heights
+    assert heights[0] >= 0.8 * heights[10], heights
+    assert heights[20] >= 0.8 * heights[10], heights
+
+
+def test_a_shout_does_not_flatten_the_speech_that_follows(model, clock):
+    """The gain reference has to let go of one loud chunk within a sentence.
+
+    It used to hold full scale for several seconds, so everything said after
+    an emphatic word was drawn at half height.
+    """
+    model.set_state("recording")
+    _speak(model, clock, DESK_MIC, 5.0)
+    for level in (0.95, 1.0, 0.9):                 # one emphatic word
+        model.push_level(level)
+        for _ in range(4):
+            model.tick(clock.advance(FRAME))
+    frames = _speak(model, clock, DESK_MIC, 2.5)   # and back to normal speech
+    recovered = max(frame[10] for frame in frames)
+    assert recovered >= 0.8, f"still squashed 2.5 s after the shout: {recovered:.2f}"
+
+
+def test_a_quiet_passage_is_clearly_above_the_floor_but_below_the_ceiling(model, clock):
+    """Half-volume speech must still read as speech, and still as quieter."""
+    model.set_state("recording")
+    _speak(model, clock, DESK_MIC, 5.0)
+    frames = _speak(model, clock, QUIET_SPEECH, 5.0)[-10:]
+    centres = [frame[10] for frame in frames]
+    assert max(centres) >= BAR_FLOOR + 0.3, f"a quiet passage vanishes: {centres}"
+    assert min(centres) <= BAR_FLOOR + 0.1, f"its gaps stopped being gaps: {centres}"
+
+
+def test_silence_still_rests_near_the_floor_after_a_loud_passage(model, clock):
+    """Taller must not mean that a quiet room draws itself a waveform."""
+    model.set_state("recording")
+    _speak(model, clock, DESK_MIC, 5.0)
+    frames = _speak(model, clock, (0.04,) * 10, 5.0)
+    assert frames[-1] == pytest.approx(profile(BAR_FLOOR))

@@ -62,15 +62,17 @@ BARS = 21
 
 #: The wave still tapers toward the ends of the well, as the design draws it,
 #: but the taper is a mild weight on the *history* rather than a silhouette
-#: painted over it: the newest slot keeps all of its height, the oldest 65%.
-#: Anything stronger and the older half of the wave stops being readable.
-TAPER = 0.35
+#: painted over it: the newest slot keeps all of its height, the oldest 85%.
+#: Ten of the twenty-one bars live in that outer half and they are real audio,
+#: not decoration - a deeper taper was most of why the wave read as flat.
+TAPER = 0.15
 
 #: A recording bar never sits fully flat: the design animates each bar between
-#: 22% and 100% of its tapered height. Measured against a real pill, 0.22 left
-#: the quiet between words reading as hairlines, so the resting height is 25%.
-#: It is what stops the wave collapsing to a row of dots between syllables.
-BAR_FLOOR = 0.25
+#: 22% and 100% of its tapered height, and 22% is what we use. The floor and
+#: the taper compose, so the shortest resting bar is `(1 - TAPER) * BAR_FLOOR`
+#: of the 24 px well - 4.5 px, a visible dot rather than a hairline - while
+#: the audio gets the other 78% of the well to move in.
+BAR_FLOOR = 0.22
 
 #: Automatic gain. Drawn against full scale, ordinary speech gave a wave a few
 #: pixels tall, so each level is measured against a decaying peak of the recent
@@ -83,9 +85,22 @@ BAR_FLOOR = 0.25
 #: NOISE is what the wave ignores altogether, and the reference never falls
 #: below PEAK_FLOOR, so a silent room cannot amplify its own hiss into a
 #: waveform; between them they put speech at 60-100% of the well.
-PEAK_HALF_LIFE = 2.0                  # seconds to halve the reference
+#:
+#: The half-life is what a *single* loud chunk costs everything said after it.
+#: At 2 s one emphatic word held the reference near full scale for some six
+#: seconds and drew the rest of the sentence at half height; 1.2 s lets go of
+#: it inside a sentence while still spanning several syllables, so the wave
+#: is measured against how loudly you are talking now, not a moment ago.
+PEAK_HALF_LIFE = 1.2                  # seconds to halve the reference
 PEAK_FLOOR = 0.25                     # a quiet talker is still full scale
 NOISE = 0.06                          # below this there is nothing to draw
+
+#: Exponent on the normalised level, applied last. Straight-line scaling put
+#: the body of a syllable - everything that is loud but not the crest - in the
+#: middle of the well, which is the shape the owner read as flat. An exponent
+#: below 1 lifts the middle without moving either end (0 stays 0, 1 stays 1),
+#: so silence still rests on the floor and only the crest still clips.
+GAIN_CURVE = 0.75
 
 #: A jump larger than this means the helper was stalled (or the machine slept);
 #: fade to silence rather than raising the decay to an absurd power.
@@ -199,13 +214,15 @@ class OverlayModel:
         self._last_push = self._now
 
     def _gain(self, level: float) -> float:
-        """`level` as a fraction of the loudest thing heard lately."""
+        """`level` as a fraction of the loudest thing heard lately, curved."""
         decayed = 0.5 ** (max(0.0, self._now - self._peak_at) / PEAK_HALF_LIFE)
         reference = PEAK_FLOOR + (self._peak - PEAK_FLOOR) * decayed
         self._peak = max(level, reference)
         self._peak_at = self._now
         span = self._peak - NOISE
-        return _clamp01((level - NOISE) / span) if span > 0 else 0.0
+        if span <= 0:
+            return 0.0
+        return _clamp01((level - NOISE) / span) ** GAIN_CURVE
 
     def set_language(self, code: str) -> None:
         """Record a language switch; the badge and any notice read from here."""

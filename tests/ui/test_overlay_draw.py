@@ -259,8 +259,8 @@ def test_the_waveform_tapers_from_the_newest_sample_out_to_the_ends(tmp_path):
     img = Image(render_png(_model("recording"), tmp_path / "rec.png"))
     bars = bar_columns(img)
     assert bars[10] > 20, f"the newest sample should fill the 24 px well, got {bars}"
-    assert bars[0] == pytest.approx(bars[10] * 0.65, abs=3), bars
-    assert bars[20] == pytest.approx(bars[10] * 0.65, abs=3), bars
+    assert bars[0] == pytest.approx(bars[10] * 0.85, abs=3), bars
+    assert bars[20] == pytest.approx(bars[10] * 0.85, abs=3), bars
 
 
 def test_neighbouring_bars_differ_because_each_is_a_different_moment(tmp_path):
@@ -511,3 +511,42 @@ def test_eliding_costs_the_same_whether_the_message_is_long_or_very_long():
         return ctx.extents
 
     assert measured(300) == measured(60) > 0
+
+
+#: A realistic run of `rms_level` output for a desk microphone - two syllables
+#: and the gaps between them, in the units the daemon actually pushes.
+DESK_MIC = (0.196, 0.331, 0.305, 0.222, 0.115, 0.081, 0.245, 0.331, 0.286, 0.148)
+
+
+def _speaking(seconds=10.0, levels=DESK_MIC):
+    """A model that has been fed `levels` at 8 chunks/s against a 30 fps redraw.
+
+    The frame timer matters: the gain reference decays on the clock, so a model
+    handed its levels all at once is not the model the helper actually draws.
+    """
+    clock = Clock()
+    model = OverlayModel(clock=clock)
+    model.set_state("recording")
+    for _ in range(int(round(seconds / (len(levels) * 0.125)))):
+        for level in levels:
+            model.push_level(level)
+            for _ in range(4):
+                model.tick(clock.advance(1 / 30))
+    return model
+
+
+def test_ordinary_speech_draws_a_wave_that_fills_the_well(tmp_path):
+    """The owner's "make the wave taller", measured in rendered pixels.
+
+    At 2x the well is 48 px, so a syllable has to draw a bar near 48 px and
+    the wave as a whole has to average well over half of it. This is the
+    check that a model-side change actually reaches the screen.
+    """
+    img = Image(render_png(_speaking(), tmp_path / "speech.png", height=88))
+    bars = bar_columns(img, s=2.0)
+    mean = sum(bars) / len(bars)
+    ends = (bars[0] + bars[1] + bars[-2] + bars[-1]) / 4
+    assert max(bars) >= 44, f"no bar comes near the 48 px well: {bars}"
+    assert mean >= 30, f"the wave averages only {mean:.1f} px of 48: {bars}"
+    assert ends >= 22, f"the ends of the wave fade out at {ends:.1f} px: {bars}"
+    assert min(bars) <= 24, f"the wave has no troughs left: {bars}"

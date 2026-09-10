@@ -286,6 +286,11 @@ class OverlayClient:
             # The event, not the sentinel, is what ends the pump; draining first
             # then guarantees the wake-up fits, and keeps _inflight honest for
             # anyone who calls flush() after us.
+            # This is the only place _halt is set, and the _put below is the only
+            # thing that wakes the pump to notice it: the pump reads the flag when
+            # an item arrives, never while parked in queue.get(). Drain first so
+            # the wake-up always fits, and keep both halves together - a _halt set
+            # without one leaves the writer parked and the helper's stdin open.
             self._halt.set()
             self._drain()
             if writer is not None and writer.is_alive():

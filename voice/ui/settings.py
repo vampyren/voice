@@ -23,6 +23,12 @@ PROFILE_TEMPLATES: dict[str, dict] = {
 _LOCAL_FIELDS = ["model", "device", "compute_type", "beam_size", "prompt"]
 _CLOUD_FIELDS = ["base_url", "model", "api_key", "api_key_env", "prompt"]
 _LANGUAGES = [("English", "en"), ("Swedish", "sv"), ("Auto-detect", "auto")]
+HOTKEY_HINTS = {
+    "evdev": "Combinations: type KEY_LEFTMETA+KEY_SPACE. Names are evdev key names.",
+    "portal": ("This session uses the desktop portal for hotkeys: the shortcut itself is chosen in "
+               "your desktop's own shortcut dialog (Ctrl+Space by default, set as hotkeys.portal_dictate). "
+               "The key fields above apply again if you switch hotkeys.backend to evdev."),
+}
 
 
 class SettingsDialog(QDialog):
@@ -30,8 +36,9 @@ class SettingsDialog(QDialog):
     _captured = Signal(str)
 
     def __init__(self, config: Config, capture_key: Callable[[Callable[[str], None]], None],
-                 sources: Callable[[], list[Source]], parent=None):
+                 sources: Callable[[], list[Source]], parent=None, backend: str = "evdev"):
         super().__init__(parent)
+        self._backend = backend
         self.setWindowTitle("voice settings")
         self.setMinimumWidth(560)
         # The dialog edits a private Config loaded from the same file: Close simply
@@ -104,7 +111,9 @@ class SettingsDialog(QDialog):
         form.addRow("Mode", self.mode_combo)
         form.addRow("Recall last", self.recall_edit)
         form.addRow("Cancel recording", self.cancel_edit)
-        form.addRow(QLabel("Combinations: type KEY_LEFTMETA+KEY_SPACE. Names are evdev key names."))
+        self.hotkey_hint = QLabel(HOTKEY_HINTS.get(self._backend, HOTKEY_HINTS["evdev"]))
+        self.hotkey_hint.setWordWrap(True)
+        form.addRow(self.hotkey_hint)
         return w
 
     def _audio_tab(self) -> QWidget:
@@ -249,7 +258,12 @@ class SettingsDialog(QDialog):
         self._capture_key(self._captured.emit)
 
     def _on_captured(self, name: str) -> None:
-        self.hotkey_edit.setText(name)
+        # The portal backend cannot hand back a key name - the compositor keeps
+        # the keystroke - so it answers with a sentence for the user instead.
+        if name.startswith(("KEY_", "BTN_")):
+            self.hotkey_edit.setText(name)
+        else:
+            self.error_label.setText(name)
         self.capture_button.setText("Capture key")
 
     def _carry_over_active_profile(self) -> bool:

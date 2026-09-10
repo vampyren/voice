@@ -167,3 +167,24 @@ def test_reload_from_disk_clears_the_activation_flag(qapp):
     external.save()
     dlg.save_button.click()
     assert Config.load().get("stt.active") == "groq"      # the abandoned activation is gone
+
+
+def test_portal_backend_explains_where_shortcuts_are_chosen(qapp):
+    cfg = Config.load()
+    dlg = SettingsDialog(cfg, capture_key=lambda cb: None,
+                         sources=lambda: [Source("alsa_input.obsbot", "OBSBOT Tiny 3", True)],
+                         backend="portal")
+    assert "desktop" in dlg.hotkey_hint.text().lower()
+    plain = SettingsDialog(cfg, capture_key=lambda cb: None, sources=lambda: [])
+    assert "evdev" in plain.hotkey_hint.text().lower()
+
+
+def test_a_captured_message_is_shown_instead_of_being_typed_into_the_field(qapp):
+    """The portal listener answers capture_next with a sentence, not a key name."""
+    cfg, dlg, captures = make(qapp)
+    dlg.capture_button.click()
+    captures[0]("portal: change the shortcut in your desktop's settings")
+    qapp.processEvents()
+    assert dlg.hotkey_edit.text() == "KEY_F13"               # untouched
+    assert "portal" in dlg.error_label.text()
+    assert dlg.capture_button.text() == "Capture key"

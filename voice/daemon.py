@@ -336,7 +336,8 @@ class Daemon:
     def open_settings(self) -> None:
         try:
             if self._settings is None:
-                self._settings = SettingsDialog(self.config, self.listener.capture_next, list_sources)
+                self._settings = SettingsDialog(self.config, self.listener.capture_next, list_sources,
+                                                backend=self.hotkey_backend)
                 self._settings.saved.connect(self.apply_config)
             elif not self._settings.isVisible():
                 # The dialog holds its own Config; refresh it so a reopen shows what

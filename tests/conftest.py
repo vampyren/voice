@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -19,3 +20,72 @@ def isolated_xdg(tmp_path, monkeypatch, request):
         d.mkdir()
         monkeypatch.setenv(var, str(d))
     yield tmp_path
+
+
+class FakeStdin:
+    """A stdin pipe that records what the daemon writes to the overlay helper."""
+
+    def __init__(self):
+        self.data = b""
+        self.closed = False
+
+    def write(self, blob: bytes) -> int:
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+        self.data += blob
+        return len(blob)
+
+    def flush(self) -> None:
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeHelperProcess:
+    """Stands in for the `voice-overlay` helper: a Popen-shaped stdin sink."""
+
+    def __init__(self):
+        self.stdin = FakeStdin()
+        self.returncode = None
+        self.terminated = False
+        self.waits = []
+
+    # -- Popen surface ----------------------------------------------------
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        if self.returncode is None:
+            self.returncode = -15
+
+    kill = terminate
+
+    # -- test helpers -----------------------------------------------------
+    def exit(self, code: int = 1) -> None:
+        """Pretend the helper died on its own."""
+        self.returncode = code
+
+    def lines(self) -> list[dict]:
+        return [json.loads(line) for line in self.stdin.data.decode().splitlines()]
+
+
+@pytest.fixture
+def helper_processes():
+    """A launcher that hands out FakeHelperProcess objects, and the list of them."""
+    made: list[FakeHelperProcess] = []
+
+    def launcher():
+        made.append(FakeHelperProcess())
+        return made[-1]
+
+    launcher.made = made
+    return launcher

@@ -24,7 +24,11 @@ voice = "voice.cli:main"
 voice-overlay = "voice.ui.overlay:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-timeout>=2"]
+# pycairo is a test dependency, not a runtime one: the overlay helper runs on an
+# interpreter that has it (it ships with the distro's python-gobject), while the
+# daemon never imports cairo. Without it here tests/ui/test_overlay_draw.py
+# skips wholesale and the renderer is never executed by the suite.
+dev = ["pytest>=8", "pytest-timeout>=2", "pycairo>=1.26"]
 
 [build-system]
 requires = ["hatchling"]

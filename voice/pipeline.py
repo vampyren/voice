@@ -79,35 +79,61 @@ class Dictation:
 
     # -- hotkey entry point ---------------------------------------------------
     def on_hotkey(self, name: str, kind: str) -> None:
-        if name == "dictate":
-            mode = self.sv.config_getter("hotkeys.dictate_mode", "hold")
-            if mode == "toggle":
-                if kind == "press":
-                    self.toggle()
-            elif kind == "press":
-                self.start()
-            else:
-                self.stop()
-        elif name == "cancel" and kind == "press":
-            self.cancel()
-        elif name == "recall" and kind == "press":
-            self.recall()
+        # Called on the evdev listener thread: nothing may escape from here, or the
+        # listener dies and every hotkey stops working for the rest of the session.
+        try:
+            if name == "dictate":
+                mode = self.sv.config_getter("hotkeys.dictate_mode", "hold")
+                if mode == "toggle":
+                    if kind == "press":
+                        self.toggle()
+                elif kind == "press":
+                    self.start()
+                else:
+                    self.stop()
+            elif name == "cancel" and kind == "press":
+                self.cancel()
+            elif name == "recall" and kind == "press":
+                self.recall()
+        except Exception as exc:
+            log.exception("hotkey %s/%s failed", name, kind)
+            self._fail(f"unexpected error: {exc}")
 
     # -- commands -------------------------------------------------------------
     def start(self) -> None:
         with self._lock:
             if self._state != State.IDLE:
                 return
-            device = self.sv.config_getter("audio.device", "") or None
+            # Config is read and validated *before* the recorder starts: a bad value
+            # here used to raise after pw-record was already running, killing the
+            # listener thread and orphaning the process.
+            try:
+                device = self.sv.config_getter("audio.device", "") or None
+                seconds = int(self.sv.config_getter("audio.max_seconds", 120))
+                if seconds <= 0:
+                    raise ValueError(f"audio.max_seconds must be a positive number, got {seconds!r}")
+            except Exception as exc:
+                self._fail(f"bad audio settings: {exc}")
+                return
             try:
                 self.sv.recorder.start(device)
             except Exception as exc:
                 self._fail(f"cannot record: {exc}")
                 return
-            seconds = int(self.sv.config_getter("audio.max_seconds", 120))
-            self._timer = self._timer_factory(seconds, self._on_max_seconds)
-            self._timer.start()
+            try:
+                self._timer = self._timer_factory(seconds, self._on_max_seconds)
+                self._timer.start()
+            except Exception as exc:
+                self._cancel_recorder()
+                self._fail(f"cannot start recording: {exc}")
+                return
             self._set(State.RECORDING)
+
+    def _cancel_recorder(self) -> None:
+        try:
+            self.sv.recorder.cancel()
+        except Exception:
+            log.exception("failed to cancel the recorder")
 
     def _on_max_seconds(self) -> None:
         log.info("max recording length reached")
@@ -137,7 +163,7 @@ class Dictation:
                 return
             if self._timer:
                 self._timer.cancel()
-            self.sv.recorder.cancel()
+            self._cancel_recorder()
             self._set(State.IDLE, "cancelled")
 
     def recall(self) -> None:

@@ -277,3 +277,45 @@ def test_recorder_device_from_config():
     d, sv, *_ = make({"audio.device": "alsa_input.obsbot"})
     d.start()
     assert sv.recorder.started_with == ["alsa_input.obsbot"]
+
+
+def test_bad_max_seconds_fails_before_the_recorder_is_started():
+    # A malformed audio.max_seconds must be caught before pw-record is spawned,
+    # or the process is orphaned behind a dead listener thread.
+    d, sv, states, notes = make({"audio.max_seconds": "2m"})
+    d.start()
+    assert d.state == State.IDLE
+    assert sv.recorder.started_with == [] and sv.recorder.is_recording is False
+    assert State.ERROR in states
+    assert notes and "2m" in notes[-1][1]
+
+
+def test_non_positive_max_seconds_is_rejected():
+    d, sv, states, notes = make({"audio.max_seconds": 0})
+    d.start()
+    assert d.state == State.IDLE and sv.recorder.started_with == []
+    assert notes and "max_seconds" in notes[-1][1]
+
+
+def test_start_cancels_the_recorder_when_the_timer_cannot_be_armed():
+    def boom_timer(seconds, fn):
+        raise RuntimeError("no timers left")
+
+    d, sv, states, notes = make()
+    d._timer_factory = boom_timer
+    d.start()
+    assert d.state == State.IDLE
+    assert sv.recorder.cancelled == 1 and sv.recorder.is_recording is False
+    assert notes and "no timers left" in notes[-1][1]
+
+
+def test_on_hotkey_never_raises_into_the_listener_thread():
+    d, sv, states, notes = make()
+
+    def boom(key, default=None):
+        raise RuntimeError("config gone")
+
+    d.sv.config_getter = boom
+    d.on_hotkey("dictate", "press")          # must not propagate to the evdev thread
+    assert d.state == State.IDLE
+    assert d.last_error and "config gone" in d.last_error

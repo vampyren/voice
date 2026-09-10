@@ -108,7 +108,12 @@ class EvdevListener:
                 try:
                     for ev in dev.read():
                         if ev.type == ecodes.EV_KEY:
-                            self._handle(ev.code, ev.value)
+                            try:
+                                self._handle(ev.code, ev.value)
+                            except Exception:
+                                # A failing callback must never take this thread down:
+                                # every hotkey would go dead for the rest of the session.
+                                log.exception("hotkey handler failed for code %s value %s", ev.code, ev.value)
                 except OSError:
                     log.info("device gone: %s", getattr(dev, "path", "?"))
                     sel.unregister(key.fd)

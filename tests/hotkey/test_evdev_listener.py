@@ -90,3 +90,25 @@ def test_no_devices_marks_not_ok_and_stop_is_clean():
     listener.start()
     assert listener.devices_ok() is False   # initial scan is synchronous: no need to wait
     listener.stop()
+
+
+def test_callback_exception_does_not_kill_the_listener_thread():
+    dev = FakeDevice()
+    got = []
+
+    def on_event(name, kind):
+        got.append((name, kind))
+        if len(got) == 1:
+            raise RuntimeError("handler boom")
+
+    tracker = Tracker({"dictate": parse_keyspec("KEY_F13")})
+    listener = EvdevListener(tracker, on_event, device_factory=lambda: [dev])
+    listener.start()
+    try:
+        dev.push(e.KEY_F13, 1)
+        assert wait_for(lambda: got == [("dictate", "press")])
+        dev.push(e.KEY_F13, 0)
+        # The raising press must not have taken the thread down with it.
+        assert wait_for(lambda: got == [("dictate", "press"), ("dictate", "release")])
+    finally:
+        listener.stop()

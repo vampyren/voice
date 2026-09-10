@@ -37,6 +37,33 @@ def _parser() -> argparse.ArgumentParser:
     return p
 
 
+#: A shortcut the desktop registered and attached no key to. It is not "bound":
+#: nothing we can do makes a press arrive, only the user in their settings.
+UNASSIGNED_SHORTCUT = ("registered, no key assigned \u2014 assign it in your desktop's "
+                       "keyboard settings")
+DENIED_SHORTCUT = "NOT BOUND (accept the desktop's shortcut dialog)"
+
+
+def _shortcut_row(reply: dict, keyboard) -> str:
+    """What the portal actually did with our shortcuts, in one line.
+
+    `shortcut_state` is what a current daemon reports; the bool fallback keeps a
+    `voice status` run against an older one readable.
+    """
+    state = reply.get("shortcut_state")
+    triggers = reply.get("shortcut_triggers") or {}
+    if state == "unassigned":
+        return UNASSIGNED_SHORTCUT
+    if state == "denied":
+        return DENIED_SHORTCUT
+    if state == "bound":
+        keys = ", ".join(f"{sid}={trigger}" for sid, trigger in triggers.items())
+        return f"bound ({keys})" if keys else "bound"
+    if keyboard is None:
+        return "waiting for the desktop"
+    return "bound" if keyboard else DENIED_SHORTCUT
+
+
 def _print_status(reply: dict) -> None:
     for_language = reply.get("profile_language")
     # Only when a language actually chose it: see daemon.profile_for_status.
@@ -51,11 +78,7 @@ def _print_status(reply: dict) -> None:
     if reply.get("hotkey_backend") == "portal":
         # There is no keyboard to have access to on this backend: the desktop
         # either bound our shortcuts, refused them, or has not answered yet.
-        if keyboard is None:
-            bound = "waiting for the desktop"
-        else:
-            bound = "bound" if keyboard else "NOT BOUND (accept the desktop's shortcut dialog)"
-        rows.append(("shortcuts", bound))
+        rows.append(("shortcuts", _shortcut_row(reply, keyboard)))
     else:
         rows.append(("keyboard", "ok" if keyboard else ("unknown" if keyboard is None else "NO ACCESS")))
     if reply.get("last_error"):

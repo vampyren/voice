@@ -223,6 +223,28 @@ def test_status_still_reports_keyboard_access_on_the_evdev_backend(isolated_xdg,
     assert "shortcuts:" not in out
 
 
+@pytest.mark.parametrize("state,triggers,expected", [
+    ("bound", {"dictate": "F13"}, "shortcuts: bound (dictate=F13)"),
+    ("unassigned", {"dictate": ""},
+     "shortcuts: registered, no key assigned \u2014 assign it in your desktop's keyboard settings"),
+    ("denied", {}, "shortcuts: NOT BOUND (accept the desktop's shortcut dialog)"),
+])
+def test_status_separates_a_bound_shortcut_from_one_with_no_key(isolated_xdg, capsys, state,
+                                                                triggers, expected):
+    """"Registered" is not "bound": GNOME answers BindShortcuts with success and
+    attaches no key, and reporting that as bound is why two keys did nothing."""
+    srv = ipc.Server(lambda r: {"ok": True, "state": "idle", "profile": "local", "backend": "fake",
+                                "last_error": None, "keyboard": state == "bound", "language": "en",
+                                "hotkey_backend": "portal", "shortcut_state": state,
+                                "shortcut_triggers": triggers})
+    srv.start()
+    try:
+        assert main(["status"]) == 0
+    finally:
+        srv.stop()
+    assert expected in capsys.readouterr().out
+
+
 def _value_columns(out: str) -> list[int]:
     """The column each printed value starts in, one entry per status line."""
     columns = []

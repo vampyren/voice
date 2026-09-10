@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, Signal
 
 from voice.config import Config
 from voice.daemon import Daemon, hotkey_specs
+from voice.hotkey.portal_listener import STATE_BOUND, STATE_DENIED, STATE_UNASSIGNED
 from voice.hotkey.keyspec import parse_keyspec
 
 
@@ -566,11 +567,89 @@ def test_a_portal_denial_notifies_even_though_binding_finishes_after_start(isola
     d = Daemon(cfg, sender=FakeSender(), tray=FakeTray(), notifier=notifier)
     d.build()
     assert callable(captured["on_ready"])
-    captured["on_ready"](True)
+    captured["on_ready"](STATE_BOUND)
     assert notified == []                                    # a working binding says nothing
-    captured["on_ready"](False)
+    captured["on_ready"](STATE_DENIED)
     assert notified and notified[-1][1] == "critical"
     d.shutdown()
+
+
+def _reporting_portal_daemon(monkeypatch, notifier, state=None, triggers=None, captured=None):
+    """A built portal-backed daemon whose listener reports `state`/`triggers`."""
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    box = captured if captured is not None else {}
+
+    class FakePortalListener(FakeListener):
+        def __init__(self, on_event, shortcuts, **kwargs):
+            super().__init__()
+            box["on_ready"] = kwargs.get("on_ready")
+
+        def devices_ok(self):
+            return None if state is None else state == STATE_BOUND
+
+        def shortcut_state(self):
+            return state
+
+        def effective_triggers(self):
+            return dict(triggers or {})
+
+    monkeypatch.setattr("voice.daemon.PortalListener", FakePortalListener)
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", "portal")
+    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray(), notifier=notifier)
+    d.build()
+    return d
+
+
+def test_a_shortcut_registered_without_a_key_is_reported_once(isolated_xdg, qapp, monkeypatch):
+    """Success with no trigger attached is the silent failure this whole change
+    is about: the user must be told, and told once, not on every reload."""
+    notified = []
+    notifier = type("N", (), {
+        "notify": lambda self, title, body, urgency="normal": notified.append((title, body, urgency)),
+        "set_enabled": lambda self, enabled: None})()
+    captured = {}
+    d = _reporting_portal_daemon(monkeypatch, notifier, state=STATE_UNASSIGNED,
+                       triggers={"dictate": ""}, captured=captured)
+    try:
+        captured["on_ready"](STATE_UNASSIGNED)
+        assert len(notified) == 1
+        title, body, urgency = notified[0]
+        assert "not assigned" in title.lower()
+        assert "Keyboard Settings" in body and "voice" in body
+        assert urgency == "critical"
+        captured["on_ready"](STATE_UNASSIGNED)               # a reload rebinds; stay quiet
+        assert len(notified) == 1
+    finally:
+        d.shutdown()
+
+
+def test_status_carries_the_effective_portal_trigger_per_shortcut(isolated_xdg, qapp, monkeypatch):
+    d = _reporting_portal_daemon(monkeypatch, QuietNotifier(), state=STATE_UNASSIGNED,
+                       triggers={"dictate": "", "recall": "F14"})
+    try:
+        st = d.handle({"cmd": "status"})
+        assert st["shortcut_state"] == STATE_UNASSIGNED
+        assert st["shortcut_triggers"] == {"dictate": "", "recall": "F14"}
+        assert st["keyboard"] is False                       # registered is not bound
+    finally:
+        d.shutdown()
+
+
+def test_status_says_nothing_about_shortcuts_on_the_evdev_backend(isolated_xdg, qapp, monkeypatch):
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    monkeypatch.setattr("voice.daemon.EvdevListener", lambda tracker, on_event: FakeListener())
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", "evdev")
+    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    try:
+        st = d.handle({"cmd": "status"})
+        assert "shortcut_state" not in st and "shortcut_triggers" not in st
+    finally:
+        d.shutdown()
 
 
 # -- recording overlay ---------------------------------------------------------

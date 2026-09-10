@@ -17,7 +17,7 @@ from voice.config import Config, is_language_code
 from voice.history import History
 from voice.hotkey.evdev_listener import EvdevListener
 from voice.hotkey.keyspec import KeySpec, Tracker, parse_keyspec
-from voice.hotkey.portal_listener import PortalListener
+from voice.hotkey.portal_listener import STATE_BOUND, STATE_UNASSIGNED, PortalListener
 from voice.inject.clipboard import Clipboard
 from voice.inject.fallback import make_key_sender
 from voice.inject.injector import Injector, run_window_command
@@ -224,6 +224,8 @@ class Daemon:
         self._active_profile: tuple[str, dict] | None = None
         #: What the running listener was built from; None until build().
         self._hotkey_settings: tuple | None = None
+        #: The "no key assigned" notification is worth sending once, not per reload.
+        self._shortcut_hint_shown = False
         #: The language the pill was last told about; see _send_overlay.
         self._overlay_language = str(config.get("general.language", "en") or "en")
         #: The [ui] settings the running helper was started with; see _make_overlay.
@@ -396,14 +398,43 @@ class Daemon:
                                   on_ready=self._on_hotkeys_ready), backend
         return EvdevListener(self.tracker, self._on_hotkey), backend
 
-    def _on_hotkeys_ready(self, ok: bool) -> None:
-        """Called from the portal listener thread once the desktop has answered."""
-        if ok:
+    def _on_hotkeys_ready(self, state: str) -> None:
+        """Called from the portal listener thread once the desktop has answered.
+
+        `state` is one of the listener's STATE_* words. "unassigned" is the one
+        that used to pass for success: the desktop registered our shortcut and
+        attached no key to it, so nothing we do makes a press arrive - only the
+        user, in their keyboard settings, can.
+        """
+        if state == STATE_BOUND:
+            return
+        if state == STATE_UNASSIGNED:
+            # Once per daemon run: a reload rebuilds the listener, and a repeated
+            # critical notification for a state the user is already looking at is
+            # noise they cannot switch off.
+            if self._shortcut_hint_shown:
+                return
+            self._shortcut_hint_shown = True
+            self._notifier.notify("Dictation shortcut is not assigned",
+                                  "Open Keyboard Settings and set a key for voice.", "critical")
             return
         self._notifier.notify("Shortcut not registered",
                               "The desktop did not bind the global shortcut. Check its shortcut settings, "
-                              "check hotkeys.portal_dictate, or run install.sh so the portal can resolve "
-                              "this app.", "critical")
+                              "or run install.sh so the portal can resolve this app.", "critical")
+
+    def _shortcut_status(self) -> dict:
+        """The portal listener's effective triggers, for `status` and `doctor`.
+
+        Empty on evdev, which has no such thing, and on any listener a test
+        substituted - the two accessors are portal-only.
+        """
+        if self.hotkey_backend != "portal":
+            return {}
+        state = getattr(self.listener, "shortcut_state", None)
+        triggers = getattr(self.listener, "effective_triggers", None)
+        if state is None or triggers is None:
+            return {}
+        return {"shortcut_state": state(), "shortcut_triggers": triggers()}
 
     def _profile_snapshot(self) -> tuple[str, dict] | None:
         """The active (name, profile) pair, or None if stt.active is unresolvable."""
@@ -702,7 +733,7 @@ class Daemon:
                     "profile_language": for_language,
                     "backend": d.sv.transcriber.describe(), "last_error": d.last_error,
                     "version": __version__, "keyboard": self.listener.devices_ok(),
-                    "hotkey_backend": self.hotkey_backend,
+                    "hotkey_backend": self.hotkey_backend, **self._shortcut_status(),
                     "language": self.config.get("general.language"),
                     "overlay": self.overlay.status() if self.overlay else "off"}
         if cmd == "profile":

@@ -11,6 +11,7 @@ from voice.ui.overlay import (
     reduced_motion,
 )
 from voice.ui.overlay_model import BAR_FLOOR, TAPER, OverlayModel
+from voice.ui.placement import normalise_position
 
 
 class Clock:
@@ -130,8 +131,128 @@ def test_the_environment_overrides_gtk(monkeypatch, value, expected):
 
 def test_the_command_line_defaults_match_the_design():
     args = build_parser().parse_args([])
-    assert (args.height, args.position, args.margin, args.lang) == (44, "bottom", 48, "en")
-    assert build_parser().parse_args(["--lang", "sv", "--position", "top"]).position == "top"
+    assert (args.height, args.position, args.lang) == (44, "bottom-center", "en")
+    assert (args.margin_x, args.margin_y) == (0, 48)
+    assert build_parser().parse_args(
+        ["--lang", "sv", "--position", "top-right"]).position == "top-right"
+    assert build_parser().parse_args(["--margin-x", "-12"]).margin_x == -12
+
+
+@pytest.mark.parametrize("legacy,expected", [("bottom", "bottom-center"), ("top", "top-center")])
+def test_the_helper_still_takes_the_two_old_positions(legacy, expected):
+    """A daemon and a helper are upgraded together, but a hand-run command line
+    and an older unit are not."""
+    args = build_parser().parse_args(["--position", legacy])
+    assert normalise_position(args.position) == expected
+
+
+def test_a_position_the_parser_does_not_know_is_refused_at_the_command_line():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--position", "sideways"])
+
+
+# -- the layer surface ----------------------------------------------------
+
+class FakeShell:
+    """gtk4-layer-shell, recording what the helper asks of it."""
+
+    class Edge:
+        TOP, BOTTOM, LEFT, RIGHT = "TOP", "BOTTOM", "LEFT", "RIGHT"
+
+    class Layer:
+        OVERLAY = "OVERLAY"
+
+    class KeyboardMode:
+        NONE = "NONE"
+
+    def __init__(self):
+        self.window = None
+        self.layer = None
+        self.keyboard = None
+        self.exclusive = None
+        self.anchored: dict[str, bool] = {}
+        self.margins: dict[str, int] = {}
+
+    def init_for_window(self, window):
+        self.window = window
+
+    def set_layer(self, window, layer):
+        self.layer = layer
+
+    def set_anchor(self, window, edge, on):
+        self.anchored[edge] = on
+
+    def set_margin(self, window, edge, px):
+        self.margins[edge] = px
+
+    def set_keyboard_mode(self, window, mode):
+        self.keyboard = mode
+
+    def set_exclusive_zone(self, window, zone):
+        self.exclusive = zone
+
+
+@pytest.mark.parametrize("position,anchored,margins", [
+    ("top-left", {"TOP", "LEFT"}, {"TOP": 48, "LEFT": 12}),
+    ("top-center", {"TOP"}, {"TOP": 48}),
+    ("top-right", {"TOP", "RIGHT"}, {"TOP": 48, "RIGHT": 12}),
+    ("middle-left", {"LEFT"}, {"LEFT": 12}),
+    ("middle-center", set(), {}),
+    ("middle-right", {"RIGHT"}, {"RIGHT": 12}),
+    ("bottom-left", {"BOTTOM", "LEFT"}, {"BOTTOM": 48, "LEFT": 12}),
+    ("bottom-center", {"BOTTOM"}, {"BOTTOM": 48}),
+    ("bottom-right", {"BOTTOM", "RIGHT"}, {"BOTTOM": 48, "RIGHT": 12}),
+])
+def test_each_placement_becomes_its_anchors_and_margins_on_the_surface(position, anchored, margins):
+    from voice.ui.overlay import init_layer_shell
+
+    shell, window = FakeShell(), object()
+    init_layer_shell(shell, window, position, margin_x=12, margin_y=48)
+    assert shell.window is window
+    assert {edge for edge, on in shell.anchored.items() if on} == anchored
+    # Every edge is stated, not only the anchored ones: an unstated anchor is a
+    # default, and a default is not something this helper should rely on.
+    assert set(shell.anchored) == {"TOP", "BOTTOM", "LEFT", "RIGHT"}
+    assert shell.margins == margins
+    assert (shell.layer, shell.keyboard, shell.exclusive) == ("OVERLAY", "NONE", -1)
+
+
+def test_the_surface_is_still_a_focus_refusing_overlay_whatever_the_placement():
+    from voice.ui.overlay import init_layer_shell
+
+    shell = FakeShell()
+    init_layer_shell(shell, object(), "middle-center", margin_x=0, margin_y=0)
+    assert (shell.layer, shell.keyboard, shell.exclusive) == ("OVERLAY", "NONE", -1)
+
+
+# -- no layer shell: the placement cannot be honoured ---------------------
+
+def test_a_plain_window_says_once_that_it_cannot_be_placed(caplog):
+    from voice.ui.overlay import warn_about_placement
+
+    with caplog.at_level("WARNING", logger="voice.ui.overlay"):
+        warn_about_placement("top-right", 0, 48)
+    assert "top-right" in caplog.text and "ui.overlay_position" in caplog.text
+
+
+def test_a_plain_window_at_the_default_placement_says_nothing(caplog):
+    from voice.ui.overlay import warn_about_placement
+
+    with caplog.at_level("WARNING", logger="voice.ui.overlay"):
+        warn_about_placement("bottom-center", 0, 48)
+    assert caplog.text == ""
+
+
+def test_the_fallback_window_warns_about_focus_and_about_the_placement(monkeypatch, caplog):
+    """Both sentences, once each, on the path that really shows a plain window."""
+    import voice.ui.overlay as overlay
+
+    monkeypatch.setattr(overlay, "_load_gtk", lambda: (object(), object(), object(), None))
+    monkeypatch.setattr(overlay, "_Pill", lambda *a, **kw: type("P", (), {"run": lambda self: 0})())
+    with caplog.at_level("WARNING", logger="voice.ui.overlay"):
+        assert overlay.main(["--position", "middle-right", "--margin-x", "20"]) == 0
+    assert caplog.text.count("take keyboard focus") == 1
+    assert caplog.text.count("middle-right") == 1
 
 
 # -- the whole protocol end to end ----------------------------------------

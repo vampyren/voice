@@ -37,6 +37,9 @@ import sys
 import threading
 
 from voice.ui.overlay_model import OverlayModel
+from voice.ui.placement import (DEFAULT_MARGIN_X, DEFAULT_MARGIN_Y, DEFAULT_POSITION,
+                                LEGACY_POSITIONS, POSITIONS, anchors, normalise_position,
+                                placement_note)
 
 log = logging.getLogger(__name__)
 
@@ -114,14 +117,52 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="voice-overlay", description=__doc__)
     parser.add_argument("--lang", default="en", help="language code for the badge")
     parser.add_argument("--height", type=int, default=44, help="pill height in pixels")
-    parser.add_argument("--position", choices=("bottom", "top"), default="bottom")
-    parser.add_argument("--margin", type=int, default=48,
-                        help="distance from the anchored screen edge (layer-shell only)")
+    parser.add_argument("--position", choices=POSITIONS + tuple(LEGACY_POSITIONS),
+                        default=DEFAULT_POSITION,
+                        help="where the pill sits, e.g. bottom-right (layer-shell only)")
+    parser.add_argument("--margin-x", type=int, default=DEFAULT_MARGIN_X,
+                        help="pixels in from the anchored side, horizontally; a centred "
+                             "half has no anchored side and ignores this")
+    parser.add_argument("--margin-y", type=int, default=DEFAULT_MARGIN_Y,
+                        help="the same, vertically (layer-shell only)")
     parser.add_argument("--require-layer-shell", action="store_true",
                         help="exit 2 instead of falling back to a focus-stealing "
                              "plain window when no layer surface is available")
     parser.add_argument("--verbose", action="store_true")
     return parser
+
+
+def init_layer_shell(shell, window, position: str, margin_x: int, margin_y: int) -> None:
+    """Anchor the pill's surface where the placement says, and keep it unfocusable.
+
+    Every edge is stated, anchored or not: an unstated anchor is whatever the
+    library defaults to, and the pill's position must not rest on that.
+    """
+    wanted = anchors(position, margin_x=margin_x, margin_y=margin_y)
+    shell.init_for_window(window)
+    shell.set_layer(window, shell.Layer.OVERLAY)
+    for name in ("top", "bottom", "left", "right"):
+        edge = getattr(shell.Edge, name.upper())
+        shell.set_anchor(window, edge, name in wanted)
+        if name in wanted:
+            shell.set_margin(window, edge, wanted[name])
+    shell.set_keyboard_mode(window, shell.KeyboardMode.NONE)
+    shell.set_exclusive_zone(window, -1)
+    log.info("overlay: gtk4-layer-shell on the overlay layer, %s%s",
+             normalise_position(position),
+             f" with margins {wanted}" if wanted else "")
+
+
+def warn_about_placement(position: str, margin_x: int, margin_y: int) -> None:
+    """Say once that a placement asked for cannot be applied to a plain window.
+
+    GTK 4 has no way to move a toplevel and Wayland gives the compositor the
+    last word, so without a layer surface the setting is silently useless -
+    which is exactly what an owner who moved the pill must not be left with.
+    """
+    note = placement_note(position, margin_x, margin_y)
+    if note is not None:
+        log.warning("%s", note)
 
 
 class _Pill:
@@ -168,14 +209,8 @@ class _Pill:
                 display, css, gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
     def _init_layer_shell(self, shell) -> None:
-        shell.init_for_window(self.window)
-        shell.set_layer(self.window, shell.Layer.OVERLAY)
-        edge = shell.Edge.TOP if self._args.position == "top" else shell.Edge.BOTTOM
-        shell.set_anchor(self.window, edge, True)
-        shell.set_margin(self.window, edge, self._args.margin)
-        shell.set_keyboard_mode(self.window, shell.KeyboardMode.NONE)
-        shell.set_exclusive_zone(self.window, -1)
-        log.info("overlay: using gtk4-layer-shell on the overlay layer")
+        init_layer_shell(shell, self.window, self._args.position,
+                         margin_x=self._args.margin_x, margin_y=self._args.margin_y)
 
     # -- drawing ----------------------------------------------------------
 
@@ -313,6 +348,7 @@ def main(argv: list[str] | None = None) -> int:
         return refused
     if layer_shell is None:
         _warn_about_focus()
+        warn_about_placement(args.position, args.margin_x, args.margin_y)
     return _Pill(args, gtk, gdk, glib, layer_shell).run()
 
 

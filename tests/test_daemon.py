@@ -312,3 +312,55 @@ def test_apply_config_keeps_previous_settings_when_the_file_is_broken(isolated_x
     assert any("keeping previous settings" in title for title, _ in notified)
     assert notified[-1][1] == "critical"
     d.shutdown()
+
+
+def test_warmup_does_not_occupy_the_dictation_worker(isolated_xdg, qapp, monkeypatch):
+    """Loading a model takes tens of seconds. On the single dictation worker it
+    blocks recall/retry, and a queued paste then fires whenever the load ends."""
+    import time
+
+    from voice.history import Entry
+    from voice.inject.injector import InjectResult
+
+    blocked, release = threading.Event(), threading.Event()
+
+    class SlowTranscriber:
+        name = "slow"
+
+        def describe(self):
+            return "slow"
+
+        def warmup(self):
+            blocked.set()
+            release.wait(10)
+
+        def transcribe(self, *a):
+            raise AssertionError("not reached")
+
+    class RecordingInjector:
+        def __init__(self):
+            self.texts = []
+
+        def inject(self, text):
+            self.texts.append(text)
+            return InjectResult("fake", "ctrl+v", True)
+
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: SlowTranscriber())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray())
+    d.build()
+    injector = RecordingInjector()
+    d.dictation.set_injector(injector)
+    d.history.add(Entry("hello world", time.time(), "fake", 1.0, 0.1))
+
+    try:
+        d._start_warmup()
+        assert blocked.wait(2)                       # the model load is in flight and stuck
+        d.dictation.recall()                         # queued on the shared pipeline pool
+        deadline = time.monotonic() + 2
+        while not injector.texts and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert injector.texts == ["hello world"]     # completed while warmup is still blocked
+        assert not release.is_set()
+    finally:
+        release.set()
+    d.shutdown()

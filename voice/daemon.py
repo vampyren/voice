@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 from typing import Callable
 
 from PySide6.QtCore import QObject, Signal
@@ -148,8 +149,7 @@ class Daemon:
             return self._hand_over()
         self.listener.start()
         self.tray.show()
-        from voice.pipeline import _thread_executor
-        _thread_executor(self._warmup)
+        self._start_warmup()
         if self.listener.devices_ok() is False:
             self._notifier.notify("No keyboard access", "Run the installer's udev step or add yourself to the input group.", "critical")
         log.info("%s %s ready", APP_NAME, __version__)
@@ -165,6 +165,12 @@ class Daemon:
         except IPCError:
             pass
         return 0
+
+    def _start_warmup(self) -> None:
+        # Its own thread, never the pipeline pool: a model load takes tens of
+        # seconds and that pool has a single worker, so recall/retry would sit
+        # behind it with their state already reserved and paste on completion.
+        threading.Thread(target=self._warmup, name="warmup", daemon=True).start()
 
     def _warmup(self) -> None:
         try:
@@ -206,8 +212,7 @@ class Daemon:
         if current != self._active_profile:
             self._active_profile = current
             self.dictation.set_transcriber(self._make_transcriber())
-            from voice.pipeline import _thread_executor
-            _thread_executor(self._warmup)
+            self._start_warmup()
         self.injector = Injector(self._clipboard, self._sender, self.config.get("inject", {}) or {},
                                  self.listener.modifiers_held, window_class_getter(self.config))
         self.dictation.set_injector(self.injector)

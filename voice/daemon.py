@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication
 
 from voice import APP_NAME, __version__
 from voice.audio.capture import Recorder, list_sources
-from voice.config import Config
+from voice.config import Config, is_language_code
 from voice.history import History
 from voice.hotkey.evdev_listener import EvdevListener
 from voice.hotkey.keyspec import KeySpec, Tracker, parse_keyspec
@@ -26,12 +26,17 @@ from voice.pipeline import Dictation, Services, State
 from voice.stt import make_transcriber
 from voice.stt.base import TranscriptionError
 from voice.ui.notify import Notifier
+from voice.ui.overlay_client import OverlayClient, default_launcher
 from voice.ui.settings import SettingsDialog
 from voice.ui.tray import Tray
 
 log = logging.getLogger(__name__)
 
 HOTKEY_BACKENDS = ("evdev", "portal")
+
+#: Every hotkey the daemon binds, in both listeners. `language_toggle` is
+#: handled here rather than in the pipeline: it changes settings, not state.
+HOTKEY_NAMES = ("dictate", "recall", "cancel", "language_toggle")
 SEAT_TIMEOUT_S = 2
 
 
@@ -87,7 +92,7 @@ def choose_hotkey_backend(config: Config, keyboards_readable: bool, has_local_se
 def portal_shortcuts(config: Config) -> dict[str, str]:
     """The shortcut ids to bind through the portal, with their XDG triggers."""
     shortcuts = {}
-    for name in ("dictate", "recall", "cancel"):
+    for name in HOTKEY_NAMES:
         trigger = config.portal_trigger(name)
         if trigger:
             shortcuts[name] = trigger
@@ -96,7 +101,7 @@ def portal_shortcuts(config: Config) -> dict[str, str]:
 
 def hotkey_specs(config: Config) -> dict[str, KeySpec]:
     specs = {}
-    for name in ("dictate", "recall", "cancel"):
+    for name in HOTKEY_NAMES:
         text = config.get(f"hotkeys.{name}", "") or ""
         try:
             specs[name] = parse_keyspec(text)
@@ -104,6 +109,39 @@ def hotkey_specs(config: Config) -> dict[str, KeySpec]:
             log.warning("ignoring hotkeys.%s: %s", name, exc)
             specs[name] = parse_keyspec("")
     return specs
+
+
+#: Pipeline details that mean "there is nothing to show": the recording is
+#: gone and the pill must come off the screen at once.
+NOTHING_TO_SHOW = ("cancelled", "too short", "empty")
+
+#: The detail the pipeline uses for the IDLE that immediately follows an error.
+#: The pill is showing the message and times itself out; hiding it here would
+#: replace a two-second explanation with nothing.
+AFTER_ERROR = "after error"
+
+
+def overlay_messages(state: State, detail: str, language: str) -> list[dict]:
+    """The pill protocol for one pipeline transition, in order.
+
+    Pure so the mapping can be read (and tested) without a daemon: the states
+    the user must see are recording, transcribing, the checkmark and errors.
+    """
+    if state is State.RECORDING:
+        # The badge first, so the pill never appears showing the old language.
+        return [{"language": language}, {"state": "recording"}]
+    if state is State.TRANSCRIBING:
+        return [{"state": "transcribing"}]
+    if state is State.INJECTING:
+        return [{"state": "done"}]
+    if state is State.ERROR:
+        return [{"state": "error", "text": detail or "dictation failed"}]
+    if state is State.IDLE:
+        if detail in NOTHING_TO_SHOW:
+            return [{"state": "hidden"}]
+        if detail and detail != AFTER_ERROR:
+            return [{"state": "done"}]        # insertion finished; helper hides itself
+    return []
 
 
 def window_class_getter(config: Config) -> Callable[[], str | None]:
@@ -138,6 +176,7 @@ class _Bridge(QObject):
     open_settings = Signal()
     apply_config = Signal()
     set_profile = Signal(str)
+    set_language = Signal(str)
     quit = Signal()
 
 
@@ -146,7 +185,10 @@ class Daemon:
                  notifier=None, tray=None):
         self.config = config
         self._listener_override = listener
-        self._recorder = recorder or Recorder()
+        # The pill is built in build(); the recorder is not, so it forwards
+        # levels through this daemon rather than holding the client itself.
+        self.overlay: OverlayClient | None = None
+        self._recorder = recorder or Recorder(on_level=self._on_level)
         self._clipboard = clipboard or Clipboard()
         self._sender = sender
         self._notifier = notifier or Notifier(bool(config.get("general.notifications", True)))
@@ -170,13 +212,42 @@ class Daemon:
                             config_getter=self.config.get, prompt_getter=self._prompt)
         self.dictation = Dictation(services)
         self.tray = self._tray or Tray(self._on_tray_action)
-        self.dictation.on_state = lambda s, d: self.tray.state_changed.emit(s.value, d)
+        self.overlay = self._make_overlay()
+        self.dictation.on_state = self._on_dictation_state
         self.tray.set_profiles(list(self.config.get("stt.profiles", {}) or {}), self.config.get("stt.active"))
+        self.tray.set_languages(self.config.languages(), self.config.get("general.language"))
         self._bridge.open_settings.connect(self.open_settings)
         self._bridge.apply_config.connect(self.apply_config)
         self._bridge.set_profile.connect(self._set_profile)
+        self._bridge.set_language.connect(self._set_language)
         self._bridge.quit.connect(self._quit)
         self._server = Server(self.handle)
+
+    def _make_overlay(self) -> OverlayClient:
+        """The recording pill's supervisor. Disabled means: never spawn anything."""
+        enabled = bool(self.config.get("ui.overlay", True))
+        position = str(self.config.get("ui.overlay_position", "bottom") or "bottom")
+        language = str(self.config.get("general.language", "en") or "en")
+        return OverlayClient(enabled, launcher=lambda: default_launcher(position=position,
+                                                                        lang=language))
+
+    def _on_level(self, level: float) -> None:
+        """Audio reader thread. Must not block: the client queues and returns."""
+        if self.overlay is not None:
+            self.overlay.send({"level": round(float(level), 3)})
+
+    def _on_dictation_state(self, state: State, detail: str = "") -> None:
+        """One pipeline transition, to the tray and to the pill.
+
+        The tray comes first and by signal, as before; the pill is decoration
+        and its client swallows every failure, so neither can delay the other.
+        """
+        self.tray.state_changed.emit(state.value, detail)
+        if self.overlay is None:
+            return
+        language = str(self.config.get("general.language", "en") or "en")
+        for message in overlay_messages(state, detail, language):
+            self.overlay.send(message)
 
     def _make_listener(self):
         """The hotkey listener plus the name of the backend it represents.
@@ -247,6 +318,7 @@ class Daemon:
             # bind. Hand over without starting the listener or touching its socket.
             return self._hand_over()
         self.listener.start()
+        self.overlay.start()
         self.tray.show()
         self._start_warmup()
         # The portal listener answers asynchronously and reports through
@@ -294,6 +366,8 @@ class Daemon:
             self.listener.stop()
         except Exception:
             log.exception("failed to stop listener during shutdown")
+        if self.overlay is not None:
+            self.overlay.stop()
         if self._server:
             self._server.stop()
 
@@ -318,6 +392,7 @@ class Daemon:
                                  self.listener.modifiers_held, window_class_getter(self.config))
         self.dictation.set_injector(self.injector)
         self.tray.set_profiles(list(self.config.get("stt.profiles", {}) or {}), self.config.get("stt.active"))
+        self.tray.set_languages(self.config.languages(), self.config.get("general.language"))
 
     def _set_profile(self, name: str) -> None:
         """Qt thread: persist the profile switch, then apply it."""
@@ -330,13 +405,46 @@ class Daemon:
             return
         self.apply_config()
 
+    def _set_language(self, code: str) -> None:
+        """Qt thread: persist the language switch, apply it, then show it."""
+        previous = str(self.config.get("general.language", "en") or "en")
+        try:
+            self.config.set("general.language", code)
+            self.config.save()
+        except Exception as exc:
+            log.exception("could not save the language switch")
+            self._notifier.notify("Could not save settings", str(exc), "critical")
+            return
+        self.apply_config()
+        if self.overlay is not None:
+            self.overlay.send({"language": code})
+            self.overlay.send({"state": "notice",
+                               "text": f"{previous.upper()} \u2192 {code.upper()}"})
+
+    def _next_language(self) -> str | None:
+        cycle = self.config.languages()
+        if not cycle:
+            return None
+        current = str(self.config.get("general.language", "en") or "en")
+        if current not in cycle:
+            return cycle[0]
+        return cycle[(cycle.index(current) + 1) % len(cycle)]
+
     # -- events ---------------------------------------------------------------
     def _on_hotkey(self, name: str, kind: str) -> None:
+        if name == "language_toggle":
+            # Not a dictation key: it edits settings, so it goes through the
+            # same IPC path as `voice language next` and lands on the Qt thread.
+            if kind == "press":
+                self.handle({"cmd": "language", "code": "next"})
+            return
         self.dictation.on_hotkey(name, kind)
 
     def _on_tray_action(self, action: str) -> None:
         if action.startswith("profile:"):
             self.handle({"cmd": "profile", "name": action.split(":", 1)[1]})
+        elif action.startswith("language:"):
+            self.handle({"cmd": "language", "code": action.split(":", 1)[1]})
         else:
             self.handle({"cmd": action})
 
@@ -380,7 +488,8 @@ class Daemon:
             return {"ok": True, "state": d.state.value, "profile": self.config.get("stt.active"),
                     "backend": d.sv.transcriber.describe(), "last_error": d.last_error,
                     "version": __version__, "keyboard": self.listener.devices_ok(),
-                    "hotkey_backend": self.hotkey_backend}
+                    "hotkey_backend": self.hotkey_backend,
+                    "language": self.config.get("general.language")}
         if cmd == "profile":
             name = request.get("name", "")
             if name not in (self.config.get("stt.profiles", {}) or {}):
@@ -389,6 +498,15 @@ class Daemon:
             # config file from the IPC thread races the settings dialog.
             self._bridge.set_profile.emit(name)
             return {"ok": True, "profile": name}
+        if cmd == "language":
+            code = str(request.get("code", "")).strip().lower()
+            target = self._next_language() if code == "next" else code
+            if not is_language_code(target):
+                return {"ok": False, "error": f"unknown language {code!r}"}
+            # Validated here, written and applied on the Qt thread: same rule as
+            # `profile`, because both touch the config file.
+            self._bridge.set_language.emit(target)
+            return {"ok": True, "language": target}
         if cmd == "reload":
             self._bridge.apply_config.emit()
             return {"ok": True}

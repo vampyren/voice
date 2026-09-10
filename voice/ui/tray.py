@@ -24,8 +24,9 @@ class Tray(QObject):
             self._add(key, label)
         self.menu.addSeparator()
         self.profile_menu = self.menu.addMenu("Transcription profile")
-        self._profile_group = QActionGroup(self)
-        self._profile_group.setExclusive(True)
+        self._profile_group = self._exclusive_group()
+        self.language_menu = self.menu.addMenu("Language")
+        self._language_group = self._exclusive_group()
         self.menu.addSeparator()
         self._add("settings", "Settings…")
         self._add("quit", "Quit")
@@ -33,6 +34,11 @@ class Tray(QObject):
         self.icon.activated.connect(self._activated)
         self.state_changed.connect(self.set_state)
         self.set_state("idle", "ready")
+
+    def _exclusive_group(self) -> QActionGroup:
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        return group
 
     def _add(self, key: str, label: str) -> None:
         act = QAction(label, self.menu)
@@ -52,16 +58,31 @@ class Tray(QObject):
         self.icon.setToolTip(f"{APP_NAME} · {state}" + (f" · {detail}" if detail else ""))
 
     def set_profiles(self, names: list[str], active: str) -> None:
-        for act in list(self.profile_menu.actions()):
-            self.profile_menu.removeAction(act)
-            self._profile_group.removeAction(act)
-        for name in names:
-            act = QAction(name, self.profile_menu)
+        self._set_radio(self.profile_menu, self._profile_group, "profile",
+                        [(name, name) for name in names], active)
+
+    def set_languages(self, codes: list[str], active: str) -> None:
+        """The language cycle, as a radio list. Codes are shown upper-case."""
+        self._set_radio(self.language_menu, self._language_group, "language",
+                        [(code, str(code).upper()) for code in codes], active)
+
+    def _set_radio(self, menu: QMenu, group: QActionGroup, prefix: str,
+                   entries: list[tuple[str, str]], active: str) -> None:
+        """Rebuild `menu` as one exclusive radio entry per (value, label).
+
+        Rebuilt rather than updated: the list itself changes when the config is
+        reloaded, and a stale entry would send a command for something gone.
+        """
+        for act in list(menu.actions()):
+            menu.removeAction(act)
+            group.removeAction(act)
+        for value, label in entries:
+            act = QAction(label, menu)
             act.setCheckable(True)
-            act.setChecked(name == active)
-            act.triggered.connect(lambda _=False, n=name: self._on_action(f"profile:{n}"))
-            self._profile_group.addAction(act)
-            self.profile_menu.addAction(act)
+            act.setChecked(value == active)
+            act.triggered.connect(lambda _=False, v=value: self._on_action(f"{prefix}:{v}"))
+            group.addAction(act)
+            menu.addAction(act)
 
     def show(self) -> None:
         self.icon.show()

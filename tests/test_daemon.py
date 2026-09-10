@@ -38,16 +38,20 @@ class FakeSender:
 
 
 class FakeTray(QObject):
-    """Records set_profiles() calls without touching any real QMenu/QAction."""
+    """Records set_profiles()/set_languages() without a real QMenu/QAction."""
 
     state_changed = Signal(str, str)
 
     def __init__(self):
         super().__init__()
         self.calls = []
+        self.languages = []
 
     def set_profiles(self, names, active):
         self.calls.append((list(names), active))
+
+    def set_languages(self, codes, active):
+        self.languages.append((list(codes), active))
 
     def show(self):
         pass
@@ -545,3 +549,180 @@ def test_a_portal_denial_notifies_even_though_binding_finishes_after_start(isola
     captured["on_ready"](False)
     assert notified and notified[-1][1] == "critical"
     d.shutdown()
+
+
+# -- recording overlay ---------------------------------------------------------
+def _overlay_daemon(cfg, monkeypatch, helper_processes, **kwargs):
+    """A built daemon whose overlay helper is a FakeHelperProcess."""
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    monkeypatch.setattr("voice.daemon.default_launcher", lambda **kw: helper_processes())
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), **kwargs)
+    d.build()
+    d.overlay.start()
+    return d
+
+
+def _overlay_lines(d, helper_processes):
+    assert d.overlay.flush(2.0)
+    return helper_processes.made[0].lines()
+
+
+def test_a_successful_dictation_drives_the_pill_through_its_states(isolated_xdg, qapp, monkeypatch,
+                                                                   helper_processes):
+    from voice.pipeline import State
+
+    cfg = Config.load()
+    cfg.set("general.language", "sv")
+    d = _overlay_daemon(cfg, monkeypatch, helper_processes)
+    d.dictation.on_state(State.RECORDING, "")
+    d.dictation.on_state(State.TRANSCRIBING, "")
+    d.dictation.on_state(State.INJECTING, "")
+    d.dictation.on_state(State.IDLE, "11 chars via portal in 0.9s")
+    assert _overlay_lines(d, helper_processes) == [
+        {"language": "sv"}, {"state": "recording"}, {"state": "transcribing"},
+        {"state": "done"}, {"state": "done"}]
+    d.shutdown()
+
+
+def test_a_failed_dictation_shows_the_error_and_does_not_hide_it(isolated_xdg, qapp, monkeypatch,
+                                                                 helper_processes):
+    from voice.pipeline import State
+
+    d = _overlay_daemon(Config.load(), monkeypatch, helper_processes)
+    d.dictation.on_state(State.RECORDING, "")
+    d.dictation.on_state(State.TRANSCRIBING, "")
+    d.dictation.on_state(State.ERROR, "cannot record: pw-record died")
+    d.dictation.on_state(State.IDLE, "after error")        # never hides the message
+    assert _overlay_lines(d, helper_processes) == [
+        {"language": "en"}, {"state": "recording"}, {"state": "transcribing"},
+        {"state": "error", "text": "cannot record: pw-record died"}]
+    d.shutdown()
+
+
+@pytest.mark.parametrize("detail", ["cancelled", "too short", "empty"])
+def test_a_dictation_that_produced_nothing_hides_the_pill(isolated_xdg, qapp, monkeypatch,
+                                                          helper_processes, detail):
+    from voice.pipeline import State
+
+    d = _overlay_daemon(Config.load(), monkeypatch, helper_processes)
+    d.dictation.on_state(State.RECORDING, "")
+    d.dictation.on_state(State.IDLE, detail)
+    assert _overlay_lines(d, helper_processes)[-1] == {"state": "hidden"}
+    d.shutdown()
+
+
+def test_the_tray_still_sees_every_state_alongside_the_overlay(isolated_xdg, qapp, monkeypatch,
+                                                               helper_processes):
+    from voice.pipeline import State
+
+    d = _overlay_daemon(Config.load(), monkeypatch, helper_processes)
+    seen = []
+    d.tray.state_changed.connect(lambda s, det: seen.append((s, det)))
+    d.dictation.on_state(State.RECORDING, "")
+    d.dictation.on_state(State.ERROR, "boom")
+    qapp.processEvents()
+    assert seen == [("recording", ""), ("error", "boom")]
+    d.shutdown()
+
+
+def test_microphone_levels_reach_the_helper(isolated_xdg, qapp, monkeypatch, helper_processes):
+    d = _overlay_daemon(Config.load(), monkeypatch, helper_processes)
+    assert d._recorder._on_level == d._on_level      # Recorder(on_level=...) is wired
+    d._on_level(0.42)
+    assert _overlay_lines(d, helper_processes) == [{"level": 0.42}]
+    d.shutdown()
+
+
+def test_no_helper_is_launched_when_the_overlay_is_switched_off(isolated_xdg, qapp, monkeypatch,
+                                                                helper_processes):
+    cfg = Config.load()
+    cfg.set("ui.overlay", False)
+    d = _overlay_daemon(cfg, monkeypatch, helper_processes)
+    from voice.pipeline import State
+    d.dictation.on_state(State.RECORDING, "")
+    d._on_level(0.4)
+    assert helper_processes.made == []
+    assert d.overlay.enabled is False
+    d.shutdown()
+
+
+# -- language switch -----------------------------------------------------------
+def test_language_command_validates_persists_and_tells_the_pill(isolated_xdg, qapp, monkeypatch,
+                                                                helper_processes):
+    cfg = Config.load()
+    d = _overlay_daemon(cfg, monkeypatch, helper_processes)
+    assert d.handle({"cmd": "status"})["language"] == "en"
+
+    reply = {}
+    worker = threading.Thread(target=lambda: reply.update(
+        d.handle({"cmd": "language", "code": "sv"})))       # as the IPC server calls it
+    worker.start()
+    worker.join(timeout=2)
+    assert reply == {"ok": True, "language": "sv"}
+    assert Config.load().get("general.language") == "en"      # validated, not yet written
+    qapp.processEvents()
+    assert Config.load().get("general.language") == "sv"      # persisted on the Qt thread
+    assert d.handle({"cmd": "status"})["language"] == "sv"
+    assert _overlay_lines(d, helper_processes)[-2:] == [
+        {"language": "sv"}, {"state": "notice", "text": "EN → SV"}]
+    assert d.tray.languages[-1] == (["en", "sv"], "sv")
+
+    bad = d.handle({"cmd": "language", "code": "svenska"})
+    assert bad["ok"] is False and "svenska" in bad["error"]
+    assert d.handle({"cmd": "language"})["ok"] is False
+    qapp.processEvents()
+    assert Config.load().get("general.language") == "sv"      # nothing was written
+    d.shutdown()
+
+
+def test_language_next_wraps_around_the_configured_cycle(isolated_xdg, qapp, monkeypatch,
+                                                         helper_processes):
+    cfg = Config.load()
+    cfg.set("general.languages", ["en", "sv", "auto"])
+    d = _overlay_daemon(cfg, monkeypatch, helper_processes)
+    for expected in ("sv", "auto", "en", "sv"):
+        assert d.handle({"cmd": "language", "code": "next"}) == {"ok": True, "language": expected}
+        qapp.processEvents()
+        assert d.config.get("general.language") == expected
+    d.shutdown()
+
+
+def test_a_language_outside_the_cycle_is_still_accepted_when_it_is_a_real_code(
+        isolated_xdg, qapp, monkeypatch, helper_processes):
+    d = _overlay_daemon(Config.load(), monkeypatch, helper_processes)
+    assert d.handle({"cmd": "language", "code": "de"})["ok"] is True
+    qapp.processEvents()
+    assert d.config.get("general.language") == "de"
+    d.shutdown()
+
+
+def test_the_tray_language_entries_route_to_the_language_command(isolated_xdg, qapp, monkeypatch,
+                                                                 helper_processes):
+    d = _overlay_daemon(Config.load(), monkeypatch, helper_processes)
+    d._on_tray_action("language:sv")
+    qapp.processEvents()
+    assert d.config.get("general.language") == "sv"
+    d.shutdown()
+
+
+def test_the_language_toggle_hotkey_cycles_without_touching_the_pipeline(
+        isolated_xdg, qapp, monkeypatch, helper_processes):
+    d = _overlay_daemon(Config.load(), monkeypatch, helper_processes)
+    d._on_hotkey("language_toggle", "press")
+    qapp.processEvents()
+    assert d.config.get("general.language") == "sv"
+    assert d.dictation.state.value == "idle"          # it is not a dictation key
+    d._on_hotkey("language_toggle", "release")        # release does nothing
+    qapp.processEvents()
+    assert d.config.get("general.language") == "sv"
+    d.shutdown()
+
+
+def test_the_language_toggle_is_bound_in_both_listeners(isolated_xdg):
+    from voice.daemon import hotkey_specs, portal_shortcuts
+    cfg = Config.load()
+    cfg.set("hotkeys.language_toggle", "KEY_F15")
+    cfg.set("hotkeys.portal_language_toggle", "CTRL+ALT+l")
+    assert hotkey_specs(cfg)["language_toggle"] == parse_keyspec("KEY_F15")
+    assert portal_shortcuts(cfg)["language_toggle"] == "CTRL+ALT+l"

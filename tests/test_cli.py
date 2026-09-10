@@ -80,3 +80,33 @@ def test_status_prints_the_active_hotkey_backend(isolated_xdg, capsys):
         assert "hotkeys:  portal" in capsys.readouterr().out
     finally:
         srv.stop()
+
+
+def test_language_is_forwarded_and_the_result_printed(isolated_xdg, capsys):
+    seen = []
+
+    def handler(req):
+        seen.append(req)
+        return {"ok": True, "language": "sv" if req["code"] == "sv" else "auto"}
+
+    srv = ipc.Server(handler)
+    srv.start()
+    try:
+        assert main(["language", "sv"]) == 0
+        assert main(["language", "next"]) == 0
+    finally:
+        srv.stop()
+    assert [(r["cmd"], r["code"]) for r in seen] == [("language", "sv"), ("language", "next")]
+    out = capsys.readouterr().out.splitlines()
+    assert out == ["language: sv", "language: auto"]
+
+
+def test_status_prints_the_active_language(isolated_xdg, capsys):
+    srv = ipc.Server(lambda r: {"ok": True, "state": "idle", "profile": "local", "backend": "fake",
+                                "last_error": None, "keyboard": True, "language": "sv"})
+    srv.start()
+    try:
+        assert main(["status"]) == 0
+        assert "language: sv" in capsys.readouterr().out
+    finally:
+        srv.stop()

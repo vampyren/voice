@@ -28,3 +28,18 @@ def test_tray_state_updates_tooltip_and_actions_flow(qapp):
     tray.state_changed.emit("error", "boom")
     qapp.processEvents()
     assert "error" in tray.icon.toolTip()
+
+
+def test_tray_language_submenu_is_a_radio_list_of_codes(qapp):
+    got = []
+    tray = Tray(on_action=got.append)
+    tray.set_languages(["en", "sv", "auto"], "sv")
+    labels = [a.text() for a in tray.language_menu.actions()]
+    assert labels == ["EN", "SV", "AUTO"]
+    assert [a.isChecked() for a in tray.language_menu.actions()] == [False, True, False]
+    tray.language_menu.actions()[0].trigger()
+    assert got == ["language:en"]
+
+    tray.set_languages(["en", "sv"], "en")            # rebuilt, not appended to
+    assert [a.text() for a in tray.language_menu.actions()] == ["EN", "SV"]
+    assert [a.isChecked() for a in tray.language_menu.actions()] == [True, False]

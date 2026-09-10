@@ -21,6 +21,9 @@ def _parser() -> argparse.ArgumentParser:
         sub.add_parser(name)
     prof = sub.add_parser("profile", help="switch transcription profile")
     prof.add_argument("name")
+    lang = sub.add_parser("language", help="switch dictation language")
+    lang.add_argument("code", help="a two-letter code, 'auto', or 'next' to cycle "
+                                   "through general.languages")
     sub.add_parser("doctor", help="check this machine for everything voice needs")
     return p
 
@@ -29,6 +32,7 @@ def _print_status(reply: dict) -> None:
     print(f"state:    {reply.get('state')}")
     print(f"profile:  {reply.get('profile')}")
     print(f"backend:  {reply.get('backend')}")
+    print(f"language: {reply.get('language')}")
     print(f"hotkeys:  {reply.get('hotkey_backend', 'unknown')}")
     keyboard = reply.get("keyboard")
     kb_text = "ok" if keyboard else ("unknown" if keyboard is None else "NO ACCESS")
@@ -56,6 +60,8 @@ def main(argv: list[str] | None = None) -> int:
     request = {"cmd": args.cmd}
     if args.cmd == "profile":
         request["name"] = args.name
+    if args.cmd == "language":
+        request["code"] = args.code
     try:
         reply = send(request)
     except IPCError as exc:
@@ -66,6 +72,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.cmd == "status":
         _print_status(reply)
+    elif args.cmd == "language":
+        print(f"language: {reply.get('language')}")
     return 0
 
 

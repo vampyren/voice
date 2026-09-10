@@ -254,10 +254,14 @@ class Config:
         return errs
 
 
+def is_language_code(value: Any) -> bool:
+    """A language setting is "auto" or a two-letter code; anything else is a typo."""
+    return isinstance(value, str) and (
+        value.lower() == "auto" or (len(value) == 2 and value.isalpha()))
+
+
 def _language_errors(key: str, value: Any) -> list[str]:
-    """A language is "auto" or a two-letter code; anything else is a typo."""
-    text = value if isinstance(value, str) else None
-    if text is not None and (text.lower() == "auto" or (len(text) == 2 and text.isalpha())):
+    if is_language_code(value):
         return []
     return [f"{key} must be \"auto\" or a two-letter code, got {value!r}"]
 

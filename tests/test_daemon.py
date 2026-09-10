@@ -246,3 +246,26 @@ def test_run_hands_over_when_the_socket_is_taken_after_the_initial_check(isolate
         assert ipc.send({"cmd": "ping"}) == {"ok": True, "echo": "ping"}   # live socket survived
     finally:
         live.stop()
+
+
+def test_broken_profile_fails_as_a_transcription_error_and_keeps_the_audio(isolated_xdg, qapp):
+    """_prompt() runs before transcribe(); a ValueError there bypassed the
+    TranscriptionError path, so the recording was discarded instead of kept."""
+    import numpy as np
+
+    cfg = Config.load()
+    cfg.set("stt.active", "ghost")
+    cfg.save()
+    quiet = type("N", (), {"notify": lambda self, *a, **k: None,
+                           "set_enabled": lambda self, enabled: None})()
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=quiet)
+    d.build()
+    assert d._prompt() is None                     # no resolvable profile to read a prompt from
+
+    d.dictation._executor = lambda fn: fn()        # run the worker inline
+    d.history.keep_audio(np.ones(16000, dtype=np.int16))
+    d.dictation.retry()
+
+    assert d.dictation.last_error and "ghost" in d.dictation.last_error
+    assert d.history.take_audio() is not None      # kept, so a retry is still possible
+    d.shutdown()

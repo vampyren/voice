@@ -123,7 +123,14 @@ class Daemon:
             return _BrokenTranscriber(str(exc))
 
     def _prompt(self) -> str | None:
-        return self.config.stt_profile()[1].get("prompt") or None
+        # Runs on the worker just before transcribe(). A broken active profile must
+        # not raise here: that bypasses the TranscriptionError path and the audio
+        # would be discarded instead of kept for a retry.
+        try:
+            return self.config.stt_profile()[1].get("prompt") or None
+        except Exception:
+            log.debug("no prompt available for the active profile", exc_info=True)
+            return None
 
     # -- runtime ------------------------------------------------------------
     def run(self) -> int:

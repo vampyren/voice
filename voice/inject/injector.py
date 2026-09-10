@@ -47,6 +47,12 @@ class Injector:
             else self._settings.get("paste_chord", "ctrl+v")
 
     def inject(self, text: str) -> InjectResult:
+        if self._settings.get("mode", "paste") == "clipboard":
+            # Deliberate clipboard-only: the chord would go into the void here,
+            # and restoring 150 ms later would take the transcript with it. Copy,
+            # and leave it there for the user's own Ctrl+V.
+            self._clip.set_text(text)
+            return InjectResult("clipboard", "", False)
         snap = self._clip.snapshot()
         self._clip.set_text(text)
         waited = 0.0

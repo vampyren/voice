@@ -145,3 +145,40 @@ def test_unparseable_terminal_chord_is_handled_too():
     inj = Injector(FakeClipboard(), FakeSender(), {**SETTINGS, "terminal_chord": "ctrl+shift+nope"},
                    lambda: False, lambda: "konsole", sleep=lambda s: None)
     assert inj.inject("x").method == "clipboard-only"
+
+
+def test_clipboard_mode_copies_without_touching_the_keyboard():
+    # The deliberate mode for sessions where the chord goes into the void: copy,
+    # and leave the text there. No snapshot, no chord, no restore over it.
+    clip, sender = FakeClipboard(), FakeSender()
+    slept = []
+    inj = Injector(clip, sender, {**SETTINGS, "mode": "clipboard"},
+                   modifiers_held=lambda: True, window_class=lambda: "firefox", sleep=slept.append)
+    res = inj.inject("keep me")
+    assert res == InjectResult(method="clipboard", chord="", restored=False)
+    assert clip.log == [("set", "keep me")]
+    assert sender.chords == []          # the sender was never called
+    assert slept == []                  # no modifier wait, no settle
+
+
+def test_clipboard_mode_keeps_the_text_even_with_restore_enabled():
+    # restore_clipboard is true in a shipped config; the copy must survive it.
+    clip = FakeClipboard()
+    inj = Injector(clip, FakeSender(), {**SETTINGS, "mode": "clipboard", "restore_clipboard": True},
+                   lambda: False, lambda: None, sleep=lambda s: None)
+    inj.inject("x")
+    assert not any(isinstance(e, tuple) and e[0] == "restore" for e in clip.log)
+    assert "snapshot" not in clip.log
+
+
+def test_paste_is_the_mode_a_config_without_the_key_gets():
+    clip, sender = FakeClipboard(), FakeSender()
+    res = Injector(clip, sender, SETTINGS, lambda: False, lambda: "firefox",
+                   sleep=lambda s: None).inject("hello")
+    assert res == InjectResult(method="fake", chord="ctrl+v", restored=True)
+    assert sender.chords == [[29, 47]]
+    # ...and an explicit "paste" behaves exactly the same way.
+    clip2, sender2 = FakeClipboard(), FakeSender()
+    res2 = Injector(clip2, sender2, {**SETTINGS, "mode": "paste"}, lambda: False,
+                    lambda: "firefox", sleep=lambda s: None).inject("hello")
+    assert res2 == res and clip2.log == clip.log and sender2.chords == sender.chords

@@ -47,7 +47,7 @@ SHORTCUT_SETTINGS_PATH = "Settings → Keyboard → Keyboard Shortcuts"
 #: mentioned is one we never asked it to bind (an empty hotkeys.portal_* key).
 EFFECTIVE_PREFIX = "desktop: "
 NOT_REGISTERED = "not registered"
-UNKNOWN_TRIGGER = "waiting for the desktop"
+UNKNOWN_TRIGGER = "waiting for an answer"
 #: Above the trigger fields: what they are, and what they are not.
 PORTAL_FIRST_RUN_NOTE = (
     "These are a first-run preference, not a setting. Once your desktop knows a shortcut the "

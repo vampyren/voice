@@ -13,6 +13,11 @@ from voice import paths
 
 log = logging.getLogger(__name__)
 
+# How long the server waits for a connected client to send its request line.
+# A client that connects and never writes (or writes too slowly) must not wedge
+# the single-threaded accept loop forever - it gets dropped after this timeout.
+CLIENT_READ_TIMEOUT_S = 5.0
+
 
 class IPCError(RuntimeError):
     pass
@@ -41,14 +46,21 @@ class Server:
                 conn, _ = self._sock.accept()
             except OSError:
                 return
+            conn.settimeout(CLIENT_READ_TIMEOUT_S)
             with conn:
                 try:
                     data = conn.makefile("rb").readline()
-                    request = json.loads(data.decode()) if data else {}
-                    reply = self._handler(request)
-                except Exception as exc:
-                    log.exception("ipc handler failed")
-                    reply = {"ok": False, "error": str(exc)}
+                except (socket.timeout, OSError):
+                    # A client connected but never sent a full line (or sent it too
+                    # slowly) - drop this connection and keep serving the next one.
+                    reply = {"ok": False, "error": "timeout"}
+                else:
+                    try:
+                        request = json.loads(data.decode()) if data else {}
+                        reply = self._handler(request)
+                    except Exception as exc:
+                        log.exception("ipc handler failed")
+                        reply = {"ok": False, "error": str(exc)}
                 try:
                     conn.sendall((json.dumps(reply) + "\n").encode())
                 except OSError:

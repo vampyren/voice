@@ -1,7 +1,11 @@
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import pytest
 
-from voice.history import History
+from voice.history import Entry, History
 from voice.inject.injector import InjectResult
 from voice.pipeline import Dictation, Services, State
 from voice.stt.base import Transcript, TranscriptionError
@@ -42,6 +46,23 @@ class FakeTranscriber:
     def describe(self): return "fake"
 
 
+class BlockingTranscriber:
+    """A transcriber whose transcribe() blocks until the test releases it, for real cross-thread tests."""
+    name = "blocking"
+
+    def __init__(self, text="hello world"):
+        self.text, self.calls = text, []
+        self.release = threading.Event()
+
+    def transcribe(self, pcm, language, prompt):
+        self.calls.append((pcm.size, language, prompt))
+        self.release.wait(5)
+        return Transcript(self.text, language, 1.0, 0.1, self.name)
+
+    def warmup(self): pass
+    def describe(self): return "blocking"
+
+
 class FakeInjector:
     def __init__(self, method="portal"):
         self.method, self.texts = method, []
@@ -63,7 +84,7 @@ class FakeTimer:
     def fire(self): self.fn()
 
 
-def make(cfg=None, rec=None, stt=None, inj=None):
+def make(cfg=None, rec=None, stt=None, inj=None, executor=None):
     cfg = {"hotkeys.dictate_mode": "hold", "audio.device": "", "audio.max_seconds": 120,
            "general.language": "en", "dictionary.replacements": [["cachy os", "CachyOS", "icase"]], **(cfg or {})}
     notes = []
@@ -72,7 +93,7 @@ def make(cfg=None, rec=None, stt=None, inj=None):
         history=History(), notify=lambda t, b, u="normal": notes.append((t, b)),
         trim=lambda pcm: pcm, config_getter=lambda k, d=None: cfg.get(k, d), prompt_getter=lambda: "CachyOS")
     states = []
-    d = Dictation(services, executor=lambda fn: fn(), timer_factory=FakeTimer)
+    d = Dictation(services, executor=executor or (lambda fn: fn()), timer_factory=FakeTimer)
     d.on_state = lambda s, detail: states.append(s)
     FakeTimer.instances = []
     return d, services, states, notes
@@ -118,6 +139,7 @@ def test_error_keeps_audio_for_retry():
     stt.fail = False
     d.retry()
     assert sv.injector.texts == ["hello world"]
+    assert d.last_error is None                  # cleared on the next successful dictation
     d.retry()                                   # nothing left to retry
     assert len(sv.injector.texts) == 1
 
@@ -135,15 +157,94 @@ def test_max_seconds_timer_stops_recording():
     assert timer.seconds == 7
     timer.fire()
     assert d.state == State.IDLE and sv.injector.texts == ["hello world"]
-    d.start(); d.stop()
-    assert FakeTimer.instances[-2].cancelled or FakeTimer.instances[-1].cancelled
+    d.start()
+    second_timer = FakeTimer.instances[-1]
+    assert second_timer is not timer and not second_timer.cancelled
+    d.stop()
+    assert second_timer.cancelled
 
 
-def test_press_during_transcription_is_ignored_and_recall_reinjects():
-    d, sv, states, _ = make()
-    d.start(); d.stop()
+def test_operations_ignored_while_transcribing_pending_then_recall_reinjects():
+    pending = []
+    d, sv, states, _ = make(executor=pending.append)
+    kept = np.ones(4000, dtype=np.int16)
+    sv.history.keep_audio(kept)  # simulate audio kept from an earlier retry-able error
+
+    d.start()
+    d.stop()
+    assert d.state == State.TRANSCRIBING
+    assert len(pending) == 1
+
+    # All of these must be no-ops while the worker is pending: state stays
+    # TRANSCRIBING, the recorder is not started again, and retry() must not
+    # silently discard whatever audio history is holding onto.
+    d.on_hotkey("dictate", "press")
+    d.toggle()
     d.recall()
+    d.retry()
+    assert d.state == State.TRANSCRIBING
+    assert sv.recorder.started_with == [None]
+    assert len(pending) == 1
+
+    pending.pop(0)()  # run the deferred worker
+    assert states == [State.RECORDING, State.TRANSCRIBING, State.INJECTING, State.IDLE]
+    assert sv.injector.texts == ["hello world"]
+
+    # retry() while TRANSCRIBING must have left the kept audio untouched.
+    assert sv.history.take_audio() is kept
+
+    d.recall()
+    assert len(pending) == 1
+    pending.pop(0)()
     assert sv.injector.texts == ["hello world", "hello world"]
+
+
+def test_recall_reserves_injecting_so_start_is_a_no_op_until_worker_runs():
+    pending = []
+    d, sv, states, _ = make(executor=pending.append)
+    sv.history.add(Entry("hello world", time.time(), "fake", 1.0, 0.1))
+
+    d.recall()
+    assert d.state == State.INJECTING
+    assert len(pending) == 1
+
+    d.start()  # must be a no-op: state is INJECTING, not IDLE
+    assert d.state == State.INJECTING
+    assert sv.recorder.started_with == []
+
+    pending.pop(0)()
+    assert d.state == State.IDLE
+    assert sv.recorder.started_with == []
+    assert sv.injector.texts == ["hello world"]
+
+
+def test_cross_thread_stop_blocks_start_until_injection_completes():
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-dictation")
+    try:
+        stt = BlockingTranscriber()
+        d, sv, states, _ = make(stt=stt, executor=lambda fn: pool.submit(fn))
+
+        d.start()
+        d.stop()
+
+        deadline = time.monotonic() + 1.0
+        while d.state != State.TRANSCRIBING and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert d.state == State.TRANSCRIBING
+
+        d.start()  # ignored: a dictation is already in flight on the worker thread
+        assert sv.recorder.started_with == [None]
+
+        stt.release.set()
+
+        deadline = time.monotonic() + 2.0
+        while d.state != State.IDLE and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert d.state == State.IDLE
+        assert sv.injector.texts == ["hello world"]
+        assert states == [State.RECORDING, State.TRANSCRIBING, State.INJECTING, State.IDLE]
+    finally:
+        pool.shutdown(wait=True)
 
 
 def test_clipboard_only_result_notifies_user():

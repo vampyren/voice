@@ -142,15 +142,24 @@ class Dictation:
 
     def recall(self) -> None:
         last = self.sv.history.last()
-        if last is None or self._state != State.IDLE:
-            return
-        self._executor(lambda: self._inject(last.text, last))
-
-    def retry(self) -> None:
-        pcm = self.sv.history.take_audio()
-        if pcm is None or self._state != State.IDLE:
+        if last is None:
             return
         with self._lock:
+            if self._state != State.IDLE:
+                return
+            # Reserve INJECTING here, under the lock, so a start() racing this
+            # call sees a busy state immediately instead of a stale IDLE - the
+            # worker below must not set INJECTING again.
+            self._set(State.INJECTING, "recall")
+        self._executor(lambda: self._inject(last.text, last, already_injecting=True))
+
+    def retry(self) -> None:
+        with self._lock:
+            if self._state != State.IDLE:
+                return
+            pcm = self.sv.history.take_audio()
+            if pcm is None:
+                return
             self._set(State.TRANSCRIBING, "retry")
         self._executor(lambda: self._process(pcm, trimmed=True))
 
@@ -180,8 +189,9 @@ class Dictation:
             log.exception("pipeline failure")
             self._fail(f"unexpected error: {exc}")
 
-    def _inject(self, text: str, entry: Entry) -> None:
-        self._set(State.INJECTING)
+    def _inject(self, text: str, entry: Entry, already_injecting: bool = False) -> None:
+        if not already_injecting:
+            self._set(State.INJECTING)
         try:
             res = self.sv.injector.inject(text)
         except Exception as exc:
@@ -189,6 +199,7 @@ class Dictation:
             return
         if res.method == "clipboard-only":
             self.sv.notify("Text copied", "Could not paste automatically. Paste with Ctrl+V.", "normal")
+        self.last_error = None
         self._set(State.IDLE, f"{len(text)} chars via {res.method} in {entry.elapsed_s:.1f}s")
 
     def _fail(self, message: str) -> None:

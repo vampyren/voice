@@ -1,6 +1,8 @@
+import socket
+
 import pytest
 
-from voice import paths
+from voice import ipc, paths
 from voice.ipc import IPCError, Server, is_running, send
 
 
@@ -32,3 +34,22 @@ def test_handler_exception_becomes_error_reply(isolated_xdg):
 def test_send_without_daemon_raises(isolated_xdg):
     with pytest.raises(IPCError, match="not running"):
         send({"cmd": "status"})
+
+
+def test_silent_connection_does_not_wedge_the_server(isolated_xdg, monkeypatch):
+    # A client that connects and never writes must not block the single-threaded
+    # accept loop forever - the server drops it after CLIENT_READ_TIMEOUT_S and
+    # keeps serving the next connection.
+    monkeypatch.setattr(ipc, "CLIENT_READ_TIMEOUT_S", 0.5)
+    srv = Server(lambda req: {"ok": True, "echo": req["cmd"]})
+    srv.start()
+    silent = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        silent.connect(str(paths.socket_path()))
+        # Never send anything on `silent` - the server's read must time out on
+        # its own rather than hanging until this socket is closed.
+        reply = send({"cmd": "status"}, timeout=8)
+        assert reply == {"ok": True, "echo": "status"}
+    finally:
+        silent.close()
+        srv.stop()

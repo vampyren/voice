@@ -167,3 +167,56 @@ def test_the_helper_can_insist_on_layer_shell():
     assert layer_shell_exit_code(shell=None, require=True) == 2
     assert build_parser().parse_args([]).require_layer_shell is False
     assert build_parser().parse_args(["--require-layer-shell"]).require_layer_shell is True
+
+
+# -- layer-shell: installed is not the same as usable ----------------------
+def _stub_gi(monkeypatch, layer_shell="absent"):
+    """A fake `gi` whose Gtk4LayerShell namespace is absent, or present and
+    (un)supported by the compositor - GNOME has no zwlr_layer_shell_v1."""
+    import sys
+    import types
+
+    gi = types.ModuleType("gi")
+    repo = types.ModuleType("gi.repository")
+    repo.Gtk, repo.Gdk, repo.GLib = object(), object(), object()
+
+    def require_version(name, version):
+        if name == "Gtk4LayerShell" and layer_shell == "absent":
+            raise ValueError("Namespace Gtk4LayerShell not available")
+
+    gi.require_version = require_version
+    if layer_shell != "absent":
+        shell = types.SimpleNamespace()
+        if layer_shell != "no is_supported":
+            shell.is_supported = lambda: layer_shell == "supported"
+        repo.Gtk4LayerShell = shell
+    gi.repository = repo
+    monkeypatch.setitem(sys.modules, "gi", gi)
+    monkeypatch.setitem(sys.modules, "gi.repository", repo)
+    return repo
+
+
+@pytest.mark.parametrize("case,usable", [
+    ("absent", False),
+    ("unsupported", False),          # installed, but this compositor has no protocol
+    ("supported", True),
+    ("no is_supported", True),       # an older binding: we cannot tell, so trust it
+])
+def test_layer_shell_counts_as_present_only_when_the_compositor_supports_it(
+        monkeypatch, case, usable):
+    from voice.ui.overlay import _load_gtk
+
+    repo = _stub_gi(monkeypatch, case)
+    _, _, _, shell = _load_gtk()
+    assert (shell is not None) is usable
+    if usable and case != "absent":
+        assert shell is repo.Gtk4LayerShell
+
+
+def test_an_unsupported_layer_shell_says_so_rather_than_looking_absent(monkeypatch, caplog):
+    from voice.ui.overlay import _load_gtk
+
+    _stub_gi(monkeypatch, "unsupported")
+    with caplog.at_level("INFO", logger="voice.ui.overlay"):
+        _load_gtk()
+    assert "compositor" in caplog.text

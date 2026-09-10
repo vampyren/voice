@@ -71,12 +71,17 @@ def _overlay() -> tuple[bool, str]:
     probe = probe_helper()
     if probe.command is None:
         return True, f"unavailable: {probe.reason}"
+    fallback = ("fallback window allowed, it will take focus"
+                if cfg.get("ui.overlay_allow_fallback", False) else "the pill stays off")
     if probe.layer_shell:
         shell = "layer-shell ok"
-    elif cfg.get("ui.overlay_allow_fallback", False):
-        shell = "layer-shell absent - fallback window allowed, it will take focus"
+    elif probe.layer_shell_unsupported:
+        # Installed but inert (GNOME): "layer-shell absent" would send the owner
+        # off to install a package that is already there.
+        shell = ("layer-shell: installed but unsupported by this compositor "
+                 f"- {fallback}")
     else:
-        shell = "layer-shell absent - the pill stays off"
+        shell = f"layer-shell absent - {fallback}"
     return True, f"enabled, helper via {probe.command[0]} (gtk4 ok, {shell})"
 
 

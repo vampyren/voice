@@ -103,3 +103,34 @@ def test_overlay_probe_reports_a_missing_helper_and_a_switched_off_pill(monkeypa
     cfg.set("ui.overlay", False)
     cfg.save()
     assert default_probes()["overlay"]() == (True, "disabled (ui.overlay = false)")
+
+
+def test_overlay_probe_separates_an_unusable_layer_shell_from_a_missing_one(monkeypatch, isolated_xdg):
+    """gtk4-layer-shell installed on GNOME still cannot make a layer surface:
+    saying "layer-shell ok" there sends the owner looking in the wrong place."""
+    from voice.config import Config
+    from voice.doctor import default_probes
+    from voice.ui.overlay_client import HelperProbe
+
+    monkeypatch.setattr("voice.doctor.probe_helper", lambda: HelperProbe(
+        ["/usr/bin/python3", "-m", "voice.ui.overlay"], ("gtk4", "layer-shell-unsupported")))
+    detail = default_probes()["overlay"]()[1]
+    assert "layer-shell: installed but unsupported by this compositor" in detail
+    assert "the pill stays off" in detail
+
+    cfg = Config.load()
+    cfg.set("ui.overlay_allow_fallback", True)
+    cfg.save()
+    detail = default_probes()["overlay"]()[1]
+    assert "layer-shell: installed but unsupported by this compositor" in detail
+    assert "it will take focus" in detail
+
+
+def test_the_probe_tells_an_unsupported_layer_shell_from_a_present_one():
+    from voice.ui.overlay_client import HelperProbe
+
+    unsupported = HelperProbe(["x"], ("gtk4", "layer-shell-unsupported"))
+    assert unsupported.layer_shell is False
+    assert unsupported.layer_shell_unsupported is True
+    present = HelperProbe(["x"], ("gtk4", "layer-shell"))
+    assert present.layer_shell is True and present.layer_shell_unsupported is False

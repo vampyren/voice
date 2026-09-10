@@ -20,9 +20,12 @@ Focus, and why it matters to the daemon: only a layer-shell surface can refuse
 keyboard focus. GTK 4 removed `set_accept_focus`/`set_focus_on_map`, and a
 plain toplevel *is* focused by the compositor when it maps (measured on GNOME:
 `is_active()` is True a second after `present()`), which would send the paste
-chord to the pill instead of the user's window. Without gtk4-layer-shell the
-helper logs a warning; pass `--require-layer-shell` to make it exit 2 instead,
-so the daemon can decide to run without a pill rather than break dictation.
+chord to the pill instead of the user's window. gtk4-layer-shell being
+installed is not enough - the compositor has to implement zwlr_layer_shell_v1,
+which GNOME does not, so `Gtk4LayerShell.is_supported()` decides and a False
+there counts as absent. Without a usable layer shell the helper logs a warning;
+pass `--require-layer-shell` to make it exit 2 instead, so the daemon can
+decide to run without a pill rather than break dictation.
 """
 from __future__ import annotations
 
@@ -101,7 +104,7 @@ def reduced_motion(gtk_setting: bool | None = None) -> bool:
 
 
 def layer_shell_exit_code(shell, require: bool) -> int | None:
-    """Exit code when layer-shell is demanded but missing, else None."""
+    """Exit code when layer-shell is demanded but unusable here, else None."""
     if require and shell is None:
         return 2
     return None
@@ -116,7 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="distance from the anchored screen edge (layer-shell only)")
     parser.add_argument("--require-layer-shell", action="store_true",
                         help="exit 2 instead of falling back to a focus-stealing "
-                             "plain window when gtk4-layer-shell is missing")
+                             "plain window when no layer surface is available")
     parser.add_argument("--verbose", action="store_true")
     return parser
 
@@ -256,7 +259,30 @@ def _load_gtk():
         from gi.repository import Gtk4LayerShell as layer_shell
     except (ImportError, ValueError):
         log.info("overlay: gtk4-layer-shell is not available")
+    if layer_shell is not None and not _layer_shell_supported(layer_shell):
+        # Installed is not usable: the library needs zwlr_layer_shell_v1 from
+        # the compositor, which GNOME does not implement. Initialising a window
+        # anyway maps a focus-taking toplevel, so this counts as absent.
+        log.info("overlay: gtk4-layer-shell is installed but this compositor does not "
+                 "support it (no zwlr_layer_shell_v1)")
+        layer_shell = None
     return Gtk, Gdk, GLib, layer_shell
+
+
+def _layer_shell_supported(shell) -> bool:
+    """Whether the compositor really offers layer surfaces.
+
+    An older binding without `is_supported` cannot be asked; trust it then,
+    rather than turning the pill off on a compositor that would have worked.
+    """
+    is_supported = getattr(shell, "is_supported", None)
+    if is_supported is None:
+        return True
+    try:
+        return bool(is_supported())
+    except Exception:
+        log.debug("overlay: gtk4-layer-shell is_supported() failed", exc_info=True)
+        return True
 
 
 def _warn_about_focus() -> None:
@@ -281,8 +307,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     refused = layer_shell_exit_code(layer_shell, args.require_layer_shell)
     if refused is not None:
-        log.error("overlay: --require-layer-shell was given but gtk4-layer-shell "
-                  "is not installed; not showing a focus-stealing window")
+        log.error("overlay: --require-layer-shell was given but no layer surface is "
+                  "available (gtk4-layer-shell missing, or unsupported by this "
+                  "compositor); not showing a focus-stealing window")
         return refused
     if layer_shell is None:
         _warn_about_focus()

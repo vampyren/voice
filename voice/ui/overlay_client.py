@@ -51,11 +51,24 @@ _PROBE_SCRIPT = (
     "found = ['gtk4']\n"
     "try:\n"
     "    gi.require_version('Gtk4LayerShell', '1.0')\n"
-    "    found.append('layer-shell')\n"
     "except Exception:\n"
     "    pass\n"
+    "else:\n"
+    "    token = 'layer-shell'\n"
+    "    try:\n"
+    # Importing Gtk opens the display, which is what is_supported() reads.
+    "        from gi.repository import Gtk, Gtk4LayerShell\n"
+    "        if Gtk4LayerShell.is_supported() is False:\n"
+    "            token = 'layer-shell-unsupported'\n"
+    "    except Exception:\n"
+    "        pass\n"
+    "    found.append(token)\n"
     "print(' '.join(found))\n"
 )
+
+#: The typelib is installed but the compositor has no zwlr_layer_shell_v1, so
+#: no window can refuse focus here. For the pill that is the same as absent.
+LAYER_SHELL_UNSUPPORTED = "layer-shell-unsupported"
 
 PROBE_TIMEOUT_S = 10
 
@@ -100,6 +113,11 @@ class HelperProbe:
     @property
     def layer_shell(self) -> bool:
         return "layer-shell" in self.features
+
+    @property
+    def layer_shell_unsupported(self) -> bool:
+        """Installed, and useless: this compositor cannot make a layer surface."""
+        return LAYER_SHELL_UNSUPPORTED in self.features
 
 
 def probe_helper() -> HelperProbe:

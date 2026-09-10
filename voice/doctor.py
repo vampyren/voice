@@ -122,8 +122,9 @@ def _model_cache() -> tuple[bool, str]:
 def _language_profiles() -> tuple[bool, str]:
     """Informational: which profile each language selects, if any.
 
-    Never a failure of its own - `config` already rejects a map naming a profile
-    that is gone - but it is the one place the pairing can be read at a glance.
+    `config` already rejects a map naming a profile that is gone, so this line
+    reports rather than judges - it is the one place the pairing can be read at a
+    glance. (An unreadable config.toml still fails it, like every other probe.)
     """
     from voice.config import Config
     cfg = Config.load()

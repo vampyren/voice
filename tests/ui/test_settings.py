@@ -442,3 +442,58 @@ def test_an_external_language_switch_still_carries_its_paired_profile(qapp):
     again = Config.load()
     assert again.get("general.language") == "sv"
     assert again.get("stt.active") == "openai"
+
+
+def test_a_second_language_change_in_the_same_dialog_still_moves_the_profile(qapp):
+    """Save does not close the window, so the flags it sets must not outlive it:
+    the second switch used to keep the first language's model."""
+    _with_map({"en": "local", "sv": "openai"})
+    cfg, dlg, _ = make(qapp)
+    dlg.language_combo.setCurrentIndex(dlg.language_combo.findData("sv"))
+    dlg.save_button.click()
+    first = Config.load()
+    assert (first.get("general.language"), first.get("stt.active")) == ("sv", "openai")
+
+    dlg.language_combo.setCurrentIndex(dlg.language_combo.findData("en"))
+    dlg.save_button.click()
+    again = Config.load()
+    assert (again.get("general.language"), again.get("stt.active")) == ("en", "local")
+
+
+def test_after_a_save_the_dialog_still_follows_an_external_language_switch(qapp):
+    """A dialog that saved once must keep carrying over what the toggle hotkey
+    writes; reverting the language alone would break it away from its profile."""
+    _with_map({"en": "local", "sv": "openai"})
+    cfg, dlg, _ = make(qapp)
+    dlg.language_combo.setCurrentIndex(dlg.language_combo.findData("sv"))
+    dlg.save_button.click()
+
+    external = Config.load()                    # the toggle hotkey, writing the pair
+    external.set("general.language", "en")
+    external.set("stt.active", "local")
+    external.save()
+
+    dlg.max_seconds.setValue(99)                # an unrelated edit, saved
+    dlg.save_button.click()
+    again = Config.load()
+    assert again.get("general.language") == "en"
+    assert again.get("stt.active") == "local"
+    assert again.get("audio.max_seconds") == 99
+
+
+def test_a_hidden_mapping_whose_profile_is_gone_does_not_block_saving(qapp):
+    """An entry for a language with no row, naming a profile that is gone, is a
+    config error - and unreachable from the dialog, so it would block every save."""
+    seed = Config.load()
+    seed.set("general.languages", ["en"])
+    seed.set("general.language_profiles", {"sv": "local-swedish"})   # never defined
+    seed.save()
+
+    cfg, dlg, _ = make(qapp)
+    dlg.max_seconds.setValue(99)
+    dlg.save_button.click()
+    again = Config.load()
+    assert dlg.error_label.text() == ""
+    assert again.get("audio.max_seconds") == 99
+    assert again.get("general.language_profiles") == {}    # the dangling entry is dropped
+    assert again.errors() == []

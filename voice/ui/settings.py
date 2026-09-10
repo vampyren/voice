@@ -413,7 +413,12 @@ class SettingsDialog(QDialog):
         offer - is carried through untouched instead of being dropped by a save
         that had nothing to do with it.
         """
-        mapping = dict(self._cfg.language_profiles())
+        # Only entries that still name a real profile: a dangling one for a
+        # language with no row is a config error errors() rejects, and no row
+        # means no way to clear it - it would block every save from here.
+        profiles = self._cfg.get("stt.profiles", {}) or {}
+        mapping = {code: name for code, name in self._cfg.language_profiles().items()
+                   if name in profiles}
         for code, combo in self.language_profile_combos.items():
             chosen = combo.currentData()
             if chosen:
@@ -479,4 +484,10 @@ class SettingsDialog(QDialog):
             return
         c.save()
         self.error_label.setText("")
+        # Save leaves the window open, so the "the user decided this here" flags
+        # must not outlive the save they belong to: a second language switch has
+        # to move its profile too, and an external switch made after this save
+        # still has to be carried over by the next one.
+        self._active_changed = False
+        self._language_changed = False
         self.saved.emit()

@@ -30,3 +30,32 @@ def test_wl_clipboard_probe_reports_which_binary_is_missing(monkeypatch):
     monkeypatch.setattr("voice.doctor.shutil.which", lambda b: f"/usr/bin/{b}")
     ok, detail = default_probes()["wl-clipboard"]()
     assert ok is True and detail == "wl-copy/wl-paste"
+
+
+def test_hotkey_backend_probe_explains_why_the_portal_was_chosen(monkeypatch, isolated_xdg):
+    from voice.doctor import default_probes
+
+    monkeypatch.setattr("voice.doctor._readable_keyboards", lambda: True)
+    monkeypatch.setattr("voice.daemon.has_local_seat", lambda: False)
+    ok, detail = default_probes()["hotkey backend"]()
+    assert ok is True                                  # informational: never fails the run
+    assert detail == "portal (no local seat)"
+
+    monkeypatch.setattr("voice.doctor._readable_keyboards", lambda: False)
+    assert default_probes()["hotkey backend"]()[1] == "portal (no readable keyboards, no local seat)"
+
+    monkeypatch.setattr("voice.daemon.has_local_seat", lambda: True)
+    monkeypatch.setattr("voice.doctor._readable_keyboards", lambda: True)
+    assert default_probes()["hotkey backend"]()[1] == "evdev"
+
+
+def test_hotkey_backend_probe_reports_a_forced_setting(monkeypatch, isolated_xdg):
+    from voice.config import Config
+    from voice.doctor import default_probes
+
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", "portal")
+    cfg.save()
+    monkeypatch.setattr("voice.doctor._readable_keyboards", lambda: True)
+    monkeypatch.setattr("voice.daemon.has_local_seat", lambda: True)
+    assert default_probes()["hotkey backend"]() == (True, "portal (set in config)")

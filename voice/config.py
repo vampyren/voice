@@ -20,10 +20,16 @@ language = "en"            # "en", "sv", or "auto"
 notifications = true
 
 [hotkeys]
+backend = "auto"           # "auto" | "evdev" (kernel devices) | "portal" (desktop shortcuts)
 dictate = "KEY_F13"        # any evdev key, or a combination like "KEY_LEFTMETA+KEY_SPACE"
 dictate_mode = "hold"      # "hold" (push-to-talk) or "toggle"
 recall = ""                # re-insert the last dictation
 cancel = "KEY_ESC"         # discard the current recording
+# Portal backend triggers (XDG shortcut syntax). Compositors reject bare
+# modifiers, so these need a combination. Empty = not bound.
+portal_dictate = "CTRL+space"
+portal_recall = ""
+portal_cancel = ""
 
 [audio]
 device = ""                # PipeWire source node name; "" = default source
@@ -77,6 +83,7 @@ restore_clipboard = true
 '''
 
 _VALID_MODES = {"hold", "toggle"}
+_VALID_HOTKEY_BACKENDS = {"auto", "evdev", "portal"}
 _VALID_BACKENDS = {"local", "openai_compatible"}
 
 
@@ -173,6 +180,11 @@ class Config:
             errs.append(f"hotkeys.dictate_mode must be one of {sorted(_VALID_MODES)}, got {mode!r}")
         if not self.get("hotkeys.dictate"):
             errs.append("hotkeys.dictate must not be empty")
+        backend = self.get("hotkeys.backend", "auto")
+        if backend not in _VALID_HOTKEY_BACKENDS:
+            errs.append(f"hotkeys.backend must be one of {sorted(_VALID_HOTKEY_BACKENDS)}, got {backend!r}")
+        if backend == "portal" and not self.get("hotkeys.portal_dictate"):
+            errs.append("hotkeys.portal_dictate must not be empty when hotkeys.backend is 'portal'")
         active = self.get("stt.active")
         profiles = self.get("stt.profiles", {}) or {}
         if active not in profiles:

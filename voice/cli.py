@@ -29,6 +29,7 @@ def _print_status(reply: dict) -> None:
     print(f"state:    {reply.get('state')}")
     print(f"profile:  {reply.get('profile')}")
     print(f"backend:  {reply.get('backend')}")
+    print(f"hotkeys:  {reply.get('hotkey_backend', 'unknown')}")
     keyboard = reply.get("keyboard")
     kb_text = "ok" if keyboard else ("unknown" if keyboard is None else "NO ACCESS")
     print(f"keyboard: {kb_text}")

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
 import sys
 import threading
 from typing import Callable
@@ -15,6 +17,7 @@ from voice.config import Config
 from voice.history import History
 from voice.hotkey.evdev_listener import EvdevListener
 from voice.hotkey.keyspec import KeySpec, Tracker, parse_keyspec
+from voice.hotkey.portal_listener import PortalListener
 from voice.inject.clipboard import Clipboard
 from voice.inject.fallback import make_key_sender
 from voice.inject.injector import Injector, run_window_command
@@ -27,6 +30,68 @@ from voice.ui.settings import SettingsDialog
 from voice.ui.tray import Tray
 
 log = logging.getLogger(__name__)
+
+HOTKEY_BACKENDS = ("evdev", "portal")
+SEAT_TIMEOUT_S = 2
+
+
+def has_local_seat() -> bool:
+    """Whether this login session owns a seat, i.e. a local screen and keyboard.
+
+    A remote-desktop session has none - and that is exactly the case where
+    /dev/input carries no keystrokes. When nothing can be determined we say True:
+    guessing "remote" would move a working evdev setup onto the portal.
+    """
+    session = os.environ.get("XDG_SESSION_ID")
+    if session:
+        try:
+            done = subprocess.run(["loginctl", "show-session", session, "-p", "Seat"],
+                                  capture_output=True, text=True, timeout=SEAT_TIMEOUT_S)
+            for line in done.stdout.splitlines():
+                if line.startswith("Seat="):
+                    return bool(line.split("=", 1)[1].strip())
+        except Exception:
+            log.debug("loginctl seat lookup failed", exc_info=True)
+    seat = os.environ.get("XDG_SEAT")
+    if seat is not None:
+        return bool(seat.strip())
+    return True
+
+
+def keyboards_are_readable() -> bool:
+    """True if at least one keyboard device can be opened (udev rule or input group)."""
+    from voice.hotkey.evdev_listener import list_keyboards
+    try:
+        devices = list_keyboards()
+    except Exception:
+        log.debug("keyboard probe failed", exc_info=True)
+        return False
+    for dev in devices:                       # the probe must not hold the fds open
+        try:
+            dev.close()
+        except Exception:
+            log.debug("closing a probed device failed", exc_info=True)
+    return bool(devices)
+
+
+def choose_hotkey_backend(config: Config, keyboards_readable: bool, has_local_seat: bool) -> str:
+    """Which hotkey listener to build. An unusable setting is treated as "auto"."""
+    setting = str(config.get("hotkeys.backend", "auto") or "auto").strip().lower()
+    if setting in HOTKEY_BACKENDS:
+        return setting
+    if setting != "auto":
+        log.warning("unknown hotkeys.backend %r; choosing automatically", setting)
+    return "evdev" if (keyboards_readable and has_local_seat) else "portal"
+
+
+def portal_shortcuts(config: Config) -> dict[str, str]:
+    """The shortcut ids to bind through the portal, with their XDG triggers."""
+    shortcuts = {}
+    for name in ("dictate", "recall", "cancel"):
+        trigger = str(config.get(f"hotkeys.portal_{name}", "") or "").strip()
+        if trigger:
+            shortcuts[name] = trigger
+    return shortcuts
 
 
 def hotkey_specs(config: Config) -> dict[str, KeySpec]:
@@ -95,7 +160,7 @@ class Daemon:
     def build(self) -> None:
         self.tracker = Tracker(hotkey_specs(self.config))
         self.history = History()
-        self.listener = self._listener_override or EvdevListener(self.tracker, self._on_hotkey)
+        self.listener, self.hotkey_backend = self._make_listener()
         self._sender = self._sender or make_key_sender()
         self.injector = Injector(self._clipboard, self._sender, self.config.get("inject", {}) or {},
                                  self.listener.modifiers_held, window_class_getter(self.config))
@@ -112,6 +177,22 @@ class Daemon:
         self._bridge.set_profile.connect(self._set_profile)
         self._bridge.quit.connect(self._quit)
         self._server = Server(self.handle)
+
+    def _make_listener(self):
+        """The hotkey listener plus the name of the backend it represents.
+
+        Everything downstream talks to `self.listener` only, so the two backends
+        stay interchangeable.
+        """
+        if self._listener_override is not None:
+            # Injected by tests: report what the config asks for without probing
+            # devices or spawning loginctl.
+            return self._listener_override, choose_hotkey_backend(self.config, True, True)
+        backend = choose_hotkey_backend(self.config, keyboards_are_readable(), has_local_seat())
+        log.info("hotkey backend: %s", backend)
+        if backend == "portal":
+            return PortalListener(self._on_hotkey, portal_shortcuts(self.config)), backend
+        return EvdevListener(self.tracker, self._on_hotkey), backend
 
     def _profile_snapshot(self) -> tuple[str, dict] | None:
         """The active (name, profile) pair, or None if stt.active is unresolvable."""
@@ -159,7 +240,12 @@ class Daemon:
         self.tray.show()
         self._start_warmup()
         if self.listener.devices_ok() is False:
-            self._notifier.notify("No keyboard access", "Run the installer's udev step or add yourself to the input group.", "critical")
+            if self.hotkey_backend == "portal":
+                self._notifier.notify("Shortcut not registered",
+                                      "The desktop refused the global shortcut. Check its shortcut settings, "
+                                      "or run install.sh so the portal can resolve this app.", "critical")
+            else:
+                self._notifier.notify("No keyboard access", "Run the installer's udev step or add yourself to the input group.", "critical")
         log.info("%s %s ready", APP_NAME, __version__)
         code = app.exec()
         self.shutdown()
@@ -285,7 +371,8 @@ class Daemon:
         if cmd == "status":
             return {"ok": True, "state": d.state.value, "profile": self.config.get("stt.active"),
                     "backend": d.sv.transcriber.describe(), "last_error": d.last_error,
-                    "version": __version__, "keyboard": self.listener.devices_ok()}
+                    "version": __version__, "keyboard": self.listener.devices_ok(),
+                    "hotkey_backend": self.hotkey_backend}
         if cmd == "profile":
             name = request.get("name", "")
             if name not in (self.config.get("stt.profiles", {}) or {}):

@@ -169,3 +169,27 @@ def test_save_closes_the_temp_descriptor_when_chmod_fails(isolated_xdg, monkeypa
         os.fstat(captured["fd"])                  # descriptor closed, not leaked
     assert not os.path.exists(captured["tmp"])
     assert cfg.path.read_text() == original
+
+
+def test_defaults_include_the_portal_hotkey_settings(isolated_xdg):
+    cfg = Config.load()
+    assert cfg.get("hotkeys.backend") == "auto"
+    assert cfg.get("hotkeys.portal_dictate") == "CTRL+space"
+    assert cfg.get("hotkeys.portal_recall") == ""
+    assert cfg.get("hotkeys.portal_cancel") == ""
+    assert cfg.errors() == []
+
+
+def test_errors_rejects_an_unknown_hotkey_backend(isolated_xdg):
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", "wayland-magic")
+    assert any("hotkeys.backend" in e and "auto" in e for e in cfg.errors())
+
+
+def test_errors_wants_a_portal_trigger_when_the_portal_backend_is_forced(isolated_xdg):
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", "portal")
+    cfg.set("hotkeys.portal_dictate", "")
+    assert any("hotkeys.portal_dictate" in e for e in cfg.errors())
+    cfg.set("hotkeys.backend", "evdev")
+    assert [e for e in cfg.errors() if "portal_dictate" in e] == []

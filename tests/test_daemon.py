@@ -405,3 +405,104 @@ def test_open_settings_does_not_reset_a_visible_dialog(isolated_xdg, qapp, monke
     assert dialog.hotkey_edit.text() == "KEY_RIGHTCTRL"
     dialog.close()
     d.shutdown()
+
+
+# -- hotkey backend selection --------------------------------------------------
+@pytest.mark.parametrize("setting,keyboards,seat,expected", [
+    ("auto", True, True, "evdev"),
+    ("auto", True, False, "portal"),      # remote session: /dev/input sees nothing
+    ("auto", False, True, "portal"),      # no udev rule, no input group
+    ("auto", False, False, "portal"),
+    ("evdev", True, True, "evdev"),
+    ("evdev", False, False, "evdev"),     # forced: the user gets what they asked for
+    ("portal", True, True, "portal"),
+    ("portal", False, False, "portal"),
+])
+def test_choose_hotkey_backend_covers_every_combination(isolated_xdg, setting, keyboards, seat, expected):
+    from voice.daemon import choose_hotkey_backend
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", setting)
+    assert choose_hotkey_backend(cfg, keyboards, seat) == expected
+
+
+def test_an_unusable_backend_setting_behaves_like_auto(isolated_xdg):
+    from voice.daemon import choose_hotkey_backend
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", "telepathy")
+    assert choose_hotkey_backend(cfg, True, True) == "evdev"
+    assert choose_hotkey_backend(cfg, False, True) == "portal"
+
+
+def test_portal_shortcuts_only_include_configured_triggers(isolated_xdg):
+    from voice.daemon import portal_shortcuts
+    cfg = Config.load()
+    assert portal_shortcuts(cfg) == {"dictate": "CTRL+space"}
+    cfg.set("hotkeys.portal_recall", "CTRL+ALT+r")
+    cfg.set("hotkeys.portal_cancel", "   ")
+    assert portal_shortcuts(cfg) == {"dictate": "CTRL+space", "recall": "CTRL+ALT+r"}
+
+
+@pytest.mark.parametrize("seat_output,session_id,seat_env,expected", [
+    ("Seat=seat0\n", "3", None, True),
+    ("Seat=\n", "3", None, False),                 # the VM's remote session
+    (None, None, "seat0", True),                   # no loginctl answer, env knows
+    (None, None, "", False),
+    (None, None, None, True),                      # nothing known: assume local
+])
+def test_has_local_seat_reads_loginctl_then_the_environment(monkeypatch, seat_output, session_id, seat_env, expected):
+    import subprocess
+
+    from voice.daemon import has_local_seat
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[:2] == ["loginctl", "show-session"]
+        if seat_output is None:
+            raise FileNotFoundError("loginctl")
+        return subprocess.CompletedProcess(cmd, 0, seat_output, "")
+
+    monkeypatch.setattr("voice.daemon.subprocess.run", fake_run)
+    monkeypatch.delenv("XDG_SESSION_ID", raising=False)
+    monkeypatch.delenv("XDG_SEAT", raising=False)
+    if session_id is not None:
+        monkeypatch.setenv("XDG_SESSION_ID", session_id)
+    if seat_env is not None:
+        monkeypatch.setenv("XDG_SEAT", seat_env)
+    assert has_local_seat() is expected
+
+
+def test_build_wires_the_portal_listener_and_reports_it_in_status(isolated_xdg, qapp, monkeypatch):
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    made = {}
+
+    class FakePortalListener(FakeListener):
+        def __init__(self, on_event, shortcuts, **kwargs):
+            super().__init__()
+            made["on_event"], made["shortcuts"] = on_event, shortcuts
+
+    monkeypatch.setattr("voice.daemon.PortalListener", FakePortalListener)
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", "portal")
+    cfg.set("hotkeys.portal_recall", "CTRL+ALT+r")
+    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray())
+    d.build()
+    assert isinstance(d.listener, FakePortalListener)
+    assert made["shortcuts"] == {"dictate": "CTRL+space", "recall": "CTRL+ALT+r"}
+    st = d.handle({"cmd": "status"})
+    assert st["hotkey_backend"] == "portal"
+    made["on_event"]("dictate", "press")                  # the events still reach the pipeline
+    assert d.dictation.state.value != "idle"
+    d.shutdown()
+
+
+def test_build_uses_the_evdev_listener_when_configured(isolated_xdg, qapp, monkeypatch):
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    monkeypatch.setattr("voice.daemon.EvdevListener", lambda tracker, on_event: FakeListener())
+    monkeypatch.setattr("voice.daemon.PortalListener", lambda *a, **k: pytest.fail("must not be built"))
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", "evdev")
+    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray())
+    d.build()
+    assert d.handle({"cmd": "status"})["hotkey_backend"] == "evdev"
+    d.shutdown()

@@ -69,3 +69,14 @@ def test_daemon_subcommand_is_noop_when_already_running(isolated_xdg, monkeypatc
     finally:
         srv.stop()
     assert seen and seen[-1]["cmd"] == "settings"
+
+
+def test_status_prints_the_active_hotkey_backend(isolated_xdg, capsys):
+    srv = ipc.Server(lambda r: {"ok": True, "state": "idle", "profile": "local", "backend": "fake",
+                                "last_error": None, "keyboard": True, "hotkey_backend": "portal"})
+    srv.start()
+    try:
+        assert main(["status"]) == 0
+        assert "hotkeys:  portal" in capsys.readouterr().out
+    finally:
+        srv.stop()

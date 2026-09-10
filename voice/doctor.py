@@ -40,6 +40,26 @@ def _keyboard() -> tuple[bool, str]:
     return True, ", ".join(d.name for d in devs)
 
 
+def _readable_keyboards() -> bool:
+    from voice.daemon import keyboards_are_readable
+    return keyboards_are_readable()
+
+
+def _hotkey_backend() -> tuple[bool, str]:
+    """Informational: which hotkey listener the daemon would build here, and why."""
+    from voice.config import Config
+    from voice.daemon import choose_hotkey_backend, has_local_seat
+    cfg = Config.load()
+    keyboards, seat = _readable_keyboards(), has_local_seat()
+    backend = choose_hotkey_backend(cfg, keyboards, seat)
+    if str(cfg.get("hotkeys.backend", "auto") or "auto").strip().lower() != "auto":
+        return True, f"{backend} (set in config)"
+    reasons = [why for why, ok in (("no readable keyboards", keyboards), ("no local seat", seat)) if not ok]
+    if reasons:
+        return True, f"{backend} ({', '.join(reasons)})"
+    return True, backend
+
+
 def _sources() -> tuple[bool, str]:
     from voice.audio.capture import list_sources
     srcs = list_sources()
@@ -93,6 +113,7 @@ def default_probes() -> dict[str, Callable[[], tuple[bool, str]]]:
         "python": lambda: (True, f"{sys.version.split()[0]} · voice {__version__}"),
         "config": _config,
         "keyboard access": _keyboard,
+        "hotkey backend": _hotkey_backend,
         "pw-record": lambda: _which("pw-record"),
         "microphones": _sources,
         "wl-clipboard": _clipboard,

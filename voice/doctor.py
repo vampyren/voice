@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from voice import APP_ID, __version__
+from voice.hotkey.portal_listener import NO_TRIGGER, STATE_BOUND, STATE_UNASSIGNED
 from voice.ui.overlay_client import probe_helper
 
 REQUIRED = {"portal", "wl-clipboard", "pw-record", "keyboard access", "config"}
@@ -19,6 +20,9 @@ REQUIRED = {"portal", "wl-clipboard", "pw-record", "keyboard access", "config"}
 #: ignores a later hotkeys.portal_* change (verified on GNOME 49).
 GNOME_SHORTCUTS_KEY = f"/org/gnome/settings-daemon/global-shortcuts/{APP_ID}/shortcuts"
 DCONF_TIMEOUT_S = 2
+
+#: Where the user assigns the key. The app appears there under its own name.
+ASSIGN_WHERE = "Settings \u2192 Keyboard \u2192 Keyboard Shortcuts"
 
 
 @dataclass(frozen=True)
@@ -85,25 +89,59 @@ def _dconf_shortcuts() -> str:
     return done.stdout.strip() if done.returncode == 0 else ""
 
 
-def _portal_shortcuts() -> tuple[bool, str]:
-    """Informational: who owns the trigger once the desktop has confirmed it.
+def _daemon_shortcuts() -> dict | None:
+    """What the running daemon's portal listener holds, or None if it cannot say.
 
-    `hotkeys.portal_*` is only what we *ask* for. GNOME stores the confirmed
-    trigger itself and keeps using it, so editing the config there changes
-    nothing until its own copy is changed too.
+    dconf shows GNOME's copy; this shows what the portal answered BindShortcuts
+    with, which is the only thing that decides whether a press ever arrives. A
+    daemon older than the field, one on evdev, or none at all: fall back.
+    """
+    try:
+        from voice.ipc import is_running, send
+        if not is_running():
+            return None
+        reply = send({"cmd": "status"})
+    except Exception:
+        return None
+    if not reply.get("ok") or reply.get("hotkey_backend") != "portal":
+        return None
+    return reply if reply.get("shortcut_state") else None
+
+
+def _render_shortcuts(state: str, triggers: dict) -> tuple[bool, str]:
+    keys = ", ".join(f"{sid}={trigger or NO_TRIGGER}" for sid, trigger in triggers.items())
+    if state == STATE_BOUND:
+        return True, f"bound by the desktop: {keys}"
+    if state == STATE_UNASSIGNED:
+        return False, (f"{keys} - the desktop registered the shortcut and attached no key. "
+                       f"Assign one in {ASSIGN_WHERE}; hotkeys.portal_* is only a first-run "
+                       f"preference and cannot move it.")
+    return False, (f"the desktop refused to bind our shortcuts. Accept its permission dialog, "
+                   f"or run install.sh so the portal can resolve '{APP_ID}'.")
+
+
+def _portal_shortcuts() -> tuple[bool, str]:
+    """Who owns the trigger, and what it actually is right now.
+
+    `hotkeys.portal_*` is only what we ask for on a first run. The desktop owns
+    the trigger from then on, so this reports the effective one - from the
+    running daemon where there is one, and from GNOME's own copy otherwise.
     """
     from voice.config import Config
     from voice.daemon import choose_hotkey_backend, has_local_seat
     cfg = Config.load()
     if choose_hotkey_backend(cfg, _readable_keyboards(), has_local_seat()) != "portal":
         return True, "not in use: the evdev backend reads hotkeys.* directly"
+    live = _daemon_shortcuts()
+    if live is not None:
+        return _render_shortcuts(live["shortcut_state"], live.get("shortcut_triggers") or {})
     stored = _dconf_shortcuts()
     if stored:
-        return True, (f"GNOME already holds your confirmed trigger and will keep it whatever "
-                      f"hotkeys.portal_* says: {GNOME_SHORTCUTS_KEY} = {stored}")
-    return True, ("the desktop keeps the trigger you confirm - change it there (GNOME: Settings "
-                  f"\u2192 Keyboard, or {GNOME_SHORTCUTS_KEY}; KDE: the settings window's "
-                  "\"Change in the desktop\" dialog), not only in hotkeys.portal_*")
+        return True, (f"GNOME holds the trigger and will keep it whatever hotkeys.portal_* says "
+                      f"(start voice for the effective one): {GNOME_SHORTCUTS_KEY} = {stored}")
+    return True, (f"the desktop owns the trigger - assign it in {ASSIGN_WHERE} (GNOME stores it "
+                  f"under {GNOME_SHORTCUTS_KEY}; KDE: the settings window's \"Change in the "
+                  "desktop\" dialog), not in hotkeys.portal_*")
 
 
 def _overlay() -> tuple[bool, str]:

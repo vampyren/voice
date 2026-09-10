@@ -1,3 +1,5 @@
+import pytest
+
 from voice.doctor import Check, run_checks, run_doctor
 
 
@@ -222,6 +224,60 @@ def test_the_stored_trigger_is_not_reported_when_dconf_has_no_key(monkeypatch, i
                         lambda argv, **kw: type("R", (), {"returncode": 0, "stdout": "\n"})())
     detail = default_probes()["portal shortcuts"]()[1]
     assert GNOME_SHORTCUTS_KEY in detail and "KDE" in detail
+
+
+def _running_daemon(monkeypatch, reply):
+    """Answer doctor's `status` query as a live daemon would."""
+    monkeypatch.setattr("voice.ipc.is_running", lambda *a, **k: True)
+    monkeypatch.setattr("voice.ipc.send", lambda command, *a, **k: dict(reply))
+
+
+@pytest.mark.parametrize("state,triggers,ok,wanted", [
+    ("bound", {"dictate": "F13", "recall": "F14"}, True, ["dictate=F13", "recall=F14"]),
+    ("unassigned", {"dictate": "", "recall": "F14"}, False,
+     ["dictate=no key assigned", "recall=F14", "Keyboard"]),
+    ("denied", {}, False, ["refused"]),
+])
+def test_portal_shortcuts_probe_shows_the_effective_trigger_per_id(monkeypatch, isolated_xdg,
+                                                                   state, triggers, ok, wanted):
+    """dconf shows GNOME's copy; the running daemon knows what the portal
+    actually bound, which is the only thing that decides whether a key works."""
+    from voice.doctor import default_probes
+
+    _portal_here(monkeypatch)
+    monkeypatch.setattr("voice.doctor.subprocess.run", _never_run)   # the daemon answered
+    _running_daemon(monkeypatch, {"ok": True, "hotkey_backend": "portal",
+                                  "shortcut_state": state, "shortcut_triggers": triggers})
+    got_ok, detail = default_probes()["portal shortcuts"]()
+    assert got_ok is ok
+    for fragment in wanted:
+        assert fragment in detail, detail
+
+
+def test_portal_shortcuts_probe_falls_back_to_dconf_without_a_daemon(monkeypatch, isolated_xdg):
+    """`voice doctor` is most often run with nothing running; the stored trigger
+    is then the best evidence available."""
+    from voice.doctor import GNOME_SHORTCUTS_KEY, default_probes
+
+    _portal_here(monkeypatch)
+    monkeypatch.setattr("voice.ipc.is_running", lambda *a, **k: False)
+    monkeypatch.setattr("voice.doctor.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("voice.doctor.subprocess.run",
+                        lambda argv, **kw: type("R", (), {
+                            "returncode": 0, "stdout": "[('dictate', {'shortcuts': <['F14']>})]\n"})())
+    ok, detail = default_probes()["portal shortcuts"]()
+    assert ok is True and GNOME_SHORTCUTS_KEY in detail
+
+
+def test_portal_shortcuts_probe_ignores_a_daemon_that_predates_the_field(monkeypatch, isolated_xdg):
+    from voice.doctor import GNOME_SHORTCUTS_KEY, default_probes
+
+    _portal_here(monkeypatch)
+    _running_daemon(monkeypatch, {"ok": True, "hotkey_backend": "portal", "keyboard": True})
+    monkeypatch.setattr("voice.doctor.shutil.which", lambda b: None)
+    monkeypatch.setattr("voice.doctor.subprocess.run", _never_run)
+    ok, detail = default_probes()["portal shortcuts"]()
+    assert ok is True and GNOME_SHORTCUTS_KEY in detail
 
 
 def _never_run(argv, **kwargs):

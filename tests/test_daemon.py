@@ -506,3 +506,42 @@ def test_build_uses_the_evdev_listener_when_configured(isolated_xdg, qapp, monke
     d.build()
     assert d.handle({"cmd": "status"})["hotkey_backend"] == "evdev"
     d.shutdown()
+
+
+def test_portal_shortcuts_falls_back_when_the_config_predates_the_feature(isolated_xdg):
+    from voice import paths
+    from voice.daemon import portal_shortcuts
+    paths.config_file().write_text('[hotkeys]\ndictate = "KEY_F13"\n')
+    assert portal_shortcuts(Config.load()) == {"dictate": "CTRL+space"}
+
+
+def test_a_portal_denial_notifies_even_though_binding_finishes_after_start(isolated_xdg, qapp, monkeypatch):
+    """The portal answers on its own thread, so run()'s devices_ok() check is too
+    early for it; the listener reports the outcome through on_ready instead."""
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    captured = {}
+
+    class FakePortalListener(FakeListener):
+        def __init__(self, on_event, shortcuts, **kwargs):
+            super().__init__()
+            captured["on_ready"] = kwargs.get("on_ready")
+
+        def devices_ok(self):
+            return None                                      # still waiting on the dialog
+
+    monkeypatch.setattr("voice.daemon.PortalListener", FakePortalListener)
+    notified = []
+    notifier = type("N", (), {
+        "notify": lambda self, title, body, urgency="normal": notified.append((title, urgency)),
+        "set_enabled": lambda self, enabled: None})()
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", "portal")
+    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray(), notifier=notifier)
+    d.build()
+    assert callable(captured["on_ready"])
+    captured["on_ready"](True)
+    assert notified == []                                    # a working binding says nothing
+    captured["on_ready"](False)
+    assert notified and notified[-1][1] == "critical"
+    d.shutdown()

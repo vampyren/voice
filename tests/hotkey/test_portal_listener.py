@@ -17,6 +17,12 @@ WITH_REGISTRY = ('<node><interface name="org.freedesktop.host.portal.Registry">'
 WITHOUT_REGISTRY = '<node><interface name="org.freedesktop.portal.GlobalShortcuts"/></node>'
 
 
+def started(listener, timeout=2.0):
+    """start() opens the session on the listener thread, so tests wait for it."""
+    assert wait_for(lambda: listener.devices_ok() is not None, timeout), "listener never finished starting"
+    return listener
+
+
 def wait_for(pred, timeout=2.0):
     end = time.time() + timeout
     while time.time() < end:
@@ -49,11 +55,12 @@ class FakeConn:
     """
 
     def __init__(self, *, bind_code=0, create_code=0, version=1, registry=True, configure_error=False,
-                 create_error=None):
+                 create_error=None, open_delay=0.0, drop_after_bind=False):
         self.unique_name = ":1.99"
         self.bind_code, self.create_code = bind_code, create_code
         self.version, self.registry, self.configure_error = version, registry, configure_error
         self.create_error = create_error
+        self.open_delay, self.drop_after_bind = open_delay, drop_after_bind
         self.calls: list[tuple[str, tuple]] = []
         self.closed = False
         self._pending: str | None = None
@@ -93,9 +100,12 @@ class FakeConn:
     def recv_until_filtered(self, queue, timeout=None):
         if self._pending is not None:
             member, self._pending = self._pending, None
+            time.sleep(self.open_delay)       # the portal's permission dialog is slow
             if member == "CreateSession":
                 return SimpleNamespace(body=(self.create_code, {"session_handle": ("o", SESSION)}))
             return SimpleNamespace(body=(self.bind_code, {}))
+        if self.drop_after_bind:
+            raise ConnectionResetError("portal went away")
         with self._lock:
             if self._signals:
                 return self._signals.popleft()
@@ -106,12 +116,12 @@ class FakeConn:
         self.closed = True
 
 
-def make(shortcuts=None, on_event=None, **kwargs):
+def make(shortcuts=None, on_event=None, on_ready=None, **kwargs):
     conn = FakeConn(**kwargs)
     events: list[tuple[str, str]] = []
     listener = PortalListener(on_event or (lambda name, kind: events.append((name, kind))),
                               shortcuts if shortcuts is not None else {"dictate": "CTRL+space"},
-                              bus_factory=lambda bus="SESSION": conn)
+                              bus_factory=lambda bus="SESSION": conn, on_ready=on_ready)
     return listener, conn, events
 
 
@@ -120,6 +130,7 @@ def test_bind_shortcuts_sends_every_configured_id_with_its_trigger():
     listener, conn, _ = make({"dictate": "CTRL+space", "cancel": "CTRL+ALT+c"})
     try:
         listener.start()
+        started(listener)
         session, shortcuts, parent, options = conn.bodies("BindShortcuts")[0]
         assert session == SESSION
         assert parent == ""                                  # no parent window: the daemon has none
@@ -138,6 +149,7 @@ def test_create_session_asks_for_its_own_handle_tokens():
     listener, conn, _ = make()
     try:
         listener.start()
+        started(listener)
         options = conn.bodies("CreateSession")[0][0]
         assert set(options) == {"handle_token", "session_handle_token"}
     finally:
@@ -152,6 +164,7 @@ def test_devices_ok_is_unknown_before_start():
 def test_denied_binding_leaves_the_backend_unusable():
     listener, conn, events = make(bind_code=1)
     listener.start()
+    started(listener)
     try:
         assert listener.devices_ok() is False
         assert conn.closed                                   # nothing left half-open
@@ -167,6 +180,7 @@ def test_a_dead_bus_leaves_the_backend_unusable_without_raising():
 
     listener = PortalListener(lambda name, kind: None, {"dictate": "CTRL+space"}, bus_factory=boom)
     listener.start()
+    started(listener)
     assert listener.devices_ok() is False
     listener.stop()
 
@@ -174,9 +188,66 @@ def test_a_dead_bus_leaves_the_backend_unusable_without_raising():
 def test_a_missing_app_id_is_reported_with_the_fix(caplog):
     listener, conn, _ = make(create_error="An app id is required")
     listener.start()
+    started(listener)
     try:
         assert listener.devices_ok() is False
         assert "install.sh" in caplog.text and f"{APP_ID}.desktop" in caplog.text
+    finally:
+        listener.stop()
+
+
+def test_no_configured_trigger_is_a_bind_failure_not_a_silent_no_op():
+    """Binding an empty list succeeds at the portal, so it must be refused here:
+    otherwise an upgraded config reports healthy while no key does anything."""
+    listener, conn, _ = make({})
+    listener.start()
+    started(listener)
+    try:
+        assert listener.devices_ok() is False
+        assert conn.calls == []                              # not even a session was opened
+    finally:
+        listener.stop()
+
+
+def test_start_does_not_block_on_the_portals_permission_dialog():
+    """The compositor's dialog answers BindShortcuts; blocking start() on it would
+    leave the daemon with no tray and no event loop until the user clicks."""
+    listener, _, _ = make(open_delay=0.4)
+    begin = time.time()
+    listener.start()
+    elapsed = time.time() - begin
+    try:
+        assert elapsed < 0.2, f"start() blocked for {elapsed:.2f}s"
+        assert listener.devices_ok() is None                  # still deciding
+        started(listener)
+        assert listener.devices_ok() is True
+    finally:
+        listener.stop()
+
+
+def test_on_ready_reports_the_outcome_once_the_portal_answers():
+    seen: list[bool] = []
+    listener, _, _ = make(on_ready=seen.append)
+    listener.start()
+    started(listener)
+    listener.stop()
+    assert seen == [True]
+
+    denied: list[bool] = []
+    listener, _, _ = make(bind_code=1, on_ready=denied.append)
+    listener.start()
+    started(listener)
+    listener.stop()
+    assert denied == [False]
+
+
+def test_a_lost_portal_connection_stops_reporting_healthy():
+    """A portal restart kills the connection; status must not keep saying "ok"."""
+    listener, conn, _ = make(drop_after_bind=True)
+    listener.start()
+    started(listener)
+    try:
+        assert wait_for(lambda: listener.devices_ok() is False)
     finally:
         listener.stop()
 
@@ -245,6 +316,7 @@ def test_app_id_is_registered_when_the_host_registry_exists():
     listener, conn, _ = make()
     try:
         listener.start()
+        started(listener)
         assert conn.bodies("Register") == [(APP_ID, {})]
     finally:
         listener.stop()
@@ -254,6 +326,7 @@ def test_registration_is_skipped_when_the_host_registry_is_absent():
     listener, conn, _ = make(registry=False)
     try:
         listener.start()
+        started(listener)
         assert conn.bodies("Register") == []
         assert listener.devices_ok() is True                  # absent registry is not an error
     finally:
@@ -265,6 +338,7 @@ def test_capture_next_explains_itself_when_the_portal_is_too_old():
     listener, conn, _ = make(version=1)
     try:
         listener.start()
+        started(listener)
         got: list[str] = []
         listener.capture_next(got.append)
         assert got == [NO_CAPTURE_MESSAGE]
@@ -277,6 +351,7 @@ def test_capture_next_opens_the_desktops_dialog_when_supported():
     listener, conn, _ = make(version=2)
     try:
         listener.start()
+        started(listener)
         got: list[str] = []
         listener.capture_next(got.append)
         session, parent, options = conn.bodies("ConfigureShortcuts")[0]
@@ -290,6 +365,7 @@ def test_capture_next_falls_back_when_configure_shortcuts_errors():
     listener, conn, _ = make(version=2, configure_error=True)
     try:
         listener.start()
+        started(listener)
         got: list[str] = []
         listener.capture_next(got.append)
         assert got == [NO_CAPTURE_MESSAGE]

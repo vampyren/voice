@@ -46,6 +46,13 @@ def test_desktop_entry_is_installed_under_the_app_id():
     assert f"/tmp/voice-home/.config/autostart/{APP_ID}.desktop" in cp.stdout
 
 
+def test_dry_run_reports_the_legacy_entry_removal():
+    """The dry run is the script's contract; a real install deletes these two."""
+    cp = run("--cpu", "--no-udev")
+    assert "/tmp/voice-home/.local/share/applications/voice.desktop" in cp.stdout
+    assert "/tmp/voice-home/.config/autostart/voice.desktop" in cp.stdout
+
+
 def test_uninstall_removes_the_app_id_entry_and_the_legacy_name():
     from voice import APP_ID
     cp = run("--uninstall")

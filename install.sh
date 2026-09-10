@@ -62,8 +62,9 @@ if [ "${DRY_RUN:-0}" = 1 ]; then
 else
   sed "s|^Exec=.*|Exec=$BIN daemon|" "$ROOT/packaging/$APP.desktop" > "$APPS"
   cp "$APPS" "$AUTOSTART"
-  rm -f "$LEGACY_APPS" "$LEGACY_AUTOSTART"        # from installs before the app id rename
 fi
+# From installs before the app id rename; through run() so the dry run says so too.
+run rm -f "$LEGACY_APPS" "$LEGACY_AUTOSTART"
 
 if [ "$UDEV" = 1 ]; then
   echo "installing udev rule for keyboard access (asks for sudo once)"

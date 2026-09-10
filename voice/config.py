@@ -82,6 +82,10 @@ active_window_command = ""   # command printing the focused window class; "" = u
 restore_clipboard = true
 '''
 
+#: Shipped portal triggers, also the fallback for a config.toml written before
+#: the portal backend existed - such a file has no hotkeys.portal_* keys at all.
+DEFAULT_PORTAL_TRIGGERS = {"dictate": "CTRL+space", "recall": "", "cancel": ""}
+
 _VALID_MODES = {"hold", "toggle"}
 _VALID_HOTKEY_BACKENDS = {"auto", "evdev", "portal"}
 _VALID_BACKENDS = {"local", "openai_compatible"}
@@ -162,6 +166,19 @@ class Config:
                 raise ValueError(f"stt.active refers to unknown profile '{name}'")
             return name, profile
 
+    def portal_trigger(self, name: str) -> str:
+        """The effective XDG trigger for a portal shortcut id.
+
+        A missing key means the file predates this feature: fall back to the
+        shipped default, or an upgraded install binds nothing and says nothing.
+        An explicitly empty value is the user saying "do not bind this" and stays
+        empty.
+        """
+        value = self.get(f"hotkeys.portal_{name}")
+        if value is None:
+            value = DEFAULT_PORTAL_TRIGGERS.get(name, "")
+        return str(value).strip()
+
     @staticmethod
     def secret(profile: dict) -> str | None:
         if profile.get("api_key"):
@@ -183,8 +200,10 @@ class Config:
         backend = self.get("hotkeys.backend", "auto")
         if backend not in _VALID_HOTKEY_BACKENDS:
             errs.append(f"hotkeys.backend must be one of {sorted(_VALID_HOTKEY_BACKENDS)}, got {backend!r}")
-        if backend == "portal" and not self.get("hotkeys.portal_dictate"):
-            errs.append("hotkeys.portal_dictate must not be empty when hotkeys.backend is 'portal'")
+        # "auto" resolves to portal on a machine without readable keyboards or a
+        # local seat, so only an explicit "evdev" makes the trigger irrelevant.
+        if backend != "evdev" and not self.portal_trigger("dictate"):
+            errs.append("hotkeys.portal_dictate must not be empty unless hotkeys.backend is 'evdev'")
         active = self.get("stt.active")
         profiles = self.get("stt.profiles", {}) or {}
         if active not in profiles:

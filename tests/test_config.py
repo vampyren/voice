@@ -204,3 +204,51 @@ def test_readme_shows_the_current_defaults():
     block = re.search(r"```toml\n(# voice configuration.*?)```", readme, re.S)
     assert block, "the README no longer contains the default config block"
     assert block.group(1) == DEFAULT_CONFIG
+
+
+LEGACY_CONFIG = """
+[hotkeys]
+dictate = "KEY_F13"
+dictate_mode = "hold"
+recall = ""
+cancel = "KEY_ESC"
+
+[stt]
+active = "local"
+
+[stt.profiles.local]
+backend = "local"
+model = "large-v3-turbo"
+
+[audio]
+max_seconds = 120
+"""
+
+
+def test_portal_trigger_falls_back_for_a_config_written_before_this_feature(isolated_xdg):
+    """A pre-existing config.toml has no hotkeys.portal_* keys at all; falling back
+    to the shipped default is what keeps an upgrade from binding nothing."""
+    from voice import paths
+    paths.config_file().write_text(LEGACY_CONFIG)
+    cfg = Config.load()
+    assert cfg.get("hotkeys.portal_dictate") is None
+    assert cfg.portal_trigger("dictate") == "CTRL+space"
+    assert cfg.portal_trigger("cancel") == ""
+    assert [e for e in cfg.errors() if "portal" in e] == []
+
+
+def test_portal_trigger_keeps_an_explicit_empty_value(isolated_xdg):
+    cfg = Config.load()
+    cfg.set("hotkeys.portal_dictate", "  ")
+    assert cfg.portal_trigger("dictate") == ""
+
+
+def test_errors_wants_a_dictate_trigger_whenever_the_portal_can_be_chosen(isolated_xdg):
+    """backend = "auto" can resolve to portal, so an empty trigger must not pass."""
+    cfg = Config.load()
+    cfg.set("hotkeys.portal_dictate", "")
+    for backend in ("auto", "portal"):
+        cfg.set("hotkeys.backend", backend)
+        assert any("hotkeys.portal_dictate" in e for e in cfg.errors()), backend
+    cfg.set("hotkeys.backend", "evdev")
+    assert [e for e in cfg.errors() if "portal_dictate" in e] == []

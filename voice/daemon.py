@@ -88,7 +88,7 @@ def portal_shortcuts(config: Config) -> dict[str, str]:
     """The shortcut ids to bind through the portal, with their XDG triggers."""
     shortcuts = {}
     for name in ("dictate", "recall", "cancel"):
-        trigger = str(config.get(f"hotkeys.portal_{name}", "") or "").strip()
+        trigger = config.portal_trigger(name)
         if trigger:
             shortcuts[name] = trigger
     return shortcuts
@@ -191,8 +191,18 @@ class Daemon:
         backend = choose_hotkey_backend(self.config, keyboards_are_readable(), has_local_seat())
         log.info("hotkey backend: %s", backend)
         if backend == "portal":
-            return PortalListener(self._on_hotkey, portal_shortcuts(self.config)), backend
+            return PortalListener(self._on_hotkey, portal_shortcuts(self.config),
+                                  on_ready=self._on_hotkeys_ready), backend
         return EvdevListener(self.tracker, self._on_hotkey), backend
+
+    def _on_hotkeys_ready(self, ok: bool) -> None:
+        """Called from the portal listener thread once the desktop has answered."""
+        if ok:
+            return
+        self._notifier.notify("Shortcut not registered",
+                              "The desktop did not bind the global shortcut. Check its shortcut settings, "
+                              "check hotkeys.portal_dictate, or run install.sh so the portal can resolve "
+                              "this app.", "critical")
 
     def _profile_snapshot(self) -> tuple[str, dict] | None:
         """The active (name, profile) pair, or None if stt.active is unresolvable."""
@@ -239,13 +249,10 @@ class Daemon:
         self.listener.start()
         self.tray.show()
         self._start_warmup()
-        if self.listener.devices_ok() is False:
-            if self.hotkey_backend == "portal":
-                self._notifier.notify("Shortcut not registered",
-                                      "The desktop refused the global shortcut. Check its shortcut settings, "
-                                      "or run install.sh so the portal can resolve this app.", "critical")
-            else:
-                self._notifier.notify("No keyboard access", "Run the installer's udev step or add yourself to the input group.", "critical")
+        # The portal listener answers asynchronously and reports through
+        # _on_hotkeys_ready; only the evdev listener knows its state by now.
+        if self.hotkey_backend != "portal" and self.listener.devices_ok() is False:
+            self._notifier.notify("No keyboard access", "Run the installer's udev step or add yourself to the input group.", "critical")
         log.info("%s %s ready", APP_NAME, __version__)
         code = app.exec()
         self.shutdown()

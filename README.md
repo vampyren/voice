@@ -180,7 +180,8 @@ restore_clipboard = true
 The portal backend needs the desktop entry `install.sh` writes
 (`~/.local/share/applications/io.github.vampyren.voice.desktop`): the portal resolves the
 app id through it, and refuses the shortcut session with "An app id is required" without
-it. Changing a portal trigger takes effect on the next daemon start, not on `voice reload`.
+it. Changing `hotkeys.backend` or a portal trigger takes effect on the next daemon start, not on
+`voice reload` — the portal session is created once and reused while the daemon runs.
 
 **Hotkeys.** Use the settings window's "Capture key" button — press the physical key and
 it fills in the exact evdev name it received. Combinations are typed by hand, e.g.

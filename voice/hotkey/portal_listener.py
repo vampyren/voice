@@ -44,6 +44,8 @@ DIALOG_MESSAGE = "portal: choose the shortcut in the dialog your desktop just op
 RECV_SLICE_S = 0.5
 #: ConfigureShortcuts returns its Request handle at once; only the dialog is slow.
 CALL_TIMEOUT_S = 5
+#: capture_next runs on the Qt thread, so its round trip is kept short.
+CONFIGURE_TIMEOUT_S = 2
 
 
 class PortalListener:
@@ -55,8 +57,10 @@ class PortalListener:
     """
 
     def __init__(self, on_event: Callable[[str, str], None], shortcuts: dict[str, str],
-                 bus_factory: Callable = open_dbus_connection, app_id: str = APP_ID):
+                 bus_factory: Callable = open_dbus_connection, app_id: str = APP_ID,
+                 on_ready: Callable[[bool], None] | None = None):
         self._on_event = on_event
+        self._on_ready = on_ready
         self._shortcuts = dict(shortcuts)
         self._bus_factory = bus_factory
         self._app_id = app_id
@@ -75,16 +79,15 @@ class PortalListener:
 
     # -- public (EvdevListener interface) ---------------------------------
     def start(self) -> None:
+        """Return at once; the session is opened on the listener thread.
+
+        BindShortcuts is the call the compositor answers with its permission
+        dialog, which can take as long as the user does. Opening synchronously
+        would leave the daemon with no tray and no Qt event loop until then, so
+        devices_ok() stays None until the portal has answered and `on_ready` (if
+        given) reports the outcome.
+        """
         self._stop.clear()
-        try:
-            self._open()
-        except Exception as exc:
-            # No hotkeys is bad, but a daemon that refuses to start is worse: the
-            # user still has the tray and the CLI, and devices_ok() says why.
-            log.error("portal global shortcuts unavailable: %s", exc)
-            self._bound = False
-            self._close()
-            return
         self._thread = threading.Thread(target=self._run, name="portal-listener", daemon=True)
         self._thread.start()
 
@@ -109,7 +112,7 @@ class PortalListener:
             with self._bus_lock:
                 reply = self._conn.send_and_get_reply(
                     new_method_call(SHORTCUTS, "ConfigureShortcuts", "osa{sv}",
-                                    (self._session, "", options)), timeout=CALL_TIMEOUT_S)
+                                    (self._session, "", options)), timeout=CONFIGURE_TIMEOUT_S)
             if reply.header.message_type.name == "error":
                 raise PortalError(f"ConfigureShortcuts failed: {reply.body}")
         except Exception as exc:
@@ -134,6 +137,10 @@ class PortalListener:
 
     # -- setup --------------------------------------------------------------
     def _open(self) -> None:
+        if not self._shortcuts:
+            # BindShortcuts with an empty list succeeds, which would report a
+            # healthy backend that can never fire.
+            raise PortalError("no portal shortcut trigger configured (hotkeys.portal_dictate is empty)")
         self._conn = self._bus_factory(bus="SESSION")
         self._register_app_id()
         self._version = self._portal_version()
@@ -208,6 +215,28 @@ class PortalListener:
 
     # -- thread -------------------------------------------------------------
     def _run(self) -> None:
+        try:
+            self._open()
+        except Exception as exc:
+            # No hotkeys is bad, but a daemon that refuses to start is worse: the
+            # user still has the tray and the CLI, and devices_ok() says why.
+            log.error("portal global shortcuts unavailable: %s", exc)
+            self._bound = False
+            self._close()
+            self._announce()
+            return
+        self._announce()
+        self._listen()
+
+    def _announce(self) -> None:
+        if self._on_ready is None:
+            return
+        try:
+            self._on_ready(bool(self._bound))
+        except Exception:
+            log.exception("hotkey readiness callback failed")
+
+    def _listen(self) -> None:
         rule = MatchRule(type="signal", interface=INTERFACE)
         try:
             with self._bus_lock:
@@ -225,7 +254,11 @@ class PortalListener:
                     continue
                 except Exception:
                     if not self._stop.is_set():
-                        log.warning("portal shortcut connection lost", exc_info=True)
+                        # The portal restarted or the bus dropped us. Nothing
+                        # reconnects, so stop claiming the hotkeys still work.
+                        log.warning("portal shortcut connection lost; hotkeys are dead until restart",
+                                    exc_info=True)
+                        self._bound = False
                     return
                 try:
                     self._dispatch(msg)

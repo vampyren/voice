@@ -68,7 +68,7 @@ CLI:
 
 ```
 voice                  # start the daemon, or raise the settings window if one is running
-voice daemon           # run the daemon in the foreground (same as no-argument start)
+voice daemon           # run the daemon in the foreground (exits and raises the settings window if one is already running)
 voice start|stop       # begin/end recording explicitly (useful with toggle mode)
 voice toggle           # alternate recording on/off
 voice cancel           # discard the current recording
@@ -184,8 +184,7 @@ are restored after the paste.
 - **keyboard access** — at least one input device is readable without root. Re-run
   `./install.sh` (installs the udev rule) or add yourself to the `input` group and
   log out/in. A device already open before the rule existed may need re-plugging.
-- **pw-record**, **microphones** — PipeWire's recording tool is on PATH and a source
-  is visible.
+- **pw-record** — PipeWire's recording tool is on PATH.
 - **wl-clipboard** — `wl-copy`/`wl-paste` are installed.
 - **portal** — the `RemoteDesktop` portal is reachable (`xdg-desktop-portal-kde` on KDE,
   `xdg-desktop-portal-gnome` on GNOME). If the permission dialog needs revoking or
@@ -193,6 +192,7 @@ are restored after the paste.
 - **cuda** *(optional)* — an NVIDIA GPU is visible to `ctranslate2`; without it (or on a
   machine with none), the local backend runs on CPU int8 automatically — slower, but it
   works, and this line explains why nothing is using the GPU.
+- **microphones** *(optional)* — at least one PipeWire source is visible.
 - **model cache** *(optional)* — whether the active local model has already downloaded.
 - **notify-send**, **fallback senders** *(optional)* — desktop notifications, and
   `wtype`/`ydotool` as a paste fallback if the portal chord path is ever unavailable.

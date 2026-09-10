@@ -255,6 +255,9 @@ replacements = [
 ]
 
 [inject]
+mode = "paste"             # "paste" sends the paste chord; "clipboard" only copies and
+                           # tells you to press Ctrl+V yourself (remote desktops, and any
+                           # compositor that refuses synthetic keystrokes)
 paste_chord = "ctrl+v"
 terminal_chord = "ctrl+shift+v"
 terminal_classes = ["konsole", "org.kde.konsole", "kitty", "alacritty", "foot", "wezterm", "org.gnome.Ptyxis", "gnome-terminal"]

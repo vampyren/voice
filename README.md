@@ -154,6 +154,11 @@ language = "en"            # "en", "sv", or "auto"
 languages = ["en", "sv"]   # cycle order for the language toggle
 notifications = true
 
+[general.language_profiles]
+# Profile to switch to when a language is selected; add the local-swedish profile first.
+# en = "local"
+# sv = "local-swedish"
+
 [hotkeys]
 backend = "auto"           # "auto" | "evdev" (kernel devices) | "portal" (desktop shortcuts)
 dictate = "KEY_F13"        # any evdev key, or a combination like "KEY_LEFTMETA+KEY_SPACE"

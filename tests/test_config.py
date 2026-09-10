@@ -294,3 +294,48 @@ def test_languages_falls_back_for_a_config_written_before_the_toggle(isolated_xd
     cfg = Config.load()
     assert cfg.languages() == ["sv"]           # the one language it knows about
     assert [e for e in cfg.errors() if "languages" in e] == []
+
+
+def test_language_profiles_are_empty_until_the_user_uncomments_them(isolated_xdg):
+    """The shipped table is a commented example: an upgrade must change nothing."""
+    cfg = Config.load()
+    assert cfg.get("general.language_profiles") == {}
+    assert cfg.language_profiles() == {}
+    assert cfg.profile_for_language("sv") is None
+    assert cfg.errors() == []
+    text = cfg.path.read_text()
+    assert '# en = "local"' in text
+    assert '# sv = "local-swedish"' in text
+
+
+def test_language_profiles_map_languages_to_profiles(isolated_xdg):
+    cfg = Config.load()
+    cfg.set("general.language_profiles", {"EN": "local", "sv": "openai"})
+    assert cfg.language_profiles() == {"en": "local", "sv": "openai"}
+    assert cfg.profile_for_language("SV") == "openai"
+    assert cfg.profile_for_language("de") is None
+    assert cfg.errors() == []
+
+
+@pytest.mark.parametrize("mapping,expected", [
+    ({}, None),
+    ({"en": "local", "sv": "openai"}, None),
+    ({"auto": "local"}, None),                             # "auto" may map too
+    ({"sv": "ghost"}, "general.language_profiles.sv"),     # unknown profile
+    ({"sv": 7}, "general.language_profiles.sv"),           # not even a name
+    ({"svenska": "local"}, "general.language_profiles"),   # not a language code
+])
+def test_language_profile_map_is_validated(isolated_xdg, mapping, expected):
+    cfg = Config.load()
+    cfg.set("general.language_profiles", mapping)
+    errs = [e for e in cfg.errors() if "language_profiles" in e]
+    if expected is None:
+        assert errs == []
+    else:
+        assert any(e.startswith(expected) for e in errs), errs
+
+
+def test_a_language_profile_map_that_is_not_a_table_is_rejected(isolated_xdg):
+    cfg = Config.load()
+    cfg.set("general.language_profiles", "local")
+    assert any("general.language_profiles must be a table" in e for e in cfg.errors())

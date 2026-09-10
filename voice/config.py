@@ -20,6 +20,11 @@ language = "en"            # "en", "sv", or "auto"
 languages = ["en", "sv"]   # cycle order for the language toggle
 notifications = true
 
+[general.language_profiles]
+# Profile to switch to when a language is selected; add the local-swedish profile first.
+# en = "local"
+# sv = "local-swedish"
+
 [hotkeys]
 backend = "auto"           # "auto" | "evdev" (kernel devices) | "portal" (desktop shortcuts)
 dictate = "KEY_F13"        # any evdev key, or a combination like "KEY_LEFTMETA+KEY_SPACE"
@@ -190,6 +195,22 @@ class Config:
         current = str(self.get("general.language", "en") or "en").strip()
         return [current] if current else []
 
+    def language_profiles(self) -> dict[str, str]:
+        """`general.language_profiles`, normalised to lower-case codes.
+
+        The table is empty in a shipped config (its entries are comments), so
+        an install that never opts in behaves exactly as it did before.
+        """
+        value = self.get("general.language_profiles", {}) or {}
+        if not isinstance(value, dict):
+            return {}
+        return {str(code).strip().lower(): str(name).strip()
+                for code, name in value.items() if str(name).strip()}
+
+    def profile_for_language(self, code: str) -> str | None:
+        """The profile a language selects, or None when it maps to nothing."""
+        return self.language_profiles().get(str(code).strip().lower())
+
     def portal_trigger(self, name: str) -> str:
         """The effective XDG trigger for a portal shortcut id.
 
@@ -243,6 +264,7 @@ class Config:
             else:
                 for entry in languages:
                     errs += _language_errors("general.languages", entry)
+        errs += self._language_profile_errors(profiles)
         if not isinstance(self.get("audio.max_seconds"), int) or self.get("audio.max_seconds") <= 0:
             errs.append("audio.max_seconds must be a positive integer")
         for key in ("inject.paste_chord", "inject.terminal_chord"):
@@ -253,6 +275,23 @@ class Config:
                 parse_chord(str(chord))
             except ValueError as exc:
                 errs.append(f"{key}: {exc}")
+        return errs
+
+    def _language_profile_errors(self, profiles: dict) -> list[str]:
+        """Every mapped profile must exist: switching language must never leave
+        stt.active naming something the daemon cannot build."""
+        mapping = self.get("general.language_profiles")
+        if mapping is None:
+            return []
+        if not isinstance(mapping, dict):
+            return [f"general.language_profiles must be a table of language = profile, got {mapping!r}"]
+        errs: list[str] = []
+        for code, name in mapping.items():
+            if not is_language_code(code):
+                errs.append(f"general.language_profiles key {code!r} must be "
+                            '"auto" or a two-letter code')
+            if not isinstance(name, str) or name not in profiles:
+                errs.append(f"general.language_profiles.{code} {name!r} is not a defined profile")
         return errs
 
 

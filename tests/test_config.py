@@ -133,3 +133,9 @@ def test_config_accessors_are_serialised(isolated_xdg, monkeypatch):
     assert read_done.wait(2)
     saver.join(2)
     reader.join(2)
+
+
+def test_errors_reports_an_empty_paste_chord(isolated_xdg):
+    cfg = Config.load()
+    cfg.set("inject.paste_chord", "")
+    assert any("inject.paste_chord" in e and "empty chord" in e for e in cfg.errors())

@@ -32,6 +32,11 @@ def apply_replacements(text: str, rules: list[list]) -> str:
         if len(rule) < 2:
             continue
         src, dst = str(rule[0]), str(rule[1])
+        if not src:
+            # An empty pattern matches at every position: it would splice `dst`
+            # between every character of the transcript.
+            log.debug("skipping replacement rule with an empty source")
+            continue
         flags = {f.strip().lower() for f in re.split(r"[,\s]+", str(rule[2]))} if len(rule) > 2 else set()
         re_flags = re.IGNORECASE if "icase" in flags else 0
         if "regex" in flags:

@@ -14,3 +14,9 @@ def test_parse_chord_modifiers_then_key():
 def test_parse_chord_rejects_unknown():
     with pytest.raises(ValueError, match="hyper"):
         parse_chord("hyper+v")
+
+
+def test_parse_chord_rejects_an_empty_chord():
+    for text in ("", "   ", "+", " + + "):
+        with pytest.raises(ValueError, match="empty chord"):
+            parse_chord(text)

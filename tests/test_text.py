@@ -42,3 +42,11 @@ def test_literal_rule_matches_phrases_with_non_word_edges():
 def test_non_word_edges_do_not_widen_the_word_boundary_on_the_other_side():
     # The leading edge is still guarded: "c++" has a word char at the front.
     assert apply_replacements("abc++ daily", [["c++", "C++"]]) == "abc++ daily"
+
+
+def test_an_empty_source_is_skipped():
+    # An empty pattern matches at every position and would splice the target
+    # between every character of the transcript.
+    assert apply_replacements("hello there", [["", "x"]]) == "hello there"
+    assert apply_replacements("hello there", [["", "x", "regex"]]) == "hello there"
+    assert apply_replacements("hello there", [["", "x"], ["there", "world"]]) == "hello world"

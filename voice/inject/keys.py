@@ -40,4 +40,7 @@ def parse_chord(text: str) -> list[int]:
             codes.append(ecodes.ecodes[f"KEY_{part.upper()}"])
         else:
             raise ValueError(f"unknown key {part!r} in chord {text!r}")
+    if not codes:
+        # Silently sending nothing looks like a successful paste to the caller.
+        raise ValueError(f"empty chord {text!r}")
     return codes

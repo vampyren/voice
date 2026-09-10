@@ -1,3 +1,5 @@
+import pytest
+
 from voice import ipc
 from voice.cli import main
 
@@ -155,3 +157,38 @@ def test_a_named_language_needs_no_second_round_trip(isolated_xdg, capsys):
         srv.stop()
     assert seen == ["language"]
     assert capsys.readouterr().out.splitlines() == ["language: sv"]
+
+
+@pytest.mark.parametrize("bound,expected", [
+    (True, "shortcuts: bound"),
+    (False, "shortcuts: NOT BOUND (accept the desktop's shortcut dialog)"),
+    (None, "shortcuts: waiting for the desktop"),
+])
+def test_status_talks_about_shortcuts_on_the_portal_backend(isolated_xdg, capsys, bound, expected):
+    """With the portal there is no keyboard to have access to: the desktop
+    either bound our shortcuts or it did not."""
+    srv = ipc.Server(lambda r: {"ok": True, "state": "idle", "profile": "local", "backend": "fake",
+                                "last_error": None, "keyboard": bound, "language": "en",
+                                "hotkey_backend": "portal"})
+    srv.start()
+    try:
+        assert main(["status"]) == 0
+    finally:
+        srv.stop()
+    out = capsys.readouterr().out
+    assert expected in out
+    assert "keyboard:" not in out
+
+
+def test_status_still_reports_keyboard_access_on_the_evdev_backend(isolated_xdg, capsys):
+    srv = ipc.Server(lambda r: {"ok": True, "state": "idle", "profile": "local", "backend": "fake",
+                                "last_error": None, "keyboard": False, "language": "en",
+                                "hotkey_backend": "evdev"})
+    srv.start()
+    try:
+        assert main(["status"]) == 0
+    finally:
+        srv.stop()
+    out = capsys.readouterr().out
+    assert "keyboard: NO ACCESS" in out
+    assert "shortcuts:" not in out

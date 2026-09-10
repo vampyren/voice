@@ -78,7 +78,9 @@ voice toggle           # alternate recording on/off
 voice cancel           # discard the current recording
 voice recall           # re-insert the last dictation
 voice retry            # re-send the last recording's audio (e.g. after a transient cloud error)
-voice status           # state, active profile, backend, keyboard access, last error
+voice status           # state, active profile, backend, language, overlay, last error, and
+                       # either keyboard access (evdev) or whether the desktop bound the
+                       # shortcuts (portal)
 voice settings         # raise the settings window
 voice profile <name>   # switch the active STT profile (local, openai, groq, openrouter, ...)
 voice language <code>  # switch dictation language ("sv", "auto", or "next" to cycle)

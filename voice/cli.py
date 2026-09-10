@@ -36,8 +36,17 @@ def _print_status(reply: dict) -> None:
     print(f"hotkeys:  {reply.get('hotkey_backend', 'unknown')}")
     print(f"overlay:  {reply.get('overlay', 'unknown')}")
     keyboard = reply.get("keyboard")
-    kb_text = "ok" if keyboard else ("unknown" if keyboard is None else "NO ACCESS")
-    print(f"keyboard: {kb_text}")
+    if reply.get("hotkey_backend") == "portal":
+        # There is no keyboard to have access to on this backend: the desktop
+        # either bound our shortcuts, refused them, or has not answered yet.
+        if keyboard is None:
+            bound = "waiting for the desktop"
+        else:
+            bound = "bound" if keyboard else "NOT BOUND (accept the desktop's shortcut dialog)"
+        print(f"shortcuts: {bound}")
+    else:
+        kb_text = "ok" if keyboard else ("unknown" if keyboard is None else "NO ACCESS")
+        print(f"keyboard: {kb_text}")
     if reply.get("last_error"):
         print(f"error:    {reply['last_error']}")
 

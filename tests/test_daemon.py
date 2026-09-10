@@ -828,6 +828,28 @@ def test_a_cycle_of_one_language_makes_the_toggle_a_no_op(isolated_xdg, qapp, mo
     d.shutdown()
 
 
+def test_an_invalid_language_in_the_cycle_is_never_written(isolated_xdg, qapp, monkeypatch,
+                                                          helper_processes):
+    """`next` is resolved on the Qt thread, past the IPC check that rejects a
+    typo, and Config.load() does not validate the cycle: a hand-edited
+    general.languages used to put "zz9" straight into general.language."""
+    cfg = Config.load()
+    cfg.set("general.languages", ["en", "zz9"])
+    cfg.save()
+    notifier = QuietNotifier()
+    d = _overlay_daemon(cfg, monkeypatch, helper_processes, notifier=notifier)
+
+    d._on_hotkey("language_toggle", "press")
+    qapp.processEvents()
+
+    assert d.config.get("general.language") == "en"
+    assert Config.load().get("general.language") == "en"    # and nothing reached the file
+    assert _overlay_lines(d, helper_processes) == []        # no badge, no "EN → ZZ9"
+    assert [title for title, _, _ in notifier.sent] == ["Unknown language in the cycle"]
+    assert "zz9" in notifier.sent[0][1]
+    d.shutdown()
+
+
 def test_two_toggles_before_the_qt_thread_drains_are_two_steps(isolated_xdg, qapp, monkeypatch,
                                                                helper_processes):
     """`next` used to be resolved on the caller's thread, so a double tap

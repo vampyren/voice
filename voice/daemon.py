@@ -566,6 +566,16 @@ class Daemon:
             # is already in force). Saving and flashing "EN → EN" is worse than
             # doing nothing at all.
             return
+        if not is_language_code(code):
+            # A code named over IPC was checked there, but one resolved from
+            # general.languages was not: nothing validates that list on the way
+            # in, so a hand-edited entry would be written to general.language
+            # and every later load would fail its own validation.
+            log.warning("general.languages entry %r is not a language code; not switching", code)
+            self._notifier.notify("Unknown language in the cycle",
+                                  f"'{code}' in general.languages is not \"auto\" or a "
+                                  "two-letter code", "critical")
+            return
         try:
             self.config.set("general.language", code)
             self._apply_language_profile(code)

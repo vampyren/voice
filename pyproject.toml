@@ -18,6 +18,10 @@ gpu = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12>=9,<10"]
 
 [project.scripts]
 voice = "voice.cli:main"
+# The overlay helper needs PyGObject, which is a system package rather than
+# a project dependency; where the venv has no `gi`, the daemon launches the
+# equivalent `python3 -m voice.ui.overlay` on the system interpreter.
+voice-overlay = "voice.ui.overlay:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-timeout>=2"]

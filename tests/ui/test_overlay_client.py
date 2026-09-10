@@ -1,5 +1,6 @@
 """The daemon side of the overlay protocol: spawn, throttle, survive, stop."""
 import subprocess
+import threading
 
 import pytest
 
@@ -302,3 +303,79 @@ def test_the_helper_is_verbose_when_the_daemon_is(monkeypatch):
     assert "--verbose" not in seen["cmd"]
     default_launcher(verbose=True, popen=lambda cmd, **kw: seen.update(cmd=cmd))
     assert "--verbose" in seen["cmd"]
+
+
+# -- stop() must not deadlock on a helper that stopped reading -----------------
+class _FullPipe:
+    """A pipe whose write parks holding the buffer lock, like a real
+    BufferedWriter flushing to a child that never reads: `close()` then blocks
+    too, which is what made stop() hang forever."""
+
+    def __init__(self):
+        self.data = b""
+        self.closed = False
+        self.entered = threading.Event()
+        self._lock = threading.Lock()
+        self._broken = threading.Event()
+
+    def write(self, blob: bytes) -> int:
+        with self._lock:
+            self.entered.set()
+            self._broken.wait(10)
+            raise BrokenPipeError(32, "Broken pipe")
+
+    def flush(self) -> None:
+        with self._lock:
+            if self._broken.is_set():
+                raise BrokenPipeError(32, "Broken pipe")
+
+    def close(self) -> None:
+        with self._lock:                    # the writer holds it while parked
+            self.closed = True
+
+    def break_pipe(self) -> None:
+        self._broken.set()
+
+
+class _WedgedHelper:
+    """A helper that stopped reading its stdin and only dies when signalled."""
+
+    def __init__(self):
+        self.stdin = _FullPipe()
+        self.returncode = None
+        self.terminated = False
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("voice-overlay", timeout)
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = -15
+        self.stdin.break_pipe()             # the child is gone: the write EPIPEs
+
+    kill = terminate
+
+
+def test_stop_kills_the_helper_instead_of_blocking_on_its_stdin():
+    """A writer parked on a full pipe holds the stdin lock, so closing stdin
+    first can never return. The child has to go first."""
+    proc = _WedgedHelper()
+    client = _client(lambda: proc)
+    client.start()
+    client.send({"state": "recording"})
+    assert proc.stdin.entered.wait(2.0)       # the writer is parked in the pipe
+
+    stopped = threading.Event()
+
+    def stop():
+        client.stop()
+        stopped.set()
+
+    threading.Thread(target=stop, name="stopper", daemon=True).start()
+    assert stopped.wait(1.0), "stop() blocked on the helper's stdin"
+    assert proc.terminated is True

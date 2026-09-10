@@ -232,13 +232,39 @@ class OverlayClient:
         writer, self._writer = self._writer, None
         if writer is not None:
             writer.join(timeout=DRAIN_S)
-        self._close(proc)
+            if writer.is_alive():
+                # The writer is parked in write()/flush() on a pipe the helper
+                # stopped reading, holding the BufferedWriter's lock. Closing
+                # stdin would queue behind that lock and never return, so the
+                # child goes first: losing the read end EPIPEs the write.
+                self._unblock(proc)
+                writer.join(timeout=STOP_WAIT_S)
+        # Never close stdin under a live writer thread - that is the deadlock.
+        self._close(proc, close_stdin=writer is None or not writer.is_alive())
 
-    def _close(self, proc) -> None:
+    def _unblock(self, proc) -> None:
+        """Kill the helper so a writer parked on its full pipe is released."""
+        if proc is None:
+            return
+        log.debug("overlay helper is not reading its stdin; terminating it")
+        for signal_it in (getattr(proc, "terminate", None), getattr(proc, "kill", None)):
+            if signal_it is None:
+                continue
+            try:
+                signal_it()
+                proc.wait(timeout=STOP_WAIT_S)
+                return
+            except subprocess.TimeoutExpired:
+                continue                      # SIGTERM ignored; escalate to kill
+            except Exception:
+                log.debug("signalling the overlay helper failed", exc_info=True)
+                return
+
+    def _close(self, proc, close_stdin: bool = True) -> None:
         if proc is None:
             return
         try:
-            if proc.stdin is not None:
+            if close_stdin and proc.stdin is not None:
                 proc.stdin.close()
         except Exception:
             log.debug("closing the overlay helper's stdin failed", exc_info=True)

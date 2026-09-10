@@ -95,7 +95,9 @@ While you dictate, a small dark capsule floats near the bottom of the screen: a 
 waveform driven by the microphone level, an elapsed `m:ss` counter, and a language badge
 ("EN", "SV", "AUTO"). It turns into a progress line while transcribing, flashes a
 checkmark when the text is inserted, and shows the error in amber for two seconds when
-something fails. It is never clickable and never takes focus.
+something fails. It is never clickable, and on a layer-shell surface it never takes
+focus. The counter uses JetBrains Mono where that font is installed and the default
+monospace font otherwise.
 
 It runs as a separate helper process (`voice.ui.overlay`, GTK 4 through PyGObject), so a
 crash there cannot affect dictation - the daemon logs it, restarts it once, and carries

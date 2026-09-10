@@ -150,6 +150,52 @@ def test_drawing_accepts_an_explicit_size(tmp_path):
     assert _png_size(path) == (200, 22)
 
 
+@pytest.mark.parametrize("state", ["recording", "transcribing", "done", "notice", "error"])
+def test_a_degenerate_size_draws_nothing_instead_of_crashing(tmp_path, state):
+    # A 3 px tall pill has no room for anything; it must not divide by zero.
+    path = render_png(_model(state, text="x", age=0.4), tmp_path / f"tiny-{state}.png",
+                      width=40, height=3)
+    assert _png_size(path) == (40, 3)
+    assert max(p[3] for p in Image(path).pixels()) == 0
+
+
+def test_the_bars_are_the_designs_thin_bars_with_3_px_gaps(tmp_path):
+    """21 bars, gap 3, flex:1 across the 132 px well -> 3.43 px bars, 6.43 px pitch."""
+    img = Image(render_png(_model("recording"), tmp_path / "rec.png"))
+    lit = [x for x in range(36, 36 + 132) if wave(img(x, 22))]
+    runs = []
+    for x in lit:
+        if runs and x == runs[-1][-1] + 1:
+            runs[-1].append(x)
+        else:
+            runs.append([x])
+    assert len(runs) == 21, f"expected 21 separate bars, found {len(runs)}"
+    widths = [len(r) for r in runs]
+    assert all(3 <= w <= 5 for w in widths), f"bar widths {widths}"
+    gaps = [b[0] - a[-1] - 1 for a, b in zip(runs, runs[1:])]
+    assert all(2 <= g <= 4 for g in gaps), f"gaps {gaps}"
+    pitch = (runs[-1][0] - runs[0][0]) / 20
+    assert pitch == pytest.approx((132 - 3 * 20) / 21 + 3, abs=0.2)
+
+
+def test_the_capsule_fill_is_the_designs_translucent_obsidian(tmp_path):
+    """rgba(15,16,20,0.88) over the design's #08090b background."""
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 280, 44)
+    ctx = cairo.Context(surface)
+    ctx.set_source_rgb(0x08 / 255, 0x09 / 255, 0x0b / 255)      # obsidian backdrop
+    ctx.paint()
+    from voice.ui.overlay_draw import draw
+    draw(ctx, 280, 44, _model("recording"))
+    path = tmp_path / "composited.png"
+    surface.write_to_png(str(path))
+    img = Image(path)
+    r, g, b, a = img(img.width // 2, 3)          # pill body, above the bars
+    assert a == 255
+    expected = tuple(round(0.88 * fg + 0.12 * bg)
+                     for fg, bg in ((15, 8), (16, 9), (20, 11)))
+    assert (r, g, b) == pytest.approx(expected, abs=1), f"{(r, g, b)} != {expected}"
+
+
 # -- the capsule itself ---------------------------------------------------
 
 def test_the_capsule_body_is_near_black_and_mostly_opaque(tmp_path):

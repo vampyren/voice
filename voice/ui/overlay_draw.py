@@ -205,7 +205,6 @@ def _bars(ctx, model: OverlayModel, x: float, cy: float, s: float) -> None:
     n = len(heights)
     gap = BAR_GAP * s
     bar_w = (WELL_W * s - gap * (n - 1)) / n
-    ctx.set_source_rgba(0, 0, 0, 0)
     for i, height in enumerate(heights):
         px = height * WELL_H * s
         if px < 0.35:
@@ -372,6 +371,8 @@ def draw(ctx: cairo.Context, width: int, height: int, model: OverlayModel) -> No
         return
     s = height / PILL_H
     w, h = float(width), float(height)
+    if h < 4 or w <= h:               # too small for a capsule; nothing to draw
+        return
     cy = h / 2.0
 
     _capsule_path(ctx, 0, 0, w, h)

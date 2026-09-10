@@ -192,6 +192,10 @@ class Dictation:
     # -- worker ---------------------------------------------------------------
     def _process(self, pcm: np.ndarray, trimmed: bool = False) -> None:
         try:
+            if not trimmed:
+                # Only the most recent failed recording stays retryable: otherwise
+                # "Retry last recording" could re-paste one from hours ago.
+                self.sv.history.clear_audio()
             audio = pcm if trimmed else self.sv.trim(pcm)
             if duration_s(audio) * 1000 < MIN_SPEECH_MS:
                 self._set(State.IDLE, "too short")

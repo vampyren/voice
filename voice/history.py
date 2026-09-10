@@ -57,6 +57,9 @@ class History:
     def keep_audio(self, pcm: np.ndarray) -> None:
         self._audio = pcm
 
+    def clear_audio(self) -> None:
+        self._audio = None
+
     def take_audio(self) -> np.ndarray | None:
         pcm, self._audio = self._audio, None
         return pcm

@@ -190,13 +190,14 @@ def test_operations_ignored_while_transcribing_pending_then_recall_reinjects():
     assert sv.recorder.started_with == [None]
     assert len(pending) == 1
     assert sv.injector.texts == []
+    # retry() while TRANSCRIBING must not have silently drained the kept audio.
+    # (Checked before the worker runs: completing a fresh dictation deliberately
+    # discards older retry audio - see the stale-retry-audio test below.)
+    assert sv.history.take_audio() is kept
 
     pending.pop(0)()  # run the deferred worker
     assert states == [State.RECORDING, State.TRANSCRIBING, State.INJECTING, State.IDLE]
     assert sv.injector.texts == ["hello world"]
-
-    # retry() while TRANSCRIBING must have left the kept audio untouched.
-    assert sv.history.take_audio() is kept
 
     d.recall()
     assert len(pending) == 1
@@ -319,3 +320,20 @@ def test_on_hotkey_never_raises_into_the_listener_thread():
     d.on_hotkey("dictate", "press")          # must not propagate to the evdev thread
     assert d.state == State.IDLE
     assert d.last_error and "config gone" in d.last_error
+
+
+def test_a_later_dictation_clears_the_previous_failures_retry_audio():
+    # "Retry last recording" must only ever re-run the most recent recording:
+    # keep_audio was set on error and never cleared, so a retry long after a
+    # successful dictation re-pasted a stale one.
+    stt = FakeTranscriber(fail=True)
+    d, sv, states, notes = make(stt=stt)
+    d.start(); d.stop()                            # A fails: its audio is kept for retry
+    stt.fail = False
+    d.start(); d.stop()                            # B succeeds
+    assert sv.injector.texts == ["hello world"]
+
+    d.retry()
+    assert sv.injector.texts == ["hello world"]    # nothing re-pasted
+    assert len(stt.calls) == 2                     # and nothing re-transcribed
+    assert sv.history.take_audio() is None

@@ -41,3 +41,10 @@ def test_retry_audio_is_taken_once(isolated_xdg):
     h.keep_audio(pcm)
     assert np.array_equal(h.take_audio(), pcm)
     assert h.take_audio() is None
+
+
+def test_clear_audio_discards_the_pending_retry(isolated_xdg):
+    h = History()
+    h.keep_audio(np.ones(10, dtype=np.int16))
+    h.clear_audio()
+    assert h.take_audio() is None

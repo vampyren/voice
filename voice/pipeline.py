@@ -193,17 +193,25 @@ class Dictation:
         if not already_injecting:
             self._set(State.INJECTING)
         try:
-            res = self.sv.injector.inject(text)
-        except Exception as exc:
-            self._fail(f"could not paste: {exc}")
-            return
-        if res.method == "clipboard-only":
-            self.sv.notify("Text copied", "Could not paste automatically. Paste with Ctrl+V.", "normal")
-        self.last_error = None
-        self._set(State.IDLE, f"{len(text)} chars via {res.method} in {entry.elapsed_s:.1f}s")
+            try:
+                res = self.sv.injector.inject(text)
+            except Exception as exc:
+                self._fail(f"could not paste: {exc}")
+                return
+            if res.method == "clipboard-only":
+                self.sv.notify("Text copied", "Could not paste automatically. Paste with Ctrl+V.", "normal")
+            self.last_error = None
+            self._set(State.IDLE, f"{len(text)} chars via {res.method} in {entry.elapsed_s:.1f}s")
+        except Exception as exc:  # never leave the daemon stuck in INJECTING - mirrors _process's net
+            log.exception("inject failure")
+            self._fail(f"unexpected error: {exc}")
 
     def _fail(self, message: str) -> None:
         self.last_error = message
         self._set(State.ERROR, message)
-        self.sv.notify("Dictation failed", message, "critical")
+        try:
+            self.sv.notify("Dictation failed", message, "critical")
+        except Exception:
+            # A broken notifier must not prevent recovery back to IDLE.
+            log.exception("notify failed while reporting a dictation failure")
         self._set(State.IDLE, "after error")

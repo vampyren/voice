@@ -84,13 +84,13 @@ class FakeTimer:
     def fire(self): self.fn()
 
 
-def make(cfg=None, rec=None, stt=None, inj=None, executor=None):
+def make(cfg=None, rec=None, stt=None, inj=None, executor=None, notify=None):
     cfg = {"hotkeys.dictate_mode": "hold", "audio.device": "", "audio.max_seconds": 120,
            "general.language": "en", "dictionary.replacements": [["cachy os", "CachyOS", "icase"]], **(cfg or {})}
     notes = []
     services = Services(
         recorder=rec or FakeRecorder(), transcriber=stt or FakeTranscriber(), injector=inj or FakeInjector(),
-        history=History(), notify=lambda t, b, u="normal": notes.append((t, b)),
+        history=History(), notify=notify or (lambda t, b, u="normal": notes.append((t, b))),
         trim=lambda pcm: pcm, config_getter=lambda k, d=None: cfg.get(k, d), prompt_getter=lambda: "CachyOS")
     states = []
     d = Dictation(services, executor=executor or (lambda fn: fn()), timer_factory=FakeTimer)
@@ -169,6 +169,9 @@ def test_operations_ignored_while_transcribing_pending_then_recall_reinjects():
     d, sv, states, _ = make(executor=pending.append)
     kept = np.ones(4000, dtype=np.int16)
     sv.history.keep_audio(kept)  # simulate audio kept from an earlier retry-able error
+    # A prior entry so recall()'s "nothing to recall" short-circuit (last is None)
+    # can't mask the state guard below - we need recall() to actually reach it.
+    sv.history.add(Entry("previous", time.time(), "fake", 1.0, 0.1))
 
     d.start()
     d.stop()
@@ -176,8 +179,9 @@ def test_operations_ignored_while_transcribing_pending_then_recall_reinjects():
     assert len(pending) == 1
 
     # All of these must be no-ops while the worker is pending: state stays
-    # TRANSCRIBING, the recorder is not started again, and retry() must not
-    # silently discard whatever audio history is holding onto.
+    # TRANSCRIBING, the recorder is not started again, retry() must not
+    # silently discard whatever audio history is holding onto, and recall()
+    # must not reinject despite there being a prior entry to recall.
     d.on_hotkey("dictate", "press")
     d.toggle()
     d.recall()
@@ -185,6 +189,7 @@ def test_operations_ignored_while_transcribing_pending_then_recall_reinjects():
     assert d.state == State.TRANSCRIBING
     assert sv.recorder.started_with == [None]
     assert len(pending) == 1
+    assert sv.injector.texts == []
 
     pending.pop(0)()  # run the deferred worker
     assert states == [State.RECORDING, State.TRANSCRIBING, State.INJECTING, State.IDLE]
@@ -218,6 +223,18 @@ def test_recall_reserves_injecting_so_start_is_a_no_op_until_worker_runs():
     assert sv.injector.texts == ["hello world"]
 
 
+def test_recall_path_exception_after_injection_still_reaches_idle():
+    def boom_notify(title, body, urgency="normal"):
+        raise RuntimeError("dbus down")
+
+    d, sv, states, _ = make(inj=FakeInjector(method="clipboard-only"), notify=boom_notify)
+    sv.history.add(Entry("hello world", time.time(), "fake", 1.0, 0.1))
+
+    d.recall()  # clipboard-only triggers the "Text copied" notify, which raises
+    assert d.state == State.IDLE
+    assert d.last_error and "dbus down" in d.last_error
+
+
 def test_cross_thread_stop_blocks_start_until_injection_completes():
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-dictation")
     try:
@@ -237,8 +254,11 @@ def test_cross_thread_stop_blocks_start_until_injection_completes():
 
         stt.release.set()
 
+        # _set() assigns self._state before invoking on_state(), so polling on
+        # d.state alone can observe IDLE before the worker thread has appended
+        # its final entry to `states` - poll on the callback's own record instead.
         deadline = time.monotonic() + 2.0
-        while d.state != State.IDLE and time.monotonic() < deadline:
+        while len(states) < 4 and time.monotonic() < deadline:
             time.sleep(0.01)
         assert d.state == State.IDLE
         assert sv.injector.texts == ["hello world"]

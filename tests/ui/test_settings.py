@@ -681,3 +681,131 @@ def test_reload_from_disk_clears_the_inject_mode_flag(qapp):
     dlg.reload_from_disk()
     dlg.save_button.click()
     assert Config.load().get("inject.mode") == "clipboard"   # the abandoned edit is gone
+
+
+# -- where the pill sits --------------------------------------------------
+
+def _with_config(qapp, **values):
+    """A dialog opened on a config that already holds `values`."""
+    cfg = Config.load()
+    for key, value in values.items():
+        cfg.set(key, value)
+    cfg.save()
+    return make(qapp)
+
+
+def test_the_general_tab_loads_the_pill_placement(qapp):
+    cfg, dlg, _ = _with_config(qapp, **{"ui.overlay_position": "top-right",
+                                        "ui.overlay_margin_x": 12,
+                                        "ui.overlay_margin_y": 60})
+    assert dlg.pill_vertical_combo.currentData() == "top"
+    assert dlg.pill_horizontal_combo.currentData() == "right"
+    assert (dlg.pill_margin_x.value(), dlg.pill_margin_y.value()) == (12, 60)
+
+
+def test_the_placement_combos_offer_every_half(qapp):
+    cfg, dlg, _ = make(qapp)
+    assert [dlg.pill_vertical_combo.itemData(i)
+            for i in range(dlg.pill_vertical_combo.count())] == ["top", "middle", "bottom"]
+    assert [dlg.pill_horizontal_combo.itemData(i)
+            for i in range(dlg.pill_horizontal_combo.count())] == ["left", "center", "right"]
+    assert dlg.pill_vertical_combo.currentData() == "bottom"      # the shipped default
+    assert dlg.pill_horizontal_combo.currentData() == "center"
+    assert (dlg.pill_margin_x.value(), dlg.pill_margin_y.value()) == (0, 48)
+
+
+def test_an_older_position_shows_as_the_placement_it_means(qapp):
+    cfg, dlg, _ = _with_config(qapp, **{"ui.overlay_position": "top"})
+    assert (dlg.pill_vertical_combo.currentData(),
+            dlg.pill_horizontal_combo.currentData()) == ("top", "center")
+
+
+def test_saving_writes_the_placement_and_the_margins(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.pill_vertical_combo.setCurrentIndex(dlg.pill_vertical_combo.findData("middle"))
+    dlg.pill_horizontal_combo.setCurrentIndex(dlg.pill_horizontal_combo.findData("left"))
+    dlg.pill_margin_x.setValue(-24)
+    dlg.pill_margin_y.setValue(0)
+    dlg.save_button.click()
+    assert dlg.error_label.text() == ""
+    again = Config.load()
+    assert again.get("ui.overlay_position") == "middle-left"
+    assert (again.get("ui.overlay_margin_x"), again.get("ui.overlay_margin_y")) == (-24, 0)
+    assert again.errors() == []
+
+
+def test_the_margin_spin_boxes_stop_at_the_range_the_config_accepts(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.pill_margin_x.setValue(9999)
+    dlg.pill_margin_y.setValue(-9999)
+    assert (dlg.pill_margin_x.value(), dlg.pill_margin_y.value()) == (2000, -2000)
+    dlg.save_button.click()
+    assert dlg.error_label.text() == ""
+    assert Config.load().errors() == []
+
+
+def test_save_does_not_revert_a_placement_changed_elsewhere(qapp):
+    """`voice` has no CLI for this, but a hand edit while the window sits open is
+    the same snapshot problem as inject.mode."""
+    cfg, dlg, _ = make(qapp)
+    external = Config.load()
+    external.set("ui.overlay_position", "bottom-right")
+    external.set("ui.overlay_margin_x", 30)
+    external.save()
+
+    dlg.hotkey_edit.setText("KEY_RIGHTCTRL")
+    dlg.save_button.click()
+
+    again = Config.load()
+    assert again.get("ui.overlay_position") == "bottom-right"
+    assert again.get("ui.overlay_margin_x") == 30
+    assert again.get("hotkeys.dictate") == "KEY_RIGHTCTRL"
+    assert dlg.pill_horizontal_combo.currentData() == "right"    # and it shows what was saved
+    assert dlg.pill_margin_x.value() == 30
+
+
+def test_a_placement_chosen_here_wins_over_the_on_disk_value(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.pill_vertical_combo.setCurrentIndex(dlg.pill_vertical_combo.findData("top"))
+
+    external = Config.load()
+    external.set("ui.overlay_position", "bottom-right")
+    external.save()
+
+    dlg.save_button.click()
+    assert Config.load().get("ui.overlay_position") == "top-center"
+
+
+def test_a_margin_typed_here_wins_over_the_on_disk_value(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.pill_margin_y.setValue(96)
+
+    external = Config.load()
+    external.set("ui.overlay_margin_y", 10)
+    external.save()
+
+    dlg.save_button.click()
+    assert Config.load().get("ui.overlay_margin_y") == 96
+
+
+def test_reload_from_disk_clears_the_placement_flag(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.pill_vertical_combo.setCurrentIndex(dlg.pill_vertical_combo.findData("top"))
+    dlg.reload_from_disk()
+
+    external = Config.load()
+    external.set("ui.overlay_position", "middle-right")
+    external.save()
+    dlg.save_button.click()
+    assert Config.load().get("ui.overlay_position") == "middle-right"   # the abandoned edit is gone
+
+
+def test_a_nonsense_placement_on_disk_does_not_block_a_save(qapp):
+    """errors() rejects it, so the dialog has to show something sane and write
+    that back rather than refusing every save until the file is hand-fixed."""
+    cfg, dlg, _ = _with_config(qapp, **{"ui.overlay_position": "sideways"})
+    assert (dlg.pill_vertical_combo.currentData(),
+            dlg.pill_horizontal_combo.currentData()) == ("bottom", "center")
+    dlg.save_button.click()
+    assert dlg.error_label.text() == ""
+    assert Config.load().get("ui.overlay_position") == "bottom-center"

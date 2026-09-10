@@ -15,6 +15,7 @@ from voice.audio.capture import Source
 from voice.config import INJECT_MODES, Config, is_language_code
 from voice.hotkey.keyspec import parse_keyspec
 from voice.hotkey.portal_listener import DIALOG_MESSAGE, NO_TRIGGER
+from voice.ui.placement import HORIZONTALS, MARGIN_LIMIT, VERTICALS, split_position
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +33,14 @@ _LANGUAGES = [("English", "en"), ("Swedish", "sv"), ("Auto-detect", "auto")]
 #: inject.mode, in the order the combo shows it; the data is the config value.
 _INJECT_MODE_LABELS = {"paste": "Paste automatically",
                        "clipboard": "Copy only (press Ctrl+V yourself)"}
+#: The pill's placement, as two combos: the halves in the order they read.
+_PILL_VERTICALS = [(name.capitalize(), name) for name in VERTICALS]
+_PILL_HORIZONTALS = [(name.capitalize(), name) for name in HORIZONTALS]
+#: Under those two rows: what an anchored pill can and cannot do.
+PILL_PLACEMENT_NOTE = (
+    "The pill is anchored to the screen rather than dragged. A \"middle\" or \"center\" half "
+    "is centred by the compositor and ignores its margin, and placement needs "
+    "gtk4-layer-shell - without it the compositor decides where the pill goes.")
 #: The "leave stt.active alone for this language" row of the profile table.
 KEEP_CURRENT = "(keep current)"
 #: The portal shortcuts, in the order they are shown, with their labels.
@@ -132,6 +141,7 @@ class SettingsDialog(QDialog):
         self._active_changed = False       # True once "Use this profile" was pressed
         self._language_changed = False     # True once the user picked a language here
         self._inject_mode_changed = False  # True once the user picked a text insertion mode here
+        self._pill_placement_changed = False  # True once the pill was moved here
         self._captured.connect(self._on_captured)
         self._desktop_answered.connect(self._on_desktop_answered)
         tabs = QTabWidget()
@@ -164,6 +174,7 @@ class SettingsDialog(QDialog):
         self._active_changed = False
         self._language_changed = False
         self._inject_mode_changed = False
+        self._pill_placement_changed = False
         self.profile_form = {}
         self._device_choice = None
         self.error_label.setText("")
@@ -187,6 +198,31 @@ class SettingsDialog(QDialog):
         # Connected after the items exist, and for the same reason as the language
         # combo: only a change made *here* may overwrite what the file says.
         self.inject_mode_combo.currentIndexChanged.connect(self._on_inject_mode_picked)
+        self.pill_vertical_combo = QComboBox()
+        for label, name in _PILL_VERTICALS:
+            self.pill_vertical_combo.addItem(label, name)
+        self.pill_horizontal_combo = QComboBox()
+        for label, name in _PILL_HORIZONTALS:
+            self.pill_horizontal_combo.addItem(label, name)
+        self.pill_margin_x = QSpinBox()
+        self.pill_margin_y = QSpinBox()
+        for spin in (self.pill_margin_x, self.pill_margin_y):
+            spin.setRange(-MARGIN_LIMIT, MARGIN_LIMIT)     # the range errors() accepts
+        # Connected after the items exist, and for the same reason as the two
+        # combos above: only a change made *here* may overwrite the file, which
+        # can be hand-edited while this window sits open.
+        for combo in (self.pill_vertical_combo, self.pill_horizontal_combo):
+            combo.currentIndexChanged.connect(self._on_pill_placement_picked)
+        for spin in (self.pill_margin_x, self.pill_margin_y):
+            spin.valueChanged.connect(self._on_pill_placement_picked)
+        placement = QHBoxLayout()
+        placement.addWidget(self.pill_vertical_combo)
+        placement.addWidget(self.pill_horizontal_combo)
+        margins = QHBoxLayout()
+        margins.addWidget(QLabel("x"))
+        margins.addWidget(self.pill_margin_x)
+        margins.addWidget(QLabel("y"))
+        margins.addWidget(self.pill_margin_y)
         self.language_profile_table = QTableWidget(0, 2)
         self.language_profile_table.setHorizontalHeaderLabels(["Language", "Profile"])
         self.language_profile_table.horizontalHeader().setStretchLastSection(True)
@@ -197,6 +233,9 @@ class SettingsDialog(QDialog):
         form.addRow("Language", self.language_combo)
         form.addRow("Notifications", self.notifications_combo)
         form.addRow("Text insertion", self.inject_mode_combo)
+        form.addRow("Pill position", placement)
+        form.addRow("Pill margins", margins)
+        form.addRow(_wrapped(PILL_PLACEMENT_NOTE))
         form.addRow("Profile per language", self.language_profile_table)
         form.addRow(hint)
         return w
@@ -342,6 +381,7 @@ class SettingsDialog(QDialog):
         self.language_combo.setCurrentIndex(max(0, self.language_combo.findData(c.get("general.language", "en"))))
         self.notifications_combo.setCurrentText("on" if c.get("general.notifications", True) else "off")
         self.inject_mode_combo.setCurrentIndex(max(0, self.inject_mode_combo.findData(c.get("inject.mode", "paste"))))
+        self._show_pill_placement(*c.overlay_placement())
         self.hotkey_edit.setText(c.get("hotkeys.dictate", ""))
         self.mode_combo.setCurrentText(c.get("hotkeys.dictate_mode", "hold"))
         self.recall_edit.setText(c.get("hotkeys.recall", ""))
@@ -364,6 +404,25 @@ class SettingsDialog(QDialog):
         self._load_language_profiles()
         self._language_changed = False     # populating the combos is not a user edit
         self._inject_mode_changed = False
+        self._pill_placement_changed = False
+
+    def _show_pill_placement(self, position: str, margin_x: int, margin_y: int) -> None:
+        """Put a placement into the four widgets. Normalised on the way in, so a
+        file holding one of the two older values - or something that is not a
+        placement at all - still shows the pill somewhere real."""
+        vertical, horizontal = split_position(position)
+        self.pill_vertical_combo.setCurrentIndex(
+            max(0, self.pill_vertical_combo.findData(vertical)))
+        self.pill_horizontal_combo.setCurrentIndex(
+            max(0, self.pill_horizontal_combo.findData(horizontal)))
+        self.pill_margin_x.setValue(margin_x)
+        self.pill_margin_y.setValue(margin_y)
+
+    def _chosen_pill_placement(self) -> tuple[str, int, int]:
+        """The placement as this dialog would save it."""
+        return (f"{self.pill_vertical_combo.currentData()}-"
+                f"{self.pill_horizontal_combo.currentData()}",
+                self.pill_margin_x.value(), self.pill_margin_y.value())
 
     def _load_language_profiles(self, mapping: dict[str, str] | None = None) -> None:
         """One row per general.languages entry, each with the profiles that exist.
@@ -410,6 +469,10 @@ class SettingsDialog(QDialog):
 
     def _on_inject_mode_picked(self, index: int) -> None:
         self._inject_mode_changed = True
+
+    def _on_pill_placement_picked(self, _value) -> None:
+        """Any of the four widgets: the placement is one setting to the user."""
+        self._pill_placement_changed = True
 
     def set_replacement_row(self, row: int, src: str, dst: str, flags: str = "") -> None:
         for col, val in enumerate((src, dst, flags)):
@@ -557,6 +620,8 @@ class SettingsDialog(QDialog):
             self._carry_over_language(on_disk)
         if not self._inject_mode_changed:
             self._carry_over_inject_mode(on_disk)
+        if not self._pill_placement_changed:
+            self._carry_over_pill_placement(on_disk)
         return True
 
     def _carry_over_active_profile(self, on_disk: Config) -> None:
@@ -610,6 +675,23 @@ class SettingsDialog(QDialog):
         if index >= 0:
             self.inject_mode_combo.setCurrentIndex(index)   # show what was really saved
         self._inject_mode_changed = False      # that was us, not the user
+
+    def _carry_over_pill_placement(self, on_disk: Config) -> None:
+        """The same as the language and the mode above: the pill can be moved by
+        a hand edit and a `voice reload` while this window holds its snapshot.
+
+        Read through overlay_placement(), so what is carried over is a placement
+        the config accepts rather than whatever spelling the file happened to use.
+        """
+        placement = on_disk.overlay_placement()
+        if placement == self._cfg.overlay_placement():
+            return
+        position, margin_x, margin_y = placement
+        self._cfg.set("ui.overlay_position", position)
+        self._cfg.set("ui.overlay_margin_x", margin_x)
+        self._cfg.set("ui.overlay_margin_y", margin_y)
+        self._show_pill_placement(*placement)        # show what was really saved
+        self._pill_placement_changed = False         # that was us, not the user
 
     def _chosen_language_profiles(self) -> dict[str, str]:
         """The map as this dialog would save it: what the file says, with the rows
@@ -674,6 +756,10 @@ class SettingsDialog(QDialog):
         c.set("hotkeys.dictate_mode", self.mode_combo.currentText())
         c.set("audio.device", self.device_combo.currentData() or "")
         c.set("audio.max_seconds", self.max_seconds.value())
+        position, margin_x, margin_y = self._chosen_pill_placement()
+        c.set("ui.overlay_position", position)
+        c.set("ui.overlay_margin_x", margin_x)
+        c.set("ui.overlay_margin_y", margin_y)
         if not self._commit_profile_form():
             return
         rules = []
@@ -699,4 +785,5 @@ class SettingsDialog(QDialog):
         self._active_changed = False
         self._language_changed = False
         self._inject_mode_changed = False
+        self._pill_placement_changed = False
         self.saved.emit()

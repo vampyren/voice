@@ -1,0 +1,250 @@
+"""Hotkeys through xdg-desktop-portal's GlobalShortcuts interface.
+
+The evdev listener reads /dev/input, which is empty of real keystrokes in a
+remote-desktop session and unreadable without the udev rule. The portal instead
+asks the compositor to bind a shortcut and pushes `Activated`/`Deactivated`
+signals at us, so it works wherever the desktop itself works.
+
+The public surface is deliberately identical to `EvdevListener`
+(start/stop/capture_next/held/modifiers_held/devices_ok) - the daemon swaps one
+for the other and changes nothing else.
+"""
+from __future__ import annotations
+
+import logging
+import threading
+from typing import Callable
+
+from jeepney import HeaderFields, MatchRule, new_method_call
+from jeepney.bus_messages import message_bus
+from jeepney.io.blocking import open_dbus_connection
+
+from voice import APP_ID
+from voice.portal_common import PortalError, call_with_response, new_token, portal_address
+
+log = logging.getLogger(__name__)
+
+INTERFACE = "org.freedesktop.portal.GlobalShortcuts"
+REGISTRY_INTERFACE = "org.freedesktop.host.portal.Registry"
+SHORTCUTS = portal_address(INTERFACE)
+PROPS = SHORTCUTS.with_interface("org.freedesktop.DBus.Properties")
+INTROSPECTABLE = SHORTCUTS.with_interface("org.freedesktop.DBus.Introspectable")
+REGISTRY = portal_address(REGISTRY_INTERFACE)
+
+DESCRIPTIONS = {
+    "dictate": "Voice dictation",
+    "recall": "Re-insert the last dictation",
+    "cancel": "Cancel the current recording",
+}
+#: ConfigureShortcuts (the desktop's own rebinding dialog) arrived in version 2.
+CONFIGURE_VERSION = 2
+NO_CAPTURE_MESSAGE = "portal: change the shortcut in your desktop's settings"
+DIALOG_MESSAGE = "portal: choose the shortcut in the dialog your desktop just opened"
+#: How long a receive blocks before the loop re-checks the stop flag.
+RECV_SLICE_S = 0.5
+#: ConfigureShortcuts returns its Request handle at once; only the dialog is slow.
+CALL_TIMEOUT_S = 5
+
+
+class PortalListener:
+    """Binds shortcuts through the portal and reports press/release events.
+
+    `shortcuts` maps a shortcut id ("dictate", "recall", "cancel") to an XDG
+    trigger string such as "CTRL+space". The session is created once in start()
+    and kept for the daemon's lifetime, so the compositor asks the user only once.
+    """
+
+    def __init__(self, on_event: Callable[[str, str], None], shortcuts: dict[str, str],
+                 bus_factory: Callable = open_dbus_connection, app_id: str = APP_ID):
+        self._on_event = on_event
+        self._shortcuts = dict(shortcuts)
+        self._bus_factory = bus_factory
+        self._app_id = app_id
+        self._conn = None
+        self._session: str | None = None
+        self._version = 1
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._bound: bool | None = None
+        self._active: set[str] = set()
+        self._state_lock = threading.Lock()
+        # The receive thread owns the connection; capture_next borrows it between
+        # two receives. One jeepney connection must never be used from two threads
+        # at once, so every use outside start()/stop() takes this.
+        self._bus_lock = threading.Lock()
+
+    # -- public (EvdevListener interface) ---------------------------------
+    def start(self) -> None:
+        self._stop.clear()
+        try:
+            self._open()
+        except Exception as exc:
+            # No hotkeys is bad, but a daemon that refuses to start is worse: the
+            # user still has the tray and the CLI, and devices_ok() says why.
+            log.error("portal global shortcuts unavailable: %s", exc)
+            self._bound = False
+            self._close()
+            return
+        self._thread = threading.Thread(target=self._run, name="portal-listener", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=RECV_SLICE_S * 4)
+            self._thread = None
+        self._close()
+
+    def capture_next(self, callback: Callable[[str], None]) -> None:
+        """Ask the desktop to show its own rebinding dialog; we never see raw keys.
+
+        The callback gets a sentence for the user rather than a key name - the
+        settings dialog shows it instead of writing it into the hotkey field.
+        """
+        if self._conn is None or self._session is None or self._version < CONFIGURE_VERSION:
+            callback(NO_CAPTURE_MESSAGE)
+            return
+        try:
+            options = {"handle_token": ("s", new_token())}
+            with self._bus_lock:
+                reply = self._conn.send_and_get_reply(
+                    new_method_call(SHORTCUTS, "ConfigureShortcuts", "osa{sv}",
+                                    (self._session, "", options)), timeout=CALL_TIMEOUT_S)
+            if reply.header.message_type.name == "error":
+                raise PortalError(f"ConfigureShortcuts failed: {reply.body}")
+        except Exception as exc:
+            log.info("portal cannot open the shortcut dialog: %s", exc)
+            callback(NO_CAPTURE_MESSAGE)
+            return
+        callback(DIALOG_MESSAGE)
+
+    def held(self) -> frozenset[str]:
+        """The shortcut ids currently activated (the portal exposes no key codes)."""
+        with self._state_lock:
+            return frozenset(self._active)
+
+    def modifiers_held(self) -> bool:
+        # The compositor consumed the whole chord before telling us, so there is
+        # nothing left held that could corrupt an injected paste.
+        return False
+
+    def devices_ok(self) -> bool | None:
+        """True once the portal bound the shortcuts, False if it refused, None before start()."""
+        return self._bound
+
+    # -- setup --------------------------------------------------------------
+    def _open(self) -> None:
+        self._conn = self._bus_factory(bus="SESSION")
+        self._register_app_id()
+        self._version = self._portal_version()
+        try:
+            code, results = call_with_response(
+                self._conn, SHORTCUTS, "CreateSession", "a{sv}",
+                ({"session_handle_token": ("s", new_token())},))
+        except PortalError as exc:
+            # The commonest first-run failure by far, and the message the portal
+            # sends ("An app id is required") says nothing about the cause.
+            if "app id" in str(exc).lower():
+                raise PortalError(f"{exc}; the portal resolves our app id through an installed "
+                                  f"desktop entry named '{self._app_id}.desktop' whose Exec exists "
+                                  f"- run install.sh") from exc
+            raise
+        if code != 0:
+            raise PortalError(f"portal CreateSession denied (response {code})")
+        self._session = results["session_handle"][1]
+        code, _ = call_with_response(
+            self._conn, SHORTCUTS, "BindShortcuts", "oa(sa{sv})sa{sv}",
+            (self._session, self._bindings(), "", {}))
+        self._bound = code == 0
+        if not self._bound:
+            raise PortalError(f"portal BindShortcuts denied (response {code}); "
+                              f"allow '{self._app_id}' to take a global shortcut")
+        log.info("portal shortcuts bound: %s", ", ".join(f"{k}={v}" for k, v in self._shortcuts.items()))
+
+    def _bindings(self) -> list[tuple[str, dict]]:
+        return [(sid, {"description": ("s", DESCRIPTIONS.get(sid, f"voice {sid}")),
+                       "preferred_trigger": ("s", trigger)})
+                for sid, trigger in self._shortcuts.items()]
+
+    def _register_app_id(self) -> None:
+        """Tell the portal who we are; non-sandboxed apps get no app id otherwise.
+
+        Optional in every sense: the interface only exists on portal >= 1.18, and a
+        failure just means the desktop labels the shortcut less prettily.
+        """
+        try:
+            reply = self._conn.send_and_get_reply(new_method_call(INTROSPECTABLE, "Introspect"),
+                                                  timeout=CALL_TIMEOUT_S)
+            xml = reply.body[0] if reply.body else ""
+            if reply.header.message_type.name == "error" or REGISTRY_INTERFACE not in xml:
+                log.debug("no %s on this portal; skipping app id registration", REGISTRY_INTERFACE)
+                return
+            reply = self._conn.send_and_get_reply(
+                new_method_call(REGISTRY, "Register", "sa{sv}", (self._app_id, {})),
+                timeout=CALL_TIMEOUT_S)
+            if reply.header.message_type.name == "error":
+                log.debug("portal Registry.Register refused: %s", reply.body)
+        except Exception:
+            log.debug("portal app id registration skipped", exc_info=True)
+
+    def _portal_version(self) -> int:
+        try:
+            reply = self._conn.send_and_get_reply(
+                new_method_call(PROPS, "Get", "ss", (INTERFACE, "version")), timeout=CALL_TIMEOUT_S)
+            if reply.header.message_type.name == "error":
+                return 1
+            return int(reply.body[0][1])
+        except Exception:
+            log.debug("could not read the GlobalShortcuts version", exc_info=True)
+            return 1
+
+    def _close(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                log.debug("closing the portal connection failed", exc_info=True)
+        self._conn, self._session = None, None
+
+    # -- thread -------------------------------------------------------------
+    def _run(self) -> None:
+        rule = MatchRule(type="signal", interface=INTERFACE)
+        try:
+            with self._bus_lock:
+                self._conn.send_and_get_reply(message_bus.AddMatch(rule), timeout=CALL_TIMEOUT_S)
+        except Exception:
+            log.exception("could not subscribe to portal shortcut signals")
+            return
+        # bufsize: a chord pressed while the loop is busy must not drop its release.
+        with self._conn.filter(rule, bufsize=64) as queue:
+            while not self._stop.is_set():
+                try:
+                    with self._bus_lock:
+                        msg = self._conn.recv_until_filtered(queue, timeout=RECV_SLICE_S)
+                except TimeoutError:
+                    continue
+                except Exception:
+                    if not self._stop.is_set():
+                        log.warning("portal shortcut connection lost", exc_info=True)
+                    return
+                try:
+                    self._dispatch(msg)
+                except Exception:
+                    # A failing handler must never take this thread down: every
+                    # hotkey would go dead for the rest of the session.
+                    log.exception("hotkey handler failed for %s", getattr(msg, "body", msg))
+
+    def _dispatch(self, msg) -> None:
+        kind = {"Activated": "press", "Deactivated": "release"}.get(
+            msg.header.fields.get(HeaderFields.member))
+        if kind is None:                       # ShortcutsChanged and friends
+            return
+        session, shortcut_id = msg.body[0], msg.body[1]
+        if session != self._session or shortcut_id not in self._shortcuts:
+            return
+        with self._state_lock:
+            if kind == "press":
+                self._active.add(shortcut_id)
+            else:
+                self._active.discard(shortcut_id)
+        self._on_event(shortcut_id, kind)

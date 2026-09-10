@@ -1,0 +1,38 @@
+[project]
+name = "voice"
+version = "0.1.0"
+description = "Wayland-native voice typing: hold a key, speak, release, text appears."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "faster-whisper>=1.2,<2",
+    "numpy>=1.26",
+    "evdev>=1.7",
+    "jeepney>=0.9",
+    "httpx>=0.27",
+    "tomlkit>=0.13",
+    "PySide6>=6.8",
+]
+
+[project.optional-dependencies]
+gpu = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12>=9,<10"]
+
+[project.scripts]
+voice = "voice.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-timeout>=2"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["voice"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not boundary and not gpu' --timeout=60"
+markers = [
+    "boundary: needs a live Wayland session with pipewire/wl-clipboard/portal (run in the dev VM)",
+    "gpu: needs an NVIDIA GPU with CUDA (run on the owner's PC)",
+]

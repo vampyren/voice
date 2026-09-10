@@ -139,3 +139,33 @@ def test_errors_reports_an_empty_paste_chord(isolated_xdg):
     cfg = Config.load()
     cfg.set("inject.paste_chord", "")
     assert any("inject.paste_chord" in e and "empty chord" in e for e in cfg.errors())
+
+
+def test_save_closes_the_temp_descriptor_when_chmod_fails(isolated_xdg, monkeypatch):
+    # mkstemp hands back a raw fd; anything raising before it is wrapped in a file
+    # object leaks it for the life of the daemon.
+    import voice.config as config_mod
+
+    cfg = Config.load()
+    original = cfg.path.read_text()
+    captured = {}
+    real_mkstemp = config_mod.tempfile.mkstemp
+
+    def spy_mkstemp(*a, **kw):
+        fd, tmp = real_mkstemp(*a, **kw)
+        captured["fd"], captured["tmp"] = fd, tmp
+        return fd, tmp
+
+    def boom(*a, **kw):
+        raise OSError("chmod refused")
+
+    monkeypatch.setattr(config_mod.tempfile, "mkstemp", spy_mkstemp)
+    monkeypatch.setattr(config_mod.os, "fchmod", boom)
+    cfg.set("general.language", "sv")
+    with pytest.raises(OSError, match="chmod refused"):
+        cfg.save()
+
+    with pytest.raises(OSError):
+        os.fstat(captured["fd"])                  # descriptor closed, not leaked
+    assert not os.path.exists(captured["tmp"])
+    assert cfg.path.read_text() == original

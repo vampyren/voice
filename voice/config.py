@@ -135,8 +135,10 @@ class Config:
             data = tomlkit.dumps(self._doc).encode()
             fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}.", suffix=".tmp")
             try:
-                os.fchmod(fd, 0o600)
+                # Wrap the raw descriptor first: from here the `with` owns it on
+                # every path, so nothing below can leak it for the daemon's life.
                 with os.fdopen(fd, "wb") as fh:
+                    os.fchmod(fh.fileno(), 0o600)
                     fh.write(data)
                     fh.flush()
                     os.fsync(fh.fileno())

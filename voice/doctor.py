@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from voice import __version__
+from voice.ui.overlay_client import plain_window_allowed, probe_helper
 
 REQUIRED = {"portal", "wl-clipboard", "pw-record", "keyboard access", "config"}
 
@@ -59,6 +60,23 @@ def _hotkey_backend() -> tuple[bool, str]:
     if reasons:
         return True, f"{backend} ({', '.join(reasons)})"
     return True, backend
+
+
+def _overlay() -> tuple[bool, str]:
+    """Informational: whether the recording pill can run here, and through what."""
+    from voice.config import Config
+    if not Config.load().get("ui.overlay", True):
+        return True, "disabled (ui.overlay = false)"
+    probe = probe_helper()
+    if probe.command is None:
+        return True, f"unavailable: {probe.reason}"
+    if probe.layer_shell:
+        shell = "layer-shell ok"
+    elif plain_window_allowed():
+        shell = "layer-shell absent - plain window allowed, it will take focus"
+    else:
+        shell = "layer-shell absent - the pill stays off"
+    return True, f"enabled, helper via {probe.command[0]} (gtk4 ok, {shell})"
 
 
 def _sources() -> tuple[bool, str]:
@@ -121,6 +139,7 @@ def default_probes() -> dict[str, Callable[[], tuple[bool, str]]]:
         "portal": _portal,
         "cuda": _cuda,
         "model cache": _model_cache,
+        "overlay": _overlay,
         "notify-send": lambda: _which("notify-send"),
         "fallback senders": _senders,
     }

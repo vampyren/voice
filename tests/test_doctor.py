@@ -72,3 +72,34 @@ def test_hotkey_backend_probe_does_not_call_a_bogus_setting_deliberate(monkeypat
     monkeypatch.setattr("voice.doctor._readable_keyboards", lambda: True)
     monkeypatch.setattr("voice.daemon.has_local_seat", lambda: False)
     assert default_probes()["hotkey backend"]() == (True, "portal (no local seat)")
+
+
+def test_overlay_probe_reports_the_helper_and_what_it_found(monkeypatch, isolated_xdg):
+    from voice.doctor import default_probes
+    from voice.ui.overlay_client import HelperProbe
+
+    monkeypatch.setattr("voice.doctor.probe_helper", lambda: HelperProbe(
+        ["/usr/bin/python3", "-m", "voice.ui.overlay"], ("gtk4",)))
+    ok, detail = default_probes()["overlay"]()
+    assert ok is True                                  # informational: never fails the run
+    assert detail == ("enabled, helper via /usr/bin/python3 "
+                      "(gtk4 ok, layer-shell absent - the pill stays off)")
+
+    monkeypatch.setattr("voice.doctor.probe_helper", lambda: HelperProbe(
+        ["/usr/bin/python3", "-m", "voice.ui.overlay"], ("gtk4", "layer-shell")))
+    assert default_probes()["overlay"]()[1] == ("enabled, helper via /usr/bin/python3 "
+                                                "(gtk4 ok, layer-shell ok)")
+
+
+def test_overlay_probe_reports_a_missing_helper_and_a_switched_off_pill(monkeypatch, isolated_xdg):
+    from voice.config import Config
+    from voice.doctor import default_probes
+    from voice.ui.overlay_client import HelperProbe
+
+    monkeypatch.setattr("voice.doctor.probe_helper", lambda: HelperProbe(None, (), "no PyGObject"))
+    assert default_probes()["overlay"]() == (True, "unavailable: no PyGObject")
+
+    cfg = Config.load()
+    cfg.set("ui.overlay", False)
+    cfg.save()
+    assert default_probes()["overlay"]() == (True, "disabled (ui.overlay = false)")

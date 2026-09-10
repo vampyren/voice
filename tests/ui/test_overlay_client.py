@@ -197,7 +197,7 @@ def test_no_interpreter_with_gi_means_no_command(monkeypatch):
 
 
 def test_default_launcher_passes_the_repo_and_the_session_environment(monkeypatch):
-    monkeypatch.setattr("voice.ui.overlay_client._probe", lambda python: ("gtk4",))
+    monkeypatch.setattr("voice.ui.overlay_client._probe", lambda python: ("gtk4", "layer-shell"))
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
     monkeypatch.setenv("PYTHONPATH", "/already/here")
     seen = {}
@@ -218,7 +218,7 @@ def test_default_launcher_passes_the_repo_and_the_session_environment(monkeypatc
 
 
 def test_default_launcher_rejects_a_nonsense_position(monkeypatch):
-    monkeypatch.setattr("voice.ui.overlay_client._probe", lambda python: ("gtk4",))
+    monkeypatch.setattr("voice.ui.overlay_client._probe", lambda python: ("gtk4", "layer-shell"))
     seen = {}
     default_launcher(position="sideways", lang="", popen=lambda cmd, **kw: seen.update(cmd=cmd))
     assert "sideways" not in seen["cmd"]
@@ -235,3 +235,32 @@ def test_the_real_probe_finds_gtk4_on_this_machine():
     got = probe_helper()
     assert got.command is not None, got.reason
     assert "gtk4" in got.features
+
+
+# -- focus: a plain window would swallow the paste -----------------------------
+def test_without_layer_shell_the_helper_is_not_launched_at_all(monkeypatch, caplog):
+    """GTK 4 dropped the accept-focus hints, so only a layer-shell surface can
+    refuse focus; a plain pill takes it and the paste lands in the pill."""
+    monkeypatch.setattr("voice.ui.overlay_client._probe", lambda python: ("gtk4",))
+    monkeypatch.delenv("VOICE_OVERLAY_ALLOW_PLAIN_WINDOW", raising=False)
+    spawned = []
+    with caplog.at_level("WARNING", logger="voice.ui.overlay_client"):
+        assert default_launcher(popen=lambda cmd, **kw: spawned.append(cmd)) is None
+    assert spawned == []
+    assert "gtk4-layer-shell" in caplog.text
+
+
+def test_layer_shell_present_launches_and_still_demands_it(monkeypatch):
+    monkeypatch.setattr("voice.ui.overlay_client._probe",
+                        lambda python: ("gtk4", "layer-shell"))
+    seen = {}
+    default_launcher(popen=lambda cmd, **kw: seen.update(cmd=cmd))
+    assert "--require-layer-shell" in seen["cmd"]
+
+
+def test_the_plain_window_fallback_can_be_allowed_explicitly(monkeypatch):
+    monkeypatch.setattr("voice.ui.overlay_client._probe", lambda python: ("gtk4",))
+    monkeypatch.setenv("VOICE_OVERLAY_ALLOW_PLAIN_WINDOW", "1")
+    seen = {}
+    default_launcher(popen=lambda cmd, **kw: seen.update(cmd=cmd))
+    assert "--require-layer-shell" not in seen["cmd"]

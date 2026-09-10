@@ -59,6 +59,10 @@ _PROBE_SCRIPT = (
 
 PROBE_TIMEOUT_S = 10
 
+#: Set to 1 to run the pill without gtk4-layer-shell, accepting that it takes
+#: keyboard focus when it appears (see `plain_window_allowed`).
+ALLOW_PLAIN_ENV = "VOICE_OVERLAY_ALLOW_PLAIN_WINDOW"
+
 
 def repo_root() -> Path:
     """The directory holding the `voice` package, for the helper's PYTHONPATH."""
@@ -129,6 +133,17 @@ def default_launcher(position: str = "bottom", lang: str = "en",
     if probe.command is None:
         log.warning("recording overlay disabled: %s", probe.reason)
         return None
+    strict = not plain_window_allowed()
+    if strict and not probe.layer_shell:
+        # GTK 4 dropped the accept-focus / focus-on-map hints, so a plain
+        # toplevel *is* focused when it maps - and the paste chord would then
+        # go to the pill instead of the user's window. No pill beats no
+        # dictation. Set the env var above to see it anyway.
+        log.warning("recording overlay disabled: gtk4-layer-shell is missing, and a plain "
+                    "window would take keyboard focus and swallow the paste. Install it "
+                    "(Arch: gtk4-layer-shell, Debian/Ubuntu: gir1.2-gtk4layershell-1.0) "
+                    "or set %s=1 to accept that.", ALLOW_PLAIN_ENV)
+        return None
     env = dict(os.environ)
     root = str(repo_root())
     env["PYTHONPATH"] = os.pathsep.join([root] + [p for p in [env.get("PYTHONPATH")] if p])
@@ -136,6 +151,8 @@ def default_launcher(position: str = "bottom", lang: str = "en",
     cmd += ["--position", position if position in ("bottom", "top") else "bottom"]
     if lang:
         cmd += ["--lang", lang]
+    if strict:
+        cmd.append("--require-layer-shell")     # in case the helper sees less than we did
     log.info("recording overlay: %s", " ".join(cmd))
     # stderr is inherited on purpose: the helper's own log lines (layer-shell
     # present or not, window mapped or not) belong in the daemon's log.
@@ -343,6 +360,11 @@ class OverlayClient:
     def flush(self, timeout: float = 1.0) -> bool:
         """Wait for queued messages to reach the helper. For stop() and tests."""
         return self._idle.wait(timeout)
+
+
+def plain_window_allowed() -> bool:
+    """Whether the user has accepted a pill that takes focus (see the env var)."""
+    return os.environ.get(ALLOW_PLAIN_ENV, "").strip().lower() in ("1", "true", "yes")
 
 
 def _is_level(message: dict) -> bool:

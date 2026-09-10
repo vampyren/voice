@@ -76,6 +76,15 @@ def test_recorder_tolerates_nonzero_exit_after_capturing_data():
     assert np.array_equal(out, pcm)
 
 
+def test_recorder_cancel_never_reports_error():
+    proc = FakeProc(b"", rc=1, stderr=b"pw-record: terminated\n")
+    rec = Recorder(popen=lambda *a, **k: proc)
+    rec.start(None)
+    rec.cancel()
+    assert rec.error is None
+    assert rec.stop().size == 0
+
+
 def test_recorder_spawn_failure_raises():
     def boom(*a, **k):
         raise FileNotFoundError("pw-record")

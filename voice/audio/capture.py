@@ -112,7 +112,7 @@ class Recorder:
         if self._reader:
             self._reader.join(timeout=2)
         rc = proc.returncode
-        if rc and not self._chunks:
+        if rc and not self._chunks and not self._cancelled:
             tail = proc.stderr.read().decode(errors="replace")[-400:]
             self.error = tail.strip() or f"pw-record exited with {rc}"
             log.warning("pw-record failed: %s", self.error)

@@ -1,4 +1,5 @@
 """The daemon side of the overlay protocol: spawn, throttle, survive, stop."""
+import os
 import subprocess
 import threading
 import time
@@ -6,7 +7,7 @@ import time
 import pytest
 
 from voice.ui.overlay_client import (FRAME_S, NO_LAYER_SHELL_EXIT, QUEUE_MAX, OverlayClient,
-                                     default_launcher, helper_command, probe_helper)
+                                     default_launcher, helper_command, probe_helper, repo_root)
 
 
 def _client(launcher, clock=None, enabled=True):
@@ -115,15 +116,19 @@ def test_a_dead_helper_is_restarted_once_and_then_stays_silent(helper_processes,
 
 
 def test_a_write_failure_never_reaches_the_caller(helper_processes):
+    """The write blows up on the writer thread, and send() still returns
+    normally. The failed write is lost - it is not replayed - but the next one
+    goes to the replacement the failure bought."""
     client = _client(helper_processes)
     client.start()
     proc = helper_processes.made[0]
     proc.stdin.close()                     # writing now raises ValueError
     client.send({"state": "recording"})    # must not raise
-    assert client.flush()
-    client.send({"state": "hidden"})       # and stays quiet afterwards
-    assert client.flush()
-    assert proc.stdin.data == b""
+    assert client.flush(2.0)
+    client.send({"state": "hidden"})       # ... and neither may this one
+    assert client.flush(2.0)
+    assert proc.stdin.data == b"", "nothing reached the helper that broke"
+    assert helper_processes.made[1].lines() == [{"state": "hidden"}]
     client.stop()
 
 
@@ -240,7 +245,10 @@ def test_default_launcher_passes_the_repo_and_the_session_environment(monkeypatc
     assert "--lang" in seen["cmd"] and "sv" in seen["cmd"]
     env = seen["kwargs"]["env"]
     assert env["WAYLAND_DISPLAY"] == "wayland-0"
-    assert env["PYTHONPATH"].split(":")[0].endswith("voice")
+    # The repository root itself, whatever the checkout directory is called -
+    # `endswith("voice")` passed here only because this clone happens to be.
+    assert env["PYTHONPATH"].split(os.pathsep)[0] == str(repo_root())
+    assert (repo_root() / "voice" / "ui" / "overlay.py").exists()
     assert "/already/here" in env["PYTHONPATH"]
     assert seen["kwargs"]["stdin"] is subprocess.PIPE
 

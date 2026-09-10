@@ -59,3 +59,16 @@ def test_hotkey_backend_probe_reports_a_forced_setting(monkeypatch, isolated_xdg
     monkeypatch.setattr("voice.doctor._readable_keyboards", lambda: True)
     monkeypatch.setattr("voice.daemon.has_local_seat", lambda: True)
     assert default_probes()["hotkey backend"]() == (True, "portal (set in config)")
+
+
+def test_hotkey_backend_probe_does_not_call_a_bogus_setting_deliberate(monkeypatch, isolated_xdg):
+    """An unusable hotkeys.backend falls back to auto, so it must not read as chosen."""
+    from voice.config import Config
+    from voice.doctor import default_probes
+
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", "telepathy")
+    cfg.save()
+    monkeypatch.setattr("voice.doctor._readable_keyboards", lambda: True)
+    monkeypatch.setattr("voice.daemon.has_local_seat", lambda: False)
+    assert default_probes()["hotkey backend"]() == (True, "portal (no local seat)")

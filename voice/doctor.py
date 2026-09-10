@@ -52,7 +52,8 @@ def _hotkey_backend() -> tuple[bool, str]:
     cfg = Config.load()
     keyboards, seat = _readable_keyboards(), has_local_seat()
     backend = choose_hotkey_backend(cfg, keyboards, seat)
-    if str(cfg.get("hotkeys.backend", "auto") or "auto").strip().lower() != "auto":
+    from voice.daemon import HOTKEY_BACKENDS
+    if str(cfg.get("hotkeys.backend", "auto") or "auto").strip().lower() in HOTKEY_BACKENDS:
         return True, f"{backend} (set in config)"
     reasons = [why for why, ok in (("no readable keyboards", keyboards), ("no local seat", seat)) if not ok]
     if reasons:

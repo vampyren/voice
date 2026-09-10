@@ -2,29 +2,23 @@
 from __future__ import annotations
 
 import logging
-import secrets
 import time
 from pathlib import Path
 from typing import Callable
 
-from jeepney import DBusAddress, MatchRule, Message, new_method_call
-from jeepney.bus_messages import message_bus
+from jeepney import new_method_call
 from jeepney.io.blocking import open_dbus_connection
 
 from voice import APP_ID, paths
 from voice.inject.keys import KeySendError
+from voice.portal_common import PortalError, call_with_response, new_token, portal_address
 
 log = logging.getLogger(__name__)
 
-PORTAL = DBusAddress("/org/freedesktop/portal/desktop", bus_name="org.freedesktop.portal.Desktop",
-                     interface="org.freedesktop.portal.RemoteDesktop")
+PORTAL = portal_address("org.freedesktop.portal.RemoteDesktop")
 PROPS = PORTAL.with_interface("org.freedesktop.DBus.Properties")
 KEYBOARD = 1
 PERSIST_UNTIL_REVOKED = 2
-
-
-def request_path(unique_name: str, token: str) -> str:
-    return f"/org/freedesktop/portal/desktop/request/{unique_name.lstrip(':').replace('.', '_')}/{token}"
 
 
 def select_devices_options(token: str | None) -> dict:
@@ -77,18 +71,10 @@ class PortalKeySender:
 
     # -- request/response helper -----------------------------------------
     def _call(self, method: str, signature: str, args: tuple) -> dict:
-        token = "voice" + secrets.token_hex(4)
-        path = request_path(self._conn.unique_name, token)
-        rule = MatchRule(type="signal", interface="org.freedesktop.portal.Request", member="Response", path=path)
-        self._conn.send_and_get_reply(message_bus.AddMatch(rule))
-        with self._conn.filter(rule) as queue:
-            opts = dict(args[-1])
-            opts["handle_token"] = ("s", token)
-            reply = self._conn.send_and_get_reply(new_method_call(PORTAL, method, signature, (*args[:-1], opts)))
-            if reply.header.message_type.name == "error":
-                raise KeySendError(f"portal {method} failed: {reply.body}")
-            msg: Message = self._conn.recv_until_filtered(queue, timeout=120)
-        code, results = msg.body
+        try:
+            code, results = call_with_response(self._conn, PORTAL, method, signature, args)
+        except PortalError as exc:
+            raise KeySendError(str(exc)) from exc
         if code != 0:
             raise KeySendError(f"portal {method} denied (response {code}); allow '{APP_ID}' in system settings")
         return results
@@ -96,7 +82,7 @@ class PortalKeySender:
     def _open(self) -> None:
         try:
             self._conn = self._bus_factory(bus="SESSION")
-            results = self._call("CreateSession", "a{sv}", ({"session_handle_token": ("s", "voice" + secrets.token_hex(4))},))
+            results = self._call("CreateSession", "a{sv}", ({"session_handle_token": ("s", new_token())},))
             self._session = results["session_handle"][1]
             self._call("SelectDevices", "oa{sv}", (self._session, select_devices_options(self._tokens.load())))
             results = self._call("Start", "osa{sv}", (self._session, "", {}))

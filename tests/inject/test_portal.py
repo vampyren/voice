@@ -5,8 +5,7 @@ from jeepney import HeaderFields
 
 from voice import paths
 from voice.inject.keys import KeySendError
-from voice.inject.portal import (PortalKeySender, TokenStore, request_path,
-                                 select_devices_options)
+from voice.inject.portal import PortalKeySender, TokenStore, select_devices_options
 
 
 def test_token_store_roundtrip(isolated_xdg):
@@ -17,10 +16,6 @@ def test_token_store_roundtrip(isolated_xdg):
     assert paths.portal_token_file().read_text() == "abc"
     s.clear()
     assert s.load() is None
-
-
-def test_request_path_escapes_unique_name():
-    assert request_path(":1.42", "tok1") == "/org/freedesktop/portal/desktop/request/1_42/tok1"
 
 
 def test_select_devices_options_include_token_only_when_present():

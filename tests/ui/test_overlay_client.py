@@ -1,13 +1,18 @@
 """The daemon side of the overlay protocol: spawn, throttle, survive, stop."""
+import contextlib
+import io
 import os
 import subprocess
+import sys
 import threading
 import time
+import types
 
 import pytest
 
-from voice.ui.overlay_client import (FRAME_S, NO_LAYER_SHELL_EXIT, QUEUE_MAX, OverlayClient,
-                                     default_launcher, helper_command, probe_helper, repo_root)
+from voice.ui.overlay_client import (_PROBE_SCRIPT, FRAME_S, NO_LAYER_SHELL_EXIT, QUEUE_MAX,
+                                     OverlayClient, default_launcher, helper_command,
+                                     probe_helper, repo_root)
 
 
 def _client(launcher, clock=None, enabled=True):
@@ -227,6 +232,9 @@ def test_no_interpreter_with_gi_means_no_command(monkeypatch):
     got = probe_helper()
     assert got.command is None
     assert "PyGObject" in got.reason
+    # The helper needs pycairo too, and its absence is the likelier half of the
+    # split: name it, or the user installs python-gobject again and retries.
+    assert "pycairo" in got.reason
 
 
 def test_default_launcher_passes_the_repo_and_the_session_environment(monkeypatch):
@@ -271,6 +279,52 @@ def test_the_real_probe_finds_gtk4_on_this_machine():
     got = probe_helper()
     assert got.command is not None, got.reason
     assert "gtk4" in got.features
+
+
+# -- the probe must cover everything the helper imports ------------------------
+class _NoCairo:
+    """A meta-path finder that makes `import cairo` fail, wherever it lives."""
+
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] == "cairo":
+            raise ModuleNotFoundError("No module named 'cairo'", name="cairo")
+        return None
+
+
+def _run_probe_script(monkeypatch, cairo_present: bool) -> list[str]:
+    """Run _PROBE_SCRIPT here, with a stub `gi` and pycairo present or not.
+
+    The distro split is the case that matters: python-gobject installed,
+    pycairo not, which is exactly what the helper cannot survive.
+    """
+    gi = types.ModuleType("gi")
+    gi.require_version = lambda name, version: None if name == "Gtk" else _no_typelib(name)
+    monkeypatch.setitem(sys.modules, "gi", gi)
+    if cairo_present:
+        monkeypatch.setitem(sys.modules, "cairo", types.ModuleType("cairo"))
+    else:
+        monkeypatch.delitem(sys.modules, "cairo", raising=False)
+        monkeypatch.setattr(sys, "meta_path", [_NoCairo()] + list(sys.meta_path))
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        exec(compile(_PROBE_SCRIPT, "<probe>", "exec"), {"__name__": "__main__"})
+    return out.getvalue().split()
+
+
+def _no_typelib(name):
+    raise ValueError(f"namespace {name} not available")
+
+
+def test_the_probe_script_accepts_an_interpreter_with_gi_and_pycairo(monkeypatch):
+    assert _run_probe_script(monkeypatch, cairo_present=True) == ["gtk4"]
+
+
+def test_the_probe_script_rejects_an_interpreter_without_pycairo(monkeypatch):
+    """python-gobject without pycairo is a normal distro split, and the helper
+    dies on `import cairo` in voice.ui.overlay_draw - so the probe must fail
+    there rather than report a healthy overlay."""
+    with pytest.raises(ModuleNotFoundError):
+        _run_probe_script(monkeypatch, cairo_present=False)
 
 
 # -- focus: a fallback window would swallow the paste --------------------------

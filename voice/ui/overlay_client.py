@@ -45,8 +45,14 @@ STOP_WAIT_S = 1.0
 SYSTEM_PYTHON = "/usr/bin/python3"
 
 #: Printed by the probe below, one token per available piece.
+#: pycairo is checked as well as `gi`: the helper draws the pill through
+#: voice.ui.overlay_draw, which does `import cairo`, and the two are separate
+#: distro packages - PyGObject does not pull pycairo in. Without this line an
+#: interpreter with gi and no pycairo probes healthy, `voice doctor` says so,
+#: and every spawn dies on the import instead.
 _PROBE_SCRIPT = (
     "import gi\n"
+    "import cairo\n"
     "gi.require_version('Gtk', '4.0')\n"
     "found = ['gtk4']\n"
     "try:\n"
@@ -135,9 +141,9 @@ def probe_helper() -> HelperProbe:
         features = _probe(sys.executable)
         if features:
             return HelperProbe([script], features)
-    return HelperProbe(None, (), "no interpreter with PyGObject and GTK 4 "
+    return HelperProbe(None, (), "no interpreter with PyGObject, GTK 4 and pycairo "
                                 f"({SYSTEM_PYTHON}, {sys.executable}); "
-                                "install python-gobject / gtk4")
+                                "install python-gobject / gtk4 / pycairo")
 
 
 def helper_command() -> list[str] | None:

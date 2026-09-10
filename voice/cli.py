@@ -29,7 +29,9 @@ def _print_status(reply: dict) -> None:
     print(f"state:    {reply.get('state')}")
     print(f"profile:  {reply.get('profile')}")
     print(f"backend:  {reply.get('backend')}")
-    print(f"keyboard: {'ok' if reply.get('keyboard') else 'NO ACCESS'}")
+    keyboard = reply.get("keyboard")
+    kb_text = "ok" if keyboard else ("unknown" if keyboard is None else "NO ACCESS")
+    print(f"keyboard: {kb_text}")
     if reply.get("last_error"):
         print(f"error:    {reply['last_error']}")
 
@@ -42,8 +44,11 @@ def main(argv: list[str] | None = None) -> int:
         from voice.doctor import run_doctor
         return run_doctor()
     if args.cmd in (None, "daemon"):
-        if args.cmd is None and is_running():
-            send({"cmd": "settings"})
+        if is_running():
+            try:
+                send({"cmd": "settings"})
+            except IPCError:
+                pass
             return 0
         from voice.daemon import main as daemon_main
         return daemon_main()

@@ -17,9 +17,10 @@ from voice.hotkey.keyspec import KeySpec, Tracker, parse_keyspec
 from voice.inject.clipboard import Clipboard
 from voice.inject.fallback import make_key_sender
 from voice.inject.injector import Injector, run_window_command
-from voice.ipc import Server
+from voice.ipc import IPCError, Server, is_running, send
 from voice.pipeline import Dictation, Services, State
 from voice.stt import make_transcriber
+from voice.stt.base import TranscriptionError
 from voice.ui.notify import Notifier
 from voice.ui.settings import SettingsDialog
 from voice.ui.tray import Tray
@@ -43,8 +44,27 @@ def window_class_getter(config: Config) -> Callable[[], str | None]:
     return lambda: run_window_command(config.get("inject.active_window_command", "") or "")
 
 
+class _BrokenTranscriber:
+    """Placeholder used when the active stt profile can't be built; keeps the daemon alive."""
+
+    name = "broken"
+
+    def __init__(self, reason: str):
+        self._reason = reason
+
+    def describe(self) -> str:
+        return self._reason
+
+    def warmup(self) -> None:
+        pass
+
+    def transcribe(self, *args, **kwargs):
+        raise TranscriptionError(self._reason)
+
+
 class _Bridge(QObject):
     open_settings = Signal()
+    apply_config = Signal()
     quit = Signal()
 
 
@@ -60,6 +80,7 @@ class Daemon:
         self._tray = tray
         self._server: Server | None = None
         self._settings: SettingsDialog | None = None
+        self._active_profile: tuple[str, dict] | None = None
         self._bridge = _Bridge()
 
     # -- construction -------------------------------------------------------
@@ -67,9 +88,10 @@ class Daemon:
         self.tracker = Tracker(hotkey_specs(self.config))
         self.history = History()
         self.listener = self._listener_override or EvdevListener(self.tracker, self._on_hotkey)
-        sender = self._sender or make_key_sender()
-        self.injector = Injector(self._clipboard, sender, self.config.get("inject", {}) or {},
+        self._sender = self._sender or make_key_sender()
+        self.injector = Injector(self._clipboard, self._sender, self.config.get("inject", {}) or {},
                                  self.listener.modifiers_held, window_class_getter(self.config))
+        self._active_profile = self._profile_snapshot()
         services = Services(recorder=self._recorder, transcriber=self._make_transcriber(),
                             injector=self.injector, history=self.history, notify=self._notifier.notify,
                             config_getter=self.config.get, prompt_getter=self._prompt)
@@ -78,20 +100,40 @@ class Daemon:
         self.dictation.on_state = lambda s, d: self.tray.state_changed.emit(s.value, d)
         self.tray.set_profiles(list(self.config.get("stt.profiles", {}) or {}), self.config.get("stt.active"))
         self._bridge.open_settings.connect(self.open_settings)
+        self._bridge.apply_config.connect(self.apply_config)
         self._bridge.quit.connect(self._quit)
         self._server = Server(self.handle)
 
+    def _profile_snapshot(self) -> tuple[str, dict] | None:
+        """The active (name, profile) pair, or None if stt.active is unresolvable."""
+        try:
+            return self.config.stt_profile()
+        except Exception:
+            return None
+
     def _make_transcriber(self):
-        name, profile = self.config.stt_profile()
-        t = make_transcriber(profile, self.config.secret(profile))
-        log.info("transcriber: %s (%s)", name, t.describe())
-        return t
+        try:
+            name, profile = self.config.stt_profile()
+            t = make_transcriber(profile, self.config.secret(profile))
+            log.info("transcriber: %s (%s)", name, t.describe())
+            return t
+        except Exception as exc:
+            log.exception("failed to build transcriber")
+            self._notifier.notify("Transcription profile problem", str(exc), "critical")
+            return _BrokenTranscriber(str(exc))
 
     def _prompt(self) -> str | None:
         return self.config.stt_profile()[1].get("prompt") or None
 
     # -- runtime ------------------------------------------------------------
     def run(self) -> int:
+        if is_running():
+            log.info("%s already running; opening settings instead", APP_NAME)
+            try:
+                send({"cmd": "settings"})
+            except IPCError:
+                pass
+            return 0
         app = QApplication.instance() or QApplication(sys.argv)
         app.setQuitOnLastWindowClosed(False)
         app.setApplicationName(APP_NAME)
@@ -114,33 +156,39 @@ class Daemon:
             reason = getattr(self.dictation.sv.transcriber, "fallback_reason", None)
             if reason:
                 self._notifier.notify("Running on CPU", reason, "normal")
-            self.tray.state_changed.emit("idle", self.dictation.sv.transcriber.describe())
+            if self.dictation.state == State.IDLE:
+                self.tray.state_changed.emit("idle", self.dictation.sv.transcriber.describe())
         except Exception as exc:
             log.exception("warmup failed")
             self._notifier.notify("Model failed to load", str(exc), "critical")
 
     def shutdown(self) -> None:
         try:
+            self.dictation.cancel()
+        except Exception:
+            log.exception("failed to cancel in-flight recording during shutdown")
+        try:
             self.listener.stop()
         except Exception:
-            pass
+            log.exception("failed to stop listener during shutdown")
         if self._server:
             self._server.stop()
 
     def apply_config(self) -> None:
+        """Re-reads config. Runs on the Qt thread only (see _Bridge.apply_config)."""
         self.config.reload()
         self.tracker.set_specs(hotkey_specs(self.config))
         self._notifier.set_enabled(bool(self.config.get("general.notifications", True)))
-        try:
+        current = self._profile_snapshot()
+        if current != self._active_profile:
+            self._active_profile = current
             self.dictation.set_transcriber(self._make_transcriber())
-        except Exception as exc:
-            self._notifier.notify("Transcription profile problem", str(exc), "critical")
-        self.injector = Injector(self._clipboard, self.injector._sender, self.config.get("inject", {}) or {},
+            from voice.pipeline import _thread_executor
+            _thread_executor(self._warmup)
+        self.injector = Injector(self._clipboard, self._sender, self.config.get("inject", {}) or {},
                                  self.listener.modifiers_held, window_class_getter(self.config))
         self.dictation.set_injector(self.injector)
         self.tray.set_profiles(list(self.config.get("stt.profiles", {}) or {}), self.config.get("stt.active"))
-        from voice.pipeline import _thread_executor
-        _thread_executor(self._warmup)
 
     # -- events ---------------------------------------------------------------
     def _on_hotkey(self, name: str, kind: str) -> None:
@@ -186,10 +234,10 @@ class Daemon:
                 return {"ok": False, "error": f"unknown profile '{name}'"}
             self.config.set("stt.active", name)
             self.config.save()
-            self.apply_config()
+            self._bridge.apply_config.emit()
             return {"ok": True, "profile": name}
         if cmd == "reload":
-            self.apply_config()
+            self._bridge.apply_config.emit()
             return {"ok": True}
         if cmd == "settings":
             self._bridge.open_settings.emit()

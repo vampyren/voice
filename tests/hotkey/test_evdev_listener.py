@@ -88,5 +88,5 @@ def test_capture_next_reports_name_and_swallows_event():
 def test_no_devices_marks_not_ok_and_stop_is_clean():
     listener = EvdevListener(Tracker({}), lambda n, k: None, device_factory=lambda: [])
     listener.start()
-    assert wait_for(lambda: listener.devices_ok() is False)
+    assert listener.devices_ok() is False   # initial scan is synchronous: no need to wait
     listener.stop()

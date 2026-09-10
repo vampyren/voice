@@ -53,10 +53,18 @@ class EvdevListener:
         self._capture: Callable[[str], None] | None = None
         self._lock = threading.Lock()
         self._devices_ok: bool | None = None
+        self._sel: selectors.BaseSelector | None = None
+        self._devices: dict[int, object] = {}
+        self._known_nodes: set[str] = set()
 
     # -- public -----------------------------------------------------------
     def start(self) -> None:
         self._stop.clear()
+        self._sel = selectors.DefaultSelector()
+        self._sel.register(self._wake_r, selectors.EVENT_READ, data=None)
+        self._devices = {}
+        self._known_nodes = set()
+        self._rescan()  # synchronous: so devices_ok() is accurate the instant start() returns
         self._thread = threading.Thread(target=self._run, name="evdev-listener", daemon=True)
         self._thread.start()
 
@@ -80,23 +88,17 @@ class EvdevListener:
         return self._devices_ok
 
     # -- thread -----------------------------------------------------------
+    def _rescan(self) -> None:
+        for dev in self._factory():
+            if dev.fileno() not in self._devices:
+                self._devices[dev.fileno()] = dev
+                self._sel.register(dev.fileno(), selectors.EVENT_READ, data=dev)
+                log.info("listening on %s (%s)", dev.path, dev.name)
+        self._devices_ok = bool(self._devices)
+        self._known_nodes = set(os.listdir(INPUT_DIR)) if os.path.isdir(INPUT_DIR) else set()
+
     def _run(self) -> None:
-        sel = selectors.DefaultSelector()
-        sel.register(self._wake_r, selectors.EVENT_READ, data=None)
-        devices: dict[int, object] = {}
-        known_nodes: set[str] = set()
-
-        def rescan() -> None:
-            nonlocal known_nodes
-            for dev in self._factory():
-                if dev.fileno() not in devices:
-                    devices[dev.fileno()] = dev
-                    sel.register(dev.fileno(), selectors.EVENT_READ, data=dev)
-                    log.info("listening on %s (%s)", dev.path, dev.name)
-            self._devices_ok = bool(devices)
-            known_nodes = set(os.listdir(INPUT_DIR)) if os.path.isdir(INPUT_DIR) else set()
-
-        rescan()
+        sel = self._sel
         while not self._stop.is_set():
             for key, _ in sel.select(timeout=RESCAN_SECONDS):
                 if key.data is None:
@@ -110,11 +112,11 @@ class EvdevListener:
                 except OSError:
                     log.info("device gone: %s", getattr(dev, "path", "?"))
                     sel.unregister(key.fd)
-                    devices.pop(key.fd, None)
-                    self._devices_ok = bool(devices)
-            if os.path.isdir(INPUT_DIR) and set(os.listdir(INPUT_DIR)) != known_nodes:
-                rescan()
-        for dev in devices.values():
+                    self._devices.pop(key.fd, None)
+                    self._devices_ok = bool(self._devices)
+            if os.path.isdir(INPUT_DIR) and set(os.listdir(INPUT_DIR)) != self._known_nodes:
+                self._rescan()
+        for dev in self._devices.values():
             try:
                 dev.close()
             except Exception:

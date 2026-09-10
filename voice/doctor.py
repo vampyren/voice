@@ -74,6 +74,15 @@ def _model_cache() -> tuple[bool, str]:
     return (True, str(hub)) if hub.exists() else (False, f"{profile['model']} not downloaded yet (first dictation downloads it)")
 
 
+def _clipboard() -> tuple[bool, str]:
+    copy_ok, _ = _which("wl-copy")
+    paste_ok, _ = _which("wl-paste")
+    if copy_ok and paste_ok:
+        return True, "wl-copy/wl-paste"
+    missing = [b for b, ok in (("wl-copy", copy_ok), ("wl-paste", paste_ok)) if not ok]
+    return False, f"install wl-clipboard (missing: {', '.join(missing)})"
+
+
 def _senders() -> tuple[bool, str]:
     found = [b for b in ("wtype", "ydotool") if shutil.which(b)]
     return True, ", ".join(found) or "none (portal is the primary path)"
@@ -86,7 +95,7 @@ def default_probes() -> dict[str, Callable[[], tuple[bool, str]]]:
         "keyboard access": _keyboard,
         "pw-record": lambda: _which("pw-record"),
         "microphones": _sources,
-        "wl-clipboard": lambda: (_which("wl-copy")[0] and _which("wl-paste")[0], "wl-copy/wl-paste" if _which("wl-copy")[0] else "install wl-clipboard"),
+        "wl-clipboard": _clipboard,
         "portal": _portal,
         "cuda": _cuda,
         "model cache": _model_cache,

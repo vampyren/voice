@@ -218,3 +218,43 @@ def test_real_pw_record_captures_half_second():
     out = rec.stop()
     assert rec.error is None
     assert out.size > 16000 * 0.3
+
+
+def test_recorder_reports_a_level_for_every_chunk():
+    loud = np.full(2048, 12000, dtype=np.int16)     # 4096 bytes: exactly one read
+    quiet = np.full(2048, 300, dtype=np.int16)
+    proc = FakeProc(loud.tobytes() + quiet.tobytes())
+    levels: list[float] = []
+    rec = Recorder(popen=lambda *a, **k: proc, on_level=levels.append)
+    rec.start(None)
+    rec.stop()
+    assert len(levels) == 2
+    assert all(0.0 <= lvl <= 1.0 for lvl in levels)
+    assert levels[0] > levels[1]                    # the loud chunk reads higher
+
+
+def test_recorder_survives_a_raising_level_callback(caplog):
+    pcm = np.full(4096, 5000, dtype=np.int16)       # 8192 bytes: two reads
+    proc = FakeProc(pcm.tobytes())
+    calls = []
+
+    def boom(level):
+        calls.append(level)
+        raise RuntimeError("overlay pipe is broken")
+
+    rec = Recorder(popen=lambda *a, **k: proc, on_level=boom)
+    rec.start(None)
+    with caplog.at_level("WARNING"):
+        out = rec.stop()
+    assert len(calls) == 2                          # the second chunk still arrived
+    assert np.array_equal(out, pcm)                 # and capture kept every sample
+    assert rec.error is None
+    assert "overlay pipe is broken" in caplog.text
+
+
+def test_recorder_without_a_level_callback_still_records():
+    pcm = np.arange(1600, dtype=np.int16)
+    proc = FakeProc(pcm.tobytes())
+    rec = Recorder(popen=lambda *a, **k: proc)
+    rec.start(None)
+    assert np.array_equal(rec.stop(), pcm)

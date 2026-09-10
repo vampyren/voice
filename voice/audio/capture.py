@@ -10,6 +10,7 @@ from typing import Callable
 
 import numpy as np
 
+from voice.audio.level import rms_level
 from voice.audio.pcm import SAMPLE_RATE, from_bytes
 
 log = logging.getLogger(__name__)
@@ -61,8 +62,15 @@ def list_sources(run: Callable = subprocess.run) -> list[Source]:
 
 
 class Recorder:
-    def __init__(self, popen: Callable = subprocess.Popen):
+    def __init__(self, popen: Callable = subprocess.Popen,
+                 on_level: Callable[[float], None] | None = None):
+        """`on_level` receives the 0..1 loudness of each captured chunk.
+
+        It is called on the reader thread, so it must be cheap and must not
+        block; the recording overlay uses it to drive the waveform.
+        """
         self._popen = popen
+        self._on_level = on_level
         self._proc = None
         self._chunks: list[bytes] = []
         self._reader: threading.Thread | None = None
@@ -102,6 +110,17 @@ class Recorder:
                 break
             if not self._cancelled:
                 self._chunks.append(chunk)
+            self._report_level(chunk)
+
+    def _report_level(self, chunk: bytes) -> None:
+        # Display only: a broken overlay pipe or a buggy callback must never
+        # cost us audio, so every failure is logged and swallowed here.
+        if self._on_level is None:
+            return
+        try:
+            self._on_level(rms_level(chunk))
+        except Exception as exc:
+            log.warning("on_level callback failed: %s", exc)
 
     def cancel(self) -> None:
         self._cancelled = True

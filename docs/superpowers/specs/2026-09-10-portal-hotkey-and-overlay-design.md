@@ -94,3 +94,30 @@ a dead helper. Visual: screenshots of each state rendered offscreen, inspected. 
 
 Click actions on the pill, dragging it, showing partial transcripts, and the KDE-specific
 tray/notification polish already listed in the phase plan.
+
+## 3. Fast language switch (added 2026-09-10 at the owner's request)
+
+**What the user sees.** The pill shows a small language badge ("EN", "SV", "AUTO") next to the
+elapsed counter. A `language_toggle` hotkey cycles through `general.languages`; on each change
+the pill appears for 2 s in a `notice` state showing "EN → SV" (no bars), then hides. The tray
+menu gets a "Language" submenu with radio entries for the same list. CLI: `voice language <code>`
+and `voice language next`.
+
+**Config.**
+```toml
+[general]
+language = "en"
+languages = ["en", "sv"]        # cycle order for the toggle; "auto" allowed
+
+[hotkeys]
+language_toggle = ""            # evdev key name
+portal_language_toggle = ""     # portal trigger
+```
+
+**Behaviour.** Switching sets `general.language`, saves the config on the Qt thread (same path
+as profile switching), applies it, and is read by the next dictation. The overlay protocol
+gains `{"language": "sv"}` and `{"state": "notice", "text": "EN → SV"}`. The pill remains
+non-interactive.
+
+**Tests.** IPC `language` command (valid, invalid, `next` wraps around); toggle hotkey cycles and
+persists; overlay model `notice` state hides after 2 s; badge rendered in the PNG check.

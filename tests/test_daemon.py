@@ -1,5 +1,6 @@
 import os
 import threading
+import time
 
 import pytest
 
@@ -78,6 +79,23 @@ class FakeTray(QObject):
 
     def show(self):
         pass
+
+
+def settle(qapp, predicate, timeout=5.0):
+    """Pump the Qt event loop until `predicate()` is true, or give up.
+
+    The daemon now does its slow reads on worker threads and hands the answers
+    back through the bridge, so a test that wants the answer has to let Qt
+    deliver it. Returns the predicate's last value so the caller can assert on
+    it and see what it actually was.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        qapp.processEvents()
+        value = predicate()
+        if value or time.monotonic() >= deadline:
+            return value
+        time.sleep(0.005)
 
 
 @pytest.fixture
@@ -417,7 +435,11 @@ def test_open_settings_refreshes_the_reused_dialog(isolated_xdg, qapp, monkeypat
 def test_open_settings_shows_the_key_the_desktop_really_holds(isolated_xdg, qapp, monkeypatch):
     """The Hotkeys tab's portal fields are a first-run preference that GNOME
     never applies, so the window has to show the effective trigger beside them -
-    re-read as the window opens, not as the daemon started."""
+    re-read as the window opens, not as the daemon started.
+
+    The re-read is a D-Bus round trip and no longer holds the window shut, so
+    the label is corrected a moment after it appears rather than before.
+    """
     monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
     held = {"dictate": ""}
 
@@ -445,9 +467,141 @@ def test_open_settings_shows_the_key_the_desktop_really_holds(isolated_xdg, qapp
     d.build()
     try:
         d.open_settings()
-        assert "F13" in d._settings.portal_effective["dictate"].text()
+        label = d._settings.portal_effective["dictate"]
+        assert settle(qapp, lambda: "F13" in label.text()), label.text()
         d._settings.close()
     finally:
+        d.shutdown()
+
+
+class SlowPortal(FakeListener):
+    """A portal listener whose round trip takes as long as a real one can.
+
+    `refresh_triggers` is a synchronous D-Bus call bounded by the listener's
+    own REFRESH_TIMEOUT_S (2 s), and was measured at up to ~2.5 s on the
+    owner's GNOME session. Held here by an Event so the test decides when the
+    desktop answers.
+    """
+
+    held = "F13"
+    answer = "Super+D"
+
+    def __init__(self, on_event=None, shortcuts=None, **kwargs):
+        super().__init__()
+        self.release = threading.Event()
+        self.calls = 0
+        self._triggers = {"dictate": self.held}
+
+    def shortcut_state(self):
+        return STATE_BOUND
+
+    def effective_triggers(self):
+        return dict(self._triggers)
+
+    def refresh_triggers(self):
+        self.calls += 1
+        self.release.wait(2.0)             # bounded, so a RED run still finishes
+        self._triggers = {"dictate": self.answer}
+        return dict(self._triggers)
+
+
+def _slow_portal_daemon(monkeypatch, listener_cls=SlowPortal, sources=lambda: []):
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    monkeypatch.setattr("voice.daemon.list_sources", sources)
+    monkeypatch.setattr("voice.daemon.PortalListener", listener_cls)
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", "portal")
+    cfg.save()
+    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    return d
+
+
+def test_opening_the_settings_window_does_not_wait_for_the_portal(isolated_xdg, qapp, monkeypatch):
+    """The owner's "why is opening the setting so slow?".
+
+    Asking the desktop what key it holds is a D-Bus round trip of up to a
+    couple of seconds, and it used to happen on the Qt thread before the window
+    was shown. The listener caches the answer and keeps it current from
+    `ShortcutsChanged`, so the window can open on what is already known.
+    """
+    d = _slow_portal_daemon(monkeypatch)
+    try:
+        started = time.perf_counter()
+        d.open_settings()
+        elapsed = time.perf_counter() - started
+        assert d._settings.isVisible()
+        assert elapsed < 0.5, f"opening the window blocked for {elapsed:.2f} s"
+        assert SlowPortal.held in d._settings.portal_effective["dictate"].text()
+        d.listener.release.set()
+        d._settings.close()
+    finally:
+        d.listener.release.set()
+        d.shutdown()
+
+
+def test_a_trigger_refresh_that_lands_late_updates_the_open_window(isolated_xdg, qapp, monkeypatch):
+    """Opening on the cached answer is only honest if the fresh one arrives."""
+    d = _slow_portal_daemon(monkeypatch)
+    try:
+        d.open_settings()
+        label = d._settings.portal_effective["dictate"]
+        assert SlowPortal.answer not in label.text()
+        d.listener.release.set()
+        assert settle(qapp, lambda: SlowPortal.answer in label.text()), label.text()
+        d._settings.close()
+    finally:
+        d.listener.release.set()
+        d.shutdown()
+
+
+def test_listing_microphones_does_not_block_the_settings_window(isolated_xdg, qapp, monkeypatch):
+    """`pw-dump` is a subprocess with a five second timeout, on the same path.
+
+    Until it answers the window still has to offer the microphone the config
+    names, or a Save made in the meantime would quietly write it away.
+    """
+    from voice.audio.capture import Source
+
+    listing = threading.Event()
+
+    def slow_sources():
+        listing.wait(2.0)
+        return [Source("alsa_input.obsbot", "OBSBOT Tiny 3", True)]
+
+    d = _slow_portal_daemon(monkeypatch, sources=slow_sources)
+    d.config.set("audio.device", "alsa_input.obsbot")
+    d.config.save()
+    try:
+        started = time.perf_counter()
+        d.open_settings()
+        elapsed = time.perf_counter() - started
+        assert elapsed < 0.5, f"opening the window blocked for {elapsed:.2f} s"
+        combo = d._settings.device_combo
+        assert combo.currentData() == "alsa_input.obsbot", "the configured microphone was dropped"
+        listing.set()
+        assert settle(qapp, lambda: combo.currentText() == "OBSBOT Tiny 3 (default)"), combo.currentText()
+        assert combo.currentData() == "alsa_input.obsbot"
+        d._settings.close()
+    finally:
+        listing.set()
+        d.listener.release.set()
+        d.shutdown()
+
+
+def test_saving_settings_does_not_freeze_the_window_on_the_portal(isolated_xdg, qapp, monkeypatch):
+    """`apply_config` runs on the Qt thread too - Save must not stall either."""
+    d = _slow_portal_daemon(monkeypatch)
+    try:
+        started = time.perf_counter()
+        d.apply_config()
+        elapsed = time.perf_counter() - started
+        assert elapsed < 0.5, f"applying the config blocked for {elapsed:.2f} s"
+        d.listener.release.set()
+        assert settle(qapp, lambda: d.listener.effective_triggers()["dictate"] == SlowPortal.answer)
+    finally:
+        d.listener.release.set()
         d.shutdown()
 
 
@@ -707,7 +861,7 @@ def test_reload_re_reads_the_desktops_shortcut_assignment(isolated_xdg, qapp, mo
     try:
         assert d.handle({"cmd": "status"})["shortcut_state"] == STATE_UNASSIGNED
         d.apply_config()
-        assert d.listener.refreshed == 1
+        assert settle(qapp, lambda: d.listener.refreshed == 1), d.listener.refreshed
         st = d.handle({"cmd": "status"})
         assert st["shortcut_triggers"] == {"dictate": "F13"}
         assert st["shortcut_state"] == STATE_BOUND

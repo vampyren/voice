@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
-from typing import Callable
+from typing import Callable, Iterable
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -123,6 +123,11 @@ class SettingsDialog(QDialog):
         # Save writes to disk and emits `saved`; the daemon reloads from disk.
         self._cfg = Config.load(config.path)
         self._capture_key, self._sources = capture_key, sources
+        #: The microphone the *user* picked in this window, or None while the
+        #: combo is only showing what the config holds. Listing the sources is
+        #: slow enough that the daemon does it in the background and calls
+        #: `set_sources` later, and that must not overwrite a live choice.
+        self._device_choice: str | None = None
         self._current_profile: str | None = None
         self._active_changed = False       # True once "Use this profile" was pressed
         self._language_changed = False     # True once the user picked a language here
@@ -160,6 +165,7 @@ class SettingsDialog(QDialog):
         self._language_changed = False
         self._inject_mode_changed = False
         self.profile_form = {}
+        self._device_choice = None
         self.error_label.setText("")
         self._load()
 
@@ -248,9 +254,7 @@ class SettingsDialog(QDialog):
         w = QWidget()
         form = QFormLayout(w)
         self.device_combo = QComboBox()
-        self.device_combo.addItem("System default", "")
-        for src in self._sources():
-            self.device_combo.addItem(src.description + (" (default)" if src.is_default else ""), src.name)
+        self.device_combo.currentIndexChanged.connect(self._on_device_picked)
         self.max_seconds = QSpinBox()
         self.max_seconds.setRange(5, 600)
         form.addRow("Microphone", self.device_combo)
@@ -303,6 +307,36 @@ class SettingsDialog(QDialog):
         return w
 
     # -- load/save --------------------------------------------------------------
+    def set_sources(self, sources: Iterable[Source]) -> None:
+        """Repopulate the microphone list, keeping the chosen device chosen.
+
+        Listing them means running `pw-dump`, a subprocess with a five second
+        timeout, so the daemon hands the window whatever it listed last and
+        calls this again when a fresh listing arrives. Two rules make that
+        safe: a device the listing does not mention still gets a row of its
+        own, because a window that quietly reselected "System default" would
+        write that back the next time the user pressed Save; and a choice the
+        user has already made here wins over the file.
+        """
+        wanted = self._device_choice
+        if wanted is None:
+            wanted = self._cfg.get("audio.device", "") or ""
+        blocked = self.device_combo.blockSignals(True)   # repopulating is not a pick
+        try:
+            self.device_combo.clear()
+            self.device_combo.addItem("System default", "")
+            for src in sources:
+                self.device_combo.addItem(
+                    src.description + (" (default)" if src.is_default else ""), src.name)
+            if wanted and self.device_combo.findData(wanted) < 0:
+                self.device_combo.addItem(wanted, wanted)
+            self.device_combo.setCurrentIndex(max(0, self.device_combo.findData(wanted)))
+        finally:
+            self.device_combo.blockSignals(blocked)
+
+    def _on_device_picked(self) -> None:
+        self._device_choice = self.device_combo.currentData()
+
     def _load(self) -> None:
         c = self._cfg
         self.language_combo.setCurrentIndex(max(0, self.language_combo.findData(c.get("general.language", "en"))))
@@ -315,7 +349,8 @@ class SettingsDialog(QDialog):
         for name, edit in self.portal_edits.items():
             edit.setText(c.portal_trigger(name))
         self.refresh_effective_triggers()
-        self.device_combo.setCurrentIndex(max(0, self.device_combo.findData(c.get("audio.device", ""))))
+        self._device_choice = None         # populating the combo is not a user edit
+        self.set_sources(self._sources())
         self.max_seconds.setValue(int(c.get("audio.max_seconds", 120)))
         self.profile_list.clear()
         for name in (c.get("stt.profiles", {}) or {}):

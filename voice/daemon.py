@@ -193,10 +193,12 @@ class _BrokenTranscriber:
 
 
 class _Bridge(QObject):
-    """Hops work from the IPC thread onto the Qt thread.
+    """Hops work from another thread onto the Qt thread.
 
     Everything reachable from `handle` that mutates state, touches the config file
-    or drives Tray's QMenu/QAction must travel through one of these signals.
+    or drives Tray's QMenu/QAction must travel through one of these signals. The
+    last two carry answers back from the settings window's background refreshes
+    (`_refresh_settings_inputs`), which are the other threads that reach Qt.
     """
 
     open_settings = Signal()
@@ -204,6 +206,8 @@ class _Bridge(QObject):
     set_profile = Signal(str)
     set_language = Signal(str)
     quit = Signal()
+    triggers_refreshed = Signal()
+    sources_listed = Signal(object)
 
 
 class Daemon:
@@ -230,6 +234,11 @@ class Daemon:
         self._overlay_language = str(config.get("general.language", "en") or "en")
         #: The [ui] settings the running helper was started with; see _make_overlay.
         self._overlay_settings: tuple | None = None
+        #: The last microphone listing, so the settings window can open on it
+        #: instead of waiting for `pw-dump`. Only ever written on the Qt thread.
+        self._source_cache: list = []
+        #: One background refresh of each kind at a time; see _refresh_off_thread.
+        self._refreshers: dict[str, threading.Thread] = {}
         self._bridge = _Bridge()
 
     # -- construction -------------------------------------------------------
@@ -257,6 +266,8 @@ class Daemon:
         self._bridge.set_profile.connect(self._set_profile)
         self._bridge.set_language.connect(self._set_language)
         self._bridge.quit.connect(self._quit)
+        self._bridge.triggers_refreshed.connect(self._on_triggers_refreshed)
+        self._bridge.sources_listed.connect(self._on_sources_listed)
         self._server = Server(self.handle)
 
     def _make_overlay(self) -> OverlayClient:
@@ -473,6 +484,60 @@ class Daemon:
         except Exception:
             log.exception("could not re-read the desktop's shortcut assignment")
 
+    def _refresh_off_thread(self, name: str, work, done) -> None:
+        """Run `work()` on a throwaway thread and hand its answer to `done`.
+
+        `done` is a bridge signal's `emit`, so Qt queues the answer and the slot
+        runs back on the Qt thread with a widget it is allowed to touch. One
+        thread of each `name` at a time: clicking the tray twice in a second
+        must not start two `pw-dump`s or two D-Bus round trips.
+        """
+        running = self._refreshers.get(name)
+        if running is not None and running.is_alive():
+            return
+
+        def run() -> None:
+            try:
+                done(work())
+            except Exception:
+                log.exception("background %s refresh failed", name)
+
+        thread = threading.Thread(target=run, name=f"voice-{name}", daemon=True)
+        self._refreshers[name] = thread
+        thread.start()
+
+    def _refresh_settings_inputs(self) -> None:
+        """Re-read the two slow facts the settings window shows, off the Qt thread.
+
+        Both of these used to run on the Qt thread *before* the window was shown,
+        which is the whole of "why is opening the setting so slow?": asking the
+        portal what the desktop holds is a synchronous D-Bus round trip bounded
+        by the listener's own 2 s timeout, and listing microphones is `pw-dump`
+        with a 5 s one. The window opens on what is already known - the listener
+        caches the triggers and keeps them current from `ShortcutsChanged`, and
+        the last listing is kept here - and both slots below correct it in place
+        when the real answer arrives.
+        """
+        self._refresh_off_thread("triggers", self._refresh_shortcut_triggers,
+                                 lambda _: self._bridge.triggers_refreshed.emit())
+        self._refresh_off_thread("sources", list_sources, self._bridge.sources_listed.emit)
+
+    def _on_triggers_refreshed(self) -> None:
+        """Qt thread: the desktop has answered. Update the window, if any is up.
+
+        The dialog may have been closed, or thrown away and rebuilt for another
+        backend, between the question and the answer; `self._settings` is always
+        the one on screen now, and None is simply nobody to tell.
+        """
+        if self._settings is not None:
+            self._settings.refresh_effective_triggers()
+
+    def _on_sources_listed(self, sources) -> None:
+        """Qt thread: `pw-dump` has answered."""
+        self._source_cache = list(sources)
+        if self._settings is not None:
+            self._settings.set_sources(self._source_cache)
+
     def _profile_snapshot(self) -> tuple[str, dict] | None:
         """The active (name, profile) pair, or None if stt.active is unresolvable."""
         try:
@@ -600,7 +665,7 @@ class Daemon:
         self.tracker.set_specs(hotkey_specs(self.config))
         self._notifier.set_enabled(bool(self.config.get("general.notifications", True)))
         self._rebind_hotkeys_if_needed()      # before the injector: it holds the listener
-        self._refresh_shortcut_triggers()     # and after it: the new listener is the one to ask
+        self._refresh_settings_inputs()       # and after it: the new listener is the one to ask
         current = self._profile_snapshot()
         if current != self._active_profile:
             self._active_profile = current
@@ -749,9 +814,6 @@ class Daemon:
             self.open_settings()
 
     def open_settings(self) -> None:
-        # The window shows what the desktop currently holds beside the portal
-        # trigger fields, so it is worth one round trip before it appears.
-        self._refresh_shortcut_triggers()
         try:
             if self._settings is None:
                 # Late-bound, both of them: this dialog outlives the listener
@@ -759,7 +821,8 @@ class Daemon:
                 # kept calling the stopped one - "Press a key..." for ever.
                 self._settings = SettingsDialog(self.config,
                                                 lambda cb: self.listener.capture_next(cb),
-                                                list_sources, backend=self.hotkey_backend,
+                                                lambda: list(self._source_cache),
+                                                backend=self.hotkey_backend,
                                                 triggers=self.effective_triggers)
                 self._settings.saved.connect(self.apply_config)
             elif not self._settings.isVisible():
@@ -775,6 +838,9 @@ class Daemon:
         self._settings.show()
         self._settings.raise_()
         self._settings.activateWindow()
+        # Only now: the window is already on screen, and the two slow reads
+        # correct it in place a moment later. See _refresh_settings_inputs.
+        self._refresh_settings_inputs()
 
     def _quit(self) -> None:
         app = QApplication.instance()

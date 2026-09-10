@@ -82,29 +82,24 @@ def test_the_tray_icon_fills_its_square(qapp, state, size):
 
 
 @pytest.mark.parametrize("size", PANEL_SIZES)
-def test_the_transcribing_ring_is_a_closed_circle_inside_the_square(qapp, size):
-    """Filling the square must not push the ring off the edge of it.
+def test_no_state_is_drawn_smaller_than_any_other(qapp, size):
+    """State is colour, never a ring, so every state fills the same square.
 
-    A ring clipped by the pixmap reads as an arc, and at 16 px an arc and a
-    circle are the difference between "working" and "broken".
+    A ring round the glyph cost it a quarter of its size, which is how the
+    transcribing icon came to read as a dot beside its stock neighbours. If a
+    state ever shrinks again, this fails.
     """
-    image = pixmap_for("transcribing", size).toImage()
-    box = content_box(image)
-    assert box is not None
-    x0, y0, x1, y1 = box
-    assert (x0, y0) >= (0, 0) and (x1, y1) <= (size - 1, size - 1)
-    middle, ring = size // 2, QColor("#f5a524")
+    boxes = {}
+    for state in ("idle", "recording", "transcribing", "injecting", "error"):
+        box = content_box(pixmap_for(state, size).toImage())
+        assert box is not None, f"{state} drew nothing at {size}px"
+        x0, y0, x1, y1 = box
+        boxes[state] = (x1 - x0 + 1, y1 - y0 + 1)
 
-    def ring_near(x, y):
-        return any(image.pixelColor(px, py).alpha() > 8
-                   and abs(image.pixelColor(px, py).red() - ring.red()) < 40
-                   and abs(image.pixelColor(px, py).blue() - ring.blue()) < 40
-                   for px, py in _around(x, y, size))
-
-    assert ring_near(middle, y0), "no ring at the top"
-    assert ring_near(middle, y1), "no ring at the bottom"
-    assert ring_near(x0, middle), "no ring on the left"
-    assert ring_near(x1, middle), "no ring on the right"
+    widths = {w for w, _ in boxes.values()}
+    heights = {h for _, h in boxes.values()}
+    assert max(widths) - min(widths) <= 1, f"widths differ by state: {boxes}"
+    assert max(heights) - min(heights) <= 1, f"heights differ by state: {boxes}"
 
 
 def _around(x, y, size, reach=2):

@@ -13,11 +13,14 @@ from __future__ import annotations
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 
+#: State is carried by the microphone's own colour, never by anything drawn
+#: around it: a ring costs the glyph a quarter of its size, which is what made
+#: the transcribing icon read as a tiny dot beside its stock neighbours.
 _COLORS = {
     "idle": ("#d8dee9", None),
     "recording": ("#e5484d", None),
-    "transcribing": ("#d8dee9", "#f5a524"),
-    "injecting": ("#d8dee9", "#3b82f6"),
+    "transcribing": ("#f5a524", None),
+    "injecting": ("#3b82f6", None),
     "error": ("#f97316", None),
 }
 

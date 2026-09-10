@@ -245,13 +245,19 @@ restore_clipboard = true
 The portal backend needs the desktop entry `install.sh` writes
 (`~/.local/share/applications/io.github.vampyren.voice.desktop`): the portal resolves the
 app id through it, and refuses the shortcut session with "An app id is required" without
-it. Changing `hotkeys.backend` or a portal trigger takes effect on the next daemon start, not on
-`voice reload` — the portal session is created once and reused while the daemon runs.
+it. Changing `hotkeys.backend` or a portal trigger applies on `voice reload` (and on Save
+in the settings window): the daemon closes the portal session and creates a new one, so
+the desktop may ask for permission again.
 
-**Hotkeys.** Use the settings window's "Capture key" button — press the physical key and
-it fills in the exact evdev name it received. Combinations are typed by hand, e.g.
-`KEY_LEFTMETA+KEY_SPACE`. If a Keychron spare key (the circle/triangle/square keys)
-sends nothing, remap it in Keychron Launcher to F13 and bind `KEY_F13` here.
+**Hotkeys.** On the evdev backend, use the settings window's "Capture key" button — press
+the physical key and it fills in the exact evdev name it received. Combinations are typed
+by hand, e.g. `KEY_LEFTMETA+KEY_SPACE`. If a Keychron spare key (the circle/triangle/square
+keys) sends nothing, remap it in Keychron Launcher to F13 and bind `KEY_F13` here.
+
+On the portal backend there is no key to capture — the compositor consumes the chord
+before anything else sees it — so the Hotkeys tab shows the four triggers themselves
+(`portal_dictate`, `portal_recall`, `portal_cancel`, `portal_language_toggle`) as text
+fields in the desktop's own syntax: `F14`, `CTRL+space`, `CTRL+SHIFT+l`.
 
 **Profiles.** `stt.active` picks one of the `[stt.profiles.*]` tables. Add a cloud
 profile by pasting an API key: either `api_key = "sk-..."` inline, or set the

@@ -201,6 +201,8 @@ class Daemon:
         self._server: Server | None = None
         self._settings: SettingsDialog | None = None
         self._active_profile: tuple[str, dict] | None = None
+        #: What the running listener was built from; None until build().
+        self._hotkey_settings: tuple | None = None
         #: The language the pill was last told about; see _send_overlay.
         self._overlay_language = str(config.get("general.language", "en") or "en")
         #: The [ui] settings the running helper was started with; see _make_overlay.
@@ -212,6 +214,7 @@ class Daemon:
         self.tracker = Tracker(hotkey_specs(self.config))
         self.history = History()
         self.listener, self.hotkey_backend = self._make_listener()
+        self._hotkey_settings = self._hotkey_snapshot()
         self._sender = self._sender or make_key_sender()
         self.injector = Injector(self._clipboard, self._sender, self.config.get("inject", {}) or {},
                                  self.listener.modifiers_held, window_class_getter(self.config))
@@ -305,6 +308,34 @@ class Daemon:
         if language != self._overlay_language:
             self.overlay.send({"language": language})
             self._overlay_language = language
+
+    def _hotkey_snapshot(self) -> tuple:
+        """What the listener was built from. The portal binds its shortcuts once,
+        when the session is created, so a change here needs a new listener - the
+        configured backend rather than the resolved one, to avoid re-probing the
+        keyboards and the seat on every reload."""
+        return (str(self.config.get("hotkeys.backend", "auto") or "auto").strip().lower(),
+                portal_shortcuts(self.config))
+
+    def _rebind_hotkeys_if_needed(self) -> None:
+        """Rebuild the listener when the backend or a portal trigger changed.
+
+        The desktop may show its permission dialog again; that is the price of
+        applying a new trigger without restarting the daemon.
+        """
+        if self._hotkey_settings is None or self._hotkey_snapshot() == self._hotkey_settings:
+            return
+        log.info("hotkey bindings changed; rebuilding the listener")
+        try:
+            self.listener.stop()
+        except Exception:
+            log.exception("failed to stop the listener while rebinding")
+        self.listener, self.hotkey_backend = self._make_listener()
+        self._hotkey_settings = self._hotkey_snapshot()
+        try:
+            self.listener.start()
+        except Exception:
+            log.exception("failed to start the rebuilt listener")
 
     def _make_listener(self):
         """The hotkey listener plus the name of the backend it represents.
@@ -458,6 +489,7 @@ class Daemon:
             return
         self.tracker.set_specs(hotkey_specs(self.config))
         self._notifier.set_enabled(bool(self.config.get("general.notifications", True)))
+        self._rebind_hotkeys_if_needed()      # before the injector: it holds the listener
         current = self._profile_snapshot()
         if current != self._active_profile:
             self._active_profile = current

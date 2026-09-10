@@ -23,11 +23,17 @@ PROFILE_TEMPLATES: dict[str, dict] = {
 _LOCAL_FIELDS = ["model", "device", "compute_type", "beam_size", "prompt"]
 _CLOUD_FIELDS = ["base_url", "model", "api_key", "api_key_env", "prompt"]
 _LANGUAGES = [("English", "en"), ("Swedish", "sv"), ("Auto-detect", "auto")]
+#: The portal shortcuts, in the order they are shown, with their labels.
+PORTAL_TRIGGERS = [("dictate", "Dictate"), ("recall", "Recall last"),
+                   ("cancel", "Cancel recording"), ("language_toggle", "Switch language")]
 HOTKEY_HINTS = {
     "evdev": "Combinations: type KEY_LEFTMETA+KEY_SPACE. Names are evdev key names.",
-    "portal": ("This session uses the desktop portal for hotkeys: the shortcut itself is chosen in "
-               "your desktop's own shortcut dialog (Ctrl+Space by default, set as hotkeys.portal_dictate). "
-               "The key fields above apply again if you switch hotkeys.backend to evdev."),
+    "portal": ("This session binds its shortcuts through the desktop, so there is no key to "
+               "capture here - type the trigger instead, in your desktop's syntax: F14, "
+               "CTRL+space, CTRL+SHIFT+l. A bare modifier will not bind. Saving asks the "
+               "desktop to bind them again, which may show its permission dialog. Your "
+               "desktop's own shortcut settings still win over these. The evdev key fields "
+               "below apply again if you switch hotkeys.backend to evdev."),
 }
 
 
@@ -112,13 +118,22 @@ class SettingsDialog(QDialog):
         self.mode_combo.addItems(["hold", "toggle"])
         self.recall_edit = QLineEdit()
         self.cancel_edit = QLineEdit()
+        self.portal_edits: dict[str, QLineEdit] = {}
+        if self._backend == "portal":
+            # The compositor consumes the chord before we see it, so there is
+            # nothing to capture: these are the triggers we ask it to bind.
+            self.capture_button.setVisible(False)
+            for name, label in PORTAL_TRIGGERS:
+                edit = QLineEdit()
+                self.portal_edits[name] = edit
+                form.addRow(f"{label} shortcut", edit)
+        self.hotkey_hint = QLabel(HOTKEY_HINTS.get(self._backend, HOTKEY_HINTS["evdev"]))
+        self.hotkey_hint.setWordWrap(True)
+        form.addRow(self.hotkey_hint)
         form.addRow("Dictate key", row)
         form.addRow("Mode", self.mode_combo)
         form.addRow("Recall last", self.recall_edit)
         form.addRow("Cancel recording", self.cancel_edit)
-        self.hotkey_hint = QLabel(HOTKEY_HINTS.get(self._backend, HOTKEY_HINTS["evdev"]))
-        self.hotkey_hint.setWordWrap(True)
-        form.addRow(self.hotkey_hint)
         return w
 
     def _audio_tab(self) -> QWidget:
@@ -188,6 +203,8 @@ class SettingsDialog(QDialog):
         self.mode_combo.setCurrentText(c.get("hotkeys.dictate_mode", "hold"))
         self.recall_edit.setText(c.get("hotkeys.recall", ""))
         self.cancel_edit.setText(c.get("hotkeys.cancel", ""))
+        for name, edit in self.portal_edits.items():
+            edit.setText(c.portal_trigger(name))
         self.device_combo.setCurrentIndex(max(0, self.device_combo.findData(c.get("audio.device", ""))))
         self.max_seconds.setValue(int(c.get("audio.max_seconds", 120)))
         self.profile_list.clear()
@@ -325,6 +342,8 @@ class SettingsDialog(QDialog):
                 self.error_label.setText(f"{field}: {exc}")
                 return
             c.set(field, edit.text().strip())
+        for name, edit in self.portal_edits.items():
+            c.set(f"hotkeys.portal_{name}", edit.text().strip())
         c.set("general.language", self.language_combo.currentData())
         c.set("general.notifications", self.notifications_combo.currentText() == "on")
         c.set("hotkeys.dictate_mode", self.mode_combo.currentText())

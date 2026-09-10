@@ -1021,3 +1021,68 @@ def test_a_profile_that_vanished_from_the_file_is_not_written(isolated_xdg, qapp
     assert again.get("stt.active") == "local"        # unchanged
     assert again.errors() == []
     d.shutdown()
+
+
+# -- rebinding the portal shortcuts on save ------------------------------------
+class FakePortalListener(FakeListener):
+    """Records the shortcuts it was built with, like the real one binds them."""
+
+    made: list = []
+
+    def __init__(self, on_event, shortcuts, **kwargs):
+        super().__init__()
+        self.shortcuts = dict(shortcuts)
+        FakePortalListener.made.append(self)
+
+
+def _portal_daemon(monkeypatch):
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    FakePortalListener.made = []
+    monkeypatch.setattr("voice.daemon.PortalListener", FakePortalListener)
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", "portal")
+    cfg.save()
+    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray())
+    d.build()
+    d.listener.start()                                  # what run() does
+    return d
+
+
+def test_a_changed_portal_trigger_rebinds_on_reload(isolated_xdg, qapp, monkeypatch):
+    """The portal binds once, when the session is created, so a trigger changed
+    in the settings window used to need a daemon restart."""
+    d = _portal_daemon(monkeypatch)
+    first = d.listener
+    assert len(FakePortalListener.made) == 1
+
+    d.apply_config()
+    assert d.listener is first                          # unchanged: no second dialog
+    assert len(FakePortalListener.made) == 1
+
+    external = Config.load()
+    external.set("hotkeys.portal_dictate", "CTRL+ALT+d")
+    external.set("hotkeys.portal_language_toggle", "CTRL+SHIFT+l")
+    external.save()
+    d.apply_config()
+
+    assert len(FakePortalListener.made) == 2
+    assert d.listener is not first
+    assert d.listener.shortcuts == {"dictate": "CTRL+ALT+d", "language_toggle": "CTRL+SHIFT+l"}
+    assert first.started is False                       # the old session was closed
+    assert d.listener.started is True                   # and the new one is listening
+    assert d.injector._modifiers_held == d.listener.modifiers_held  # the paste guard follows
+    d.shutdown()
+
+
+def test_a_changed_hotkey_backend_rebuilds_the_listener(isolated_xdg, qapp, monkeypatch):
+    d = _portal_daemon(monkeypatch)
+    monkeypatch.setattr("voice.daemon.EvdevListener", lambda tracker, on_event: FakeListener())
+    external = Config.load()
+    external.set("hotkeys.backend", "evdev")
+    external.save()
+    d.apply_config()
+    assert d.hotkey_backend == "evdev"
+    assert not isinstance(d.listener, FakePortalListener)
+    assert d.handle({"cmd": "status"})["hotkey_backend"] == "evdev"
+    d.shutdown()

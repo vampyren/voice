@@ -228,3 +228,48 @@ def test_reload_from_disk_clears_the_language_flag(qapp):
     external.save()
     dlg.save_button.click()
     assert Config.load().get("general.language") == "sv"     # the abandoned edit is gone
+
+
+# -- the portal backend has no keys to capture ---------------------------------
+def portal_dialog(qapp):
+    cfg = Config.load()
+    dlg = SettingsDialog(cfg, capture_key=lambda cb: None,
+                         sources=lambda: [Source("alsa_input.obsbot", "OBSBOT Tiny 3", True)],
+                         backend="portal")
+    return cfg, dlg
+
+
+def test_the_portal_backend_edits_its_triggers_instead_of_capturing_keys(qapp):
+    """The compositor keeps the keystroke, so "Capture key" can only ever answer
+    with a sentence - which landed in the red error label and read as a failure."""
+    cfg, dlg = portal_dialog(qapp)
+    assert set(dlg.portal_edits) == {"dictate", "recall", "cancel", "language_toggle"}
+    assert dlg.portal_edits["dictate"].text() == "CTRL+space"
+    assert dlg.capture_button.isHidden() is True
+    assert dlg.error_label.text() == ""                 # the explanation is a hint,
+    assert "desktop" in dlg.hotkey_hint.text()          # not an error
+
+
+def test_the_evdev_backend_still_captures_keys(qapp):
+    cfg, dlg, _ = make(qapp)
+    assert dlg.portal_edits == {}
+    assert dlg.capture_button.isHidden() is False
+
+
+def test_saving_writes_the_portal_triggers(qapp):
+    cfg, dlg = portal_dialog(qapp)
+    dlg.portal_edits["dictate"].setText("CTRL+ALT+d")
+    dlg.portal_edits["language_toggle"].setText("CTRL+SHIFT+l")
+    dlg.save_button.click()
+    assert dlg.error_label.text() == ""
+    again = Config.load()
+    assert again.get("hotkeys.portal_dictate") == "CTRL+ALT+d"
+    assert again.get("hotkeys.portal_language_toggle") == "CTRL+SHIFT+l"
+
+
+def test_an_empty_portal_dictate_trigger_is_refused(qapp):
+    cfg, dlg = portal_dialog(qapp)
+    dlg.portal_edits["dictate"].setText("   ")
+    dlg.save_button.click()
+    assert "portal_dictate" in dlg.error_label.text()
+    assert Config.load().get("hotkeys.portal_dictate") == "CTRL+space"

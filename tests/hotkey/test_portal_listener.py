@@ -8,7 +8,14 @@ from jeepney import HeaderFields, new_signal
 
 from voice import APP_ID
 from voice.hotkey import portal_listener
-from voice.hotkey.portal_listener import NO_CAPTURE_MESSAGE, SHORTCUTS, PortalListener
+from voice.hotkey.portal_listener import (
+    NO_CAPTURE_MESSAGE,
+    SHORTCUTS,
+    STATE_BOUND,
+    STATE_DENIED,
+    STATE_UNASSIGNED,
+    PortalListener,
+)
 
 SESSION = "/org/freedesktop/portal/desktop/session/1_99/voice1"
 OTHER_SESSION = "/org/freedesktop/portal/desktop/session/1_99/other"
@@ -49,19 +56,29 @@ class _Ctx:
 class FakeConn:
     """A jeepney blocking connection just real enough for PortalListener.
 
-    CreateSession/BindShortcuts answer through the Request.Response path (a
-    `recv_until_filtered` right after the call); everything else answers
+    CreateSession/ListShortcuts/BindShortcuts answer through the Request.Response
+    path (a `recv_until_filtered` right after the call); everything else answers
     directly. `emit()` queues a GlobalShortcuts signal for the listener thread.
+
+    `known` is what the portal already holds for our app id (empty by default:
+    a first run). `list_error` makes ListShortcuts fail the way an older portal
+    does. `bind_triggers` overrides what BindShortcuts answers with; left alone,
+    it echoes the preferred_trigger we sent, or the stored one where we sent
+    none - which is what a real portal does.
     """
 
     def __init__(self, *, bind_code=0, create_code=0, version=1, registry=True, configure_error=False,
-                 create_error=None, open_delay=0.0, drop_after_bind=False, subscribe_error=False):
+                 create_error=None, open_delay=0.0, drop_after_bind=False, subscribe_error=False,
+                 known=None, list_error=False, bind_triggers=None, bind_results_empty=False):
         self.unique_name = ":1.99"
         self.bind_code, self.create_code = bind_code, create_code
         self.version, self.registry, self.configure_error = version, registry, configure_error
         self.create_error = create_error
         self.open_delay, self.drop_after_bind = open_delay, drop_after_bind
         self.subscribe_error = subscribe_error
+        self.known = dict(known or {})
+        self.list_error, self.bind_results_empty = list_error, bind_results_empty
+        self.bind_triggers = None if bind_triggers is None else dict(bind_triggers)
         self.calls: list[tuple[str, tuple]] = []
         self.closed = False
         self._pending: str | None = None
@@ -76,6 +93,22 @@ class FakeConn:
     def bodies(self, member: str) -> list[tuple]:
         with self._lock:
             return [body for name, body in self.calls if name == member]
+
+    @staticmethod
+    def _shortcut_array(triggers: dict) -> dict:
+        return {"shortcuts": ("a(sa{sv})",
+                              [(sid, {"description": ("s", sid), "trigger_description": ("s", trig)})
+                               for sid, trig in triggers.items()])}
+
+    def _bind_results(self) -> dict:
+        if self.bind_results_empty:
+            return {}
+        if self.bind_triggers is not None:
+            return self._shortcut_array(self.bind_triggers)
+        requested = self.bodies("BindShortcuts")[-1][1]
+        return self._shortcut_array({
+            sid: (opts["preferred_trigger"][1] if "preferred_trigger" in opts else self.known.get(sid, ""))
+            for sid, opts in requested})
 
     # -- connection ------------------------------------------------------
     def send_and_get_reply(self, msg, timeout=None):
@@ -92,7 +125,9 @@ class FakeConn:
             return _Reply("error" if self.configure_error else "method_return", ("/req/cfg",))
         if member == "CreateSession" and self.create_error:
             return _Reply("error", (self.create_error,))
-        if member in ("CreateSession", "BindShortcuts"):
+        if member == "ListShortcuts" and self.list_error:
+            return _Reply("error", ("no such method ListShortcuts",))
+        if member in ("CreateSession", "BindShortcuts", "ListShortcuts"):
             self._pending = member
             return _Reply(body=("/req/1",))
         return _Reply()
@@ -106,7 +141,9 @@ class FakeConn:
             time.sleep(self.open_delay)       # the portal's permission dialog is slow
             if member == "CreateSession":
                 return SimpleNamespace(body=(self.create_code, {"session_handle": ("o", SESSION)}))
-            return SimpleNamespace(body=(self.bind_code, {}))
+            if member == "ListShortcuts":
+                return SimpleNamespace(body=(0, self._shortcut_array(self.known)))
+            return SimpleNamespace(body=(self.bind_code, self._bind_results()))
         if self.drop_after_bind:
             raise ConnectionResetError("portal went away")
         with self._lock:
@@ -146,6 +183,94 @@ def test_bind_shortcuts_sends_every_configured_id_with_its_trigger():
         assert listener.devices_ok() is True
     finally:
         listener.stop()
+
+
+def test_a_shortcut_the_portal_already_knows_keeps_its_trigger():
+    """Re-sending preferred_trigger for an id GNOME already holds drops the key
+    the user assigned (verified on GNOME 50): the stored entry comes back with
+    no `shortcuts` at all. A known id must therefore be bound as-is."""
+    listener, conn, _ = make({"dictate": "CTRL+space", "cancel": "CTRL+ALT+c"},
+                             known={"dictate": "F13"})
+    try:
+        listener.start()
+        started(listener)
+        assert conn.bodies("ListShortcuts")[0][0] == SESSION      # asked before binding
+        opts = dict(conn.bodies("BindShortcuts")[0][1])
+        assert "preferred_trigger" not in opts["dictate"]         # the desktop owns it now
+        assert opts["dictate"]["description"][1]                  # still described
+        assert opts["cancel"]["preferred_trigger"] == ("s", "CTRL+ALT+c")   # never seen before
+        assert listener.effective_triggers() == {"dictate": "F13", "cancel": "CTRL+ALT+c"}
+        assert listener.shortcut_state() == STATE_BOUND
+    finally:
+        listener.stop()
+
+
+def test_list_shortcuts_failing_falls_back_to_the_safe_binding():
+    """An older portal has no ListShortcuts. Guessing "unknown" there would
+    re-send preferred_trigger and clobber whatever the user had assigned."""
+    listener, conn, _ = make({"dictate": "CTRL+space"}, list_error=True,
+                             bind_triggers={"dictate": "F13"})
+    try:
+        listener.start()
+        started(listener)
+        opts = dict(conn.bodies("BindShortcuts")[0][1])
+        assert "preferred_trigger" not in opts["dictate"]
+        assert listener.devices_ok() is True
+        assert listener.effective_triggers() == {"dictate": "F13"}
+    finally:
+        listener.stop()
+
+
+def test_effective_triggers_are_read_back_from_the_bind_response(caplog):
+    """What we asked for is not what got bound; the log must say the latter."""
+    listener, _, _ = make({"dictate": "CTRL+space"}, bind_triggers={"dictate": "F13"})
+    with caplog.at_level("INFO", logger="voice.hotkey.portal_listener"):
+        listener.start()
+        started(listener)
+    try:
+        assert listener.effective_triggers() == {"dictate": "F13"}
+        assert "dictate=F13" in caplog.text
+        assert "CTRL+space" not in caplog.text
+    finally:
+        listener.stop()
+
+
+def test_a_shortcut_registered_with_no_key_is_not_bound():
+    """GNOME answers BindShortcuts with success and no trigger at all. Reporting
+    that as "bound" is how two different keys silently did nothing."""
+    ready: list[str] = []
+    listener, conn, events = make({"dictate": "CTRL+space"}, bind_triggers={"dictate": ""},
+                                  on_ready=ready.append)
+    listener.start()
+    started(listener)
+    try:
+        assert listener.shortcut_state() == STATE_UNASSIGNED
+        assert listener.devices_ok() is False
+        assert listener.effective_triggers() == {"dictate": ""}
+        assert ready == [STATE_UNASSIGNED]
+        assert conn.closed is False                    # still listening: the key may be assigned
+    finally:
+        listener.stop()
+
+
+def test_a_bind_response_without_triggers_is_read_back_with_list_shortcuts():
+    """KDE answers BindShortcuts with a bare vardict; the truth is one call away."""
+    listener, conn, _ = make({"dictate": "CTRL+space"}, known={"dictate": "F13"},
+                             bind_results_empty=True)
+    try:
+        listener.start()
+        started(listener)
+        assert len(conn.bodies("ListShortcuts")) == 2           # before binding, and after
+        assert listener.effective_triggers() == {"dictate": "F13"}
+        assert listener.shortcut_state() == STATE_BOUND
+    finally:
+        listener.stop()
+
+
+def test_shortcut_state_is_unknown_before_start():
+    listener, _, _ = make()
+    assert listener.shortcut_state() is None
+    assert listener.effective_triggers() == {}
 
 
 def test_create_session_asks_for_its_own_handle_tokens():
@@ -229,19 +354,19 @@ def test_start_does_not_block_on_the_portals_permission_dialog():
 
 
 def test_on_ready_reports_the_outcome_once_the_portal_answers():
-    seen: list[bool] = []
+    seen: list[str] = []
     listener, _, _ = make(on_ready=seen.append)
     listener.start()
     started(listener)
     listener.stop()
-    assert seen == [True]
+    assert seen == [STATE_BOUND]
 
-    denied: list[bool] = []
+    denied: list[str] = []
     listener, _, _ = make(bind_code=1, on_ready=denied.append)
     listener.start()
     started(listener)
     listener.stop()
-    assert denied == [False]
+    assert denied == [STATE_DENIED]
 
 
 def test_a_lost_portal_connection_stops_reporting_healthy():
@@ -258,13 +383,13 @@ def test_a_lost_portal_connection_stops_reporting_healthy():
 def test_a_failed_signal_subscription_is_a_bind_failure():
     """Without the match rule no Activated can ever arrive, so reporting a healthy
     backend would leave `voice status` saying ok while every hotkey is dead."""
-    ready: list[bool] = []
+    ready: list[str] = []
     listener, _, _ = make(on_ready=ready.append, subscribe_error=True)
     listener.start()
     started(listener)
     try:
         assert listener.devices_ok() is False
-        assert ready == [False]
+        assert ready == [STATE_DENIED]
         assert wait_for(lambda: not any(t.name == "portal-listener" for t in threading.enumerate()))
     finally:
         listener.stop()
@@ -273,7 +398,7 @@ def test_a_failed_signal_subscription_is_a_bind_failure():
 def test_quitting_while_the_permission_dialog_is_open_says_nothing():
     """stop() during the compositor's dialog must not fire the "not registered"
     notification: the user quit, the desktop did not refuse anything."""
-    ready: list[bool] = []
+    ready: list[str] = []
     listener, _, _ = make(on_ready=ready.append, open_delay=0.3)
     listener.start()
     time.sleep(0.02)                                         # thread is inside _open

@@ -7,7 +7,15 @@ signals at us, so it works wherever the desktop itself works.
 
 The public surface is deliberately identical to `EvdevListener`
 (start/stop/capture_next/held/modifiers_held/devices_ok) - the daemon swaps one
-for the other and changes nothing else.
+for the other and changes nothing else. `shortcut_state`/`effective_triggers`
+are the two portal-only extras: only this backend can be registered with the
+desktop and yet have no key attached.
+
+**The desktop owns the trigger.** `preferred_trigger` is a first-run wish, not a
+setting: sending it again for a shortcut id the portal already knows makes GNOME
+50 drop the key the user assigned (its stored entry comes back with no
+`shortcuts` member at all) while still answering BindShortcuts with success. So
+ListShortcuts decides, per id, whether we may express a preference at all.
 """
 from __future__ import annotations
 
@@ -38,6 +46,12 @@ DESCRIPTIONS = {
 }
 #: ConfigureShortcuts (the desktop's own rebinding dialog) arrived in version 2.
 CONFIGURE_VERSION = 2
+#: What the portal made of our shortcuts, once it has answered.
+STATE_BOUND = "bound"
+STATE_UNASSIGNED = "unassigned"
+STATE_DENIED = "denied"
+#: How an empty trigger reads in a log line, `voice status` and `voice doctor`.
+NO_TRIGGER = "no key assigned"
 NO_CAPTURE_MESSAGE = "portal: change the shortcut in your desktop's settings"
 DIALOG_MESSAGE = "portal: choose the shortcut in the dialog your desktop just opened"
 #: How long a receive blocks before the loop re-checks the stop flag.
@@ -46,6 +60,37 @@ RECV_SLICE_S = 0.5
 CALL_TIMEOUT_S = 5
 #: capture_next runs on the Qt thread, so its round trip is kept short.
 CONFIGURE_TIMEOUT_S = 2
+#: ListShortcuts shows no dialog, so it must never wait like one.
+LIST_TIMEOUT_S = 10
+#: The `a(sa{sv})` member both ListShortcuts and BindShortcuts answer with, and
+#: the per-shortcut key holding the trigger the desktop actually bound.
+SHORTCUTS_RESULT = "shortcuts"
+TRIGGER_KEY = "trigger_description"
+
+
+def _unwrap(value):
+    """jeepney hands back a{sv} members as (signature, value) pairs."""
+    return value[1] if isinstance(value, tuple) and len(value) == 2 else value
+
+
+def shortcut_triggers(results: dict | None) -> dict[str, str] | None:
+    """`{shortcut id: effective trigger}` from a portal Response, or None.
+
+    None means the portal said nothing about triggers (an older backend, or a
+    bare vardict) - which is not the same as "no key assigned", so the caller
+    asks again rather than reporting the shortcut dead.
+    """
+    member = (results or {}).get(SHORTCUTS_RESULT)
+    if member is None:
+        return None
+    out: dict[str, str] = {}
+    for entry in _unwrap(member) or ():
+        try:
+            sid, options = entry[0], entry[1]
+        except (TypeError, IndexError, KeyError):
+            continue
+        out[str(sid)] = str(_unwrap((options or {}).get(TRIGGER_KEY)) or "")
+    return out
 
 
 class PortalListener:
@@ -58,7 +103,7 @@ class PortalListener:
 
     def __init__(self, on_event: Callable[[str, str], None], shortcuts: dict[str, str],
                  bus_factory: Callable = open_dbus_connection, app_id: str = APP_ID,
-                 on_ready: Callable[[bool], None] | None = None):
+                 on_ready: Callable[[str], None] | None = None):
         self._on_event = on_event
         self._on_ready = on_ready
         self._shortcuts = dict(shortcuts)
@@ -70,6 +115,7 @@ class PortalListener:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._bound: bool | None = None
+        self._triggers: dict[str, str] = {}
         self._active: set[str] = set()
         self._state_lock = threading.Lock()
         # The receive thread owns the connection; capture_next borrows it between
@@ -85,7 +131,7 @@ class PortalListener:
         dialog, which can take as long as the user does. Opening synchronously
         would leave the daemon with no tray and no Qt event loop until then, so
         devices_ok() stays None until the portal has answered and `on_ready` (if
-        given) reports the outcome.
+        given) reports the outcome as one of the STATE_* words.
         """
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="portal-listener", daemon=True)
@@ -138,8 +184,27 @@ class PortalListener:
         return False
 
     def devices_ok(self) -> bool | None:
-        """True once the portal bound the shortcuts, False if it refused, None before start()."""
-        return self._bound
+        """True once a key is actually attached, False if not, None before start().
+
+        A shortcut the desktop registered without a trigger is not usable, so it
+        is not "ok": saying otherwise is exactly how a dead hotkey read as healthy.
+        """
+        state = self.shortcut_state()
+        return None if state is None else state == STATE_BOUND
+
+    def shortcut_state(self) -> str | None:
+        """One of STATE_*, or None before the portal has answered."""
+        with self._state_lock:
+            if self._bound is None:
+                return None
+            if not self._bound:
+                return STATE_DENIED
+            return STATE_UNASSIGNED if not all(self._triggers.values()) else STATE_BOUND
+
+    def effective_triggers(self) -> dict[str, str]:
+        """The trigger the desktop actually holds per shortcut id ("" = none)."""
+        with self._state_lock:
+            return dict(self._triggers)
 
     # -- setup --------------------------------------------------------------
     @staticmethod
@@ -182,19 +247,62 @@ class PortalListener:
         if code != 0:
             raise PortalError(f"portal CreateSession denied (response {code})")
         self._session = results["session_handle"][1]
-        code, _ = call_with_response(
+        known = self._list_shortcuts()
+        code, results = call_with_response(
             self._conn, SHORTCUTS, "BindShortcuts", "oa(sa{sv})sa{sv}",
-            (self._session, self._bindings(), "", {}))
-        self._bound = code == 0
-        if not self._bound:
+            (self._session, self._bindings(known), "", {}))
+        if code != 0:
+            self._bound = False
             raise PortalError(f"portal BindShortcuts denied (response {code}); "
                               f"allow '{self._app_id}' to take a global shortcut")
-        log.info("portal shortcuts bound: %s", ", ".join(f"{k}={v}" for k, v in self._shortcuts.items()))
+        triggers = shortcut_triggers(results)
+        if triggers is None:
+            # The reply said nothing about triggers, which is not the same as
+            # "none assigned". Ask outright rather than guess either way.
+            triggers = self._list_shortcuts() or {}
+        with self._state_lock:
+            self._bound = True
+            self._triggers = {sid: triggers.get(sid, "") for sid in self._shortcuts}
+        log.info("portal shortcuts registered: %s", self._describe_triggers())
 
-    def _bindings(self) -> list[tuple[str, dict]]:
-        return [(sid, {"description": ("s", DESCRIPTIONS.get(sid, f"voice {sid}")),
-                       "preferred_trigger": ("s", trigger)})
-                for sid, trigger in self._shortcuts.items()]
+    def _describe_triggers(self) -> str:
+        return ", ".join(f"{sid}={trigger or NO_TRIGGER}"
+                         for sid, trigger in self.effective_triggers().items())
+
+    def _list_shortcuts(self) -> dict[str, str] | None:
+        """What the portal already holds for us, or None when it cannot say.
+
+        None is the safe answer: `_bindings` then expresses no preference at all,
+        because re-requesting a trigger is what destroys an existing assignment.
+        """
+        try:
+            code, results = call_with_response(
+                self._conn, SHORTCUTS, "ListShortcuts", "oa{sv}", (self._session, {}),
+                timeout=LIST_TIMEOUT_S)
+        except Exception as exc:
+            log.info("portal ListShortcuts unavailable (%s); binding without a preferred "
+                     "trigger so any key you already assigned survives", exc)
+            return None
+        if code != 0:
+            log.info("portal ListShortcuts refused (response %s); binding without a "
+                     "preferred trigger", code)
+            return None
+        return shortcut_triggers(results)
+
+    def _bindings(self, known: dict[str, str] | None) -> list[tuple[str, dict]]:
+        """One entry per configured id; `preferred_trigger` only where it is safe.
+
+        `known is None` (the portal could not be asked) counts every id as known:
+        the cost of not asking for a trigger is one trip to Keyboard Settings,
+        the cost of asking wrongly is the user's binding.
+        """
+        out = []
+        for sid, trigger in self._shortcuts.items():
+            options = {"description": ("s", DESCRIPTIONS.get(sid, f"voice {sid}"))}
+            if trigger and known is not None and sid not in known:
+                options["preferred_trigger"] = ("s", trigger)
+            out.append((sid, options))
+        return out
 
     def _register_app_id(self) -> None:
         """Tell the portal who we are; non-sandboxed apps get no app id otherwise.
@@ -260,7 +368,7 @@ class PortalListener:
         if self._on_ready is None or self._stop.is_set():
             return
         try:
-            self._on_ready(bool(self._bound))
+            self._on_ready(self.shortcut_state() or STATE_DENIED)
         except Exception:
             log.exception("hotkey readiness callback failed")
 

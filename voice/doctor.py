@@ -119,6 +119,22 @@ def _model_cache() -> tuple[bool, str]:
     return (True, str(hub)) if hub.exists() else (False, f"{profile['model']} not downloaded yet (first dictation downloads it)")
 
 
+def _language_profiles() -> tuple[bool, str]:
+    """Informational: which profile each language selects, if any.
+
+    Never a failure of its own - `config` already rejects a map naming a profile
+    that is gone - but it is the one place the pairing can be read at a glance.
+    """
+    from voice.config import Config
+    cfg = Config.load()
+    mapping = cfg.language_profiles()
+    if not mapping:
+        return True, "none: general.language_profiles is empty"
+    profiles = cfg.get("stt.profiles", {}) or {}
+    return True, ", ".join(f"{code} \u2192 {name}" + ("" if name in profiles else " (not defined)")
+                           for code, name in mapping.items())
+
+
 def _clipboard() -> tuple[bool, str]:
     copy_ok, _ = _which("wl-copy")
     paste_ok, _ = _which("wl-paste")
@@ -141,6 +157,7 @@ def default_probes() -> dict[str, Callable[[], tuple[bool, str]]]:
         "hotkey backend": _hotkey_backend,
         "pw-record": lambda: _which("pw-record"),
         "microphones": _sources,
+        "language profiles": _language_profiles,
         "wl-clipboard": _clipboard,
         "portal": _portal,
         "cuda": _cuda,

@@ -134,3 +134,31 @@ def test_the_probe_tells_an_unsupported_layer_shell_from_a_present_one():
     assert unsupported.layer_shell_unsupported is True
     present = HelperProbe(["x"], ("gtk4", "layer-shell"))
     assert present.layer_shell is True and present.layer_shell_unsupported is False
+
+
+def test_language_profiles_probe_lists_the_map(isolated_xdg):
+    from voice.config import Config
+    from voice.doctor import default_probes
+
+    cfg = Config.load()
+    cfg.set("general.language_profiles", {"en": "local", "sv": "openai"})
+    cfg.save()
+    assert default_probes()["language profiles"]() == (True, "en → local, sv → openai")
+
+
+def test_language_profiles_probe_says_when_nothing_is_mapped(isolated_xdg):
+    from voice.doctor import default_probes
+    assert default_probes()["language profiles"]() == (
+        True, "none: general.language_profiles is empty")
+
+
+def test_language_profiles_probe_marks_a_profile_that_is_gone(isolated_xdg):
+    """Informational, not required: `config` already fails on the same map."""
+    from voice.config import Config
+    from voice.doctor import default_probes
+
+    cfg = Config.load()
+    cfg.set("general.language_profiles", {"sv": "local-swedish"})
+    cfg.save()
+    assert default_probes()["language profiles"]() == (True, "sv → local-swedish (not defined)")
+    assert "language profiles" not in __import__("voice.doctor", fromlist=["REQUIRED"]).REQUIRED

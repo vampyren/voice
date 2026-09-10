@@ -871,3 +871,46 @@ def test_the_language_is_not_repeated_while_it_stays_the_same(isolated_xdg, qapp
     assert _overlay_lines(d, helper_processes) == [
         {"state": "transcribing"}, {"state": "done"}]
     d.shutdown()
+
+
+def test_reload_rebuilds_the_pill_only_when_the_ui_section_changed(
+        isolated_xdg, qapp, monkeypatch, helper_processes):
+    """[ui] is baked into the helper's command line, so `voice reload` used to
+    apply everything except the pill's own settings."""
+    seen = []
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    monkeypatch.setattr("voice.daemon.default_launcher",
+                        lambda **kw: seen.append(kw) or helper_processes())
+    cfg = Config.load()
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray())
+    d.build()
+    d.overlay.start()
+    first = d.overlay
+    assert seen[-1]["position"] == "bottom"
+
+    d.apply_config()
+    assert d.overlay is first                       # unchanged: the pill stays up
+    assert len(helper_processes.made) == 1
+
+    external = Config.load()
+    external.set("ui.overlay_position", "top")
+    external.save()
+    d.apply_config()
+    assert d.overlay is not first
+    assert seen[-1]["position"] == "top"            # the new helper knows
+    assert len(helper_processes.made) == 2
+    assert first.status() == "stopped"              # and the old one was stopped
+    d.shutdown()
+
+
+def test_switching_the_pill_off_by_reload_stops_the_helper(isolated_xdg, qapp, monkeypatch,
+                                                           helper_processes):
+    d = _overlay_daemon(Config.load(), monkeypatch, helper_processes)
+    external = Config.load()
+    external.set("ui.overlay", False)
+    external.save()
+    d.apply_config()
+    assert d.overlay.enabled is False
+    assert len(helper_processes.made) == 1          # no second helper was started
+    d.shutdown()

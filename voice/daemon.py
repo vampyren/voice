@@ -203,6 +203,8 @@ class Daemon:
         self._active_profile: tuple[str, dict] | None = None
         #: The language the pill was last told about; see _send_overlay.
         self._overlay_language = str(config.get("general.language", "en") or "en")
+        #: The [ui] settings the running helper was started with; see _make_overlay.
+        self._overlay_settings: tuple | None = None
         self._bridge = _Bridge()
 
     # -- construction -------------------------------------------------------
@@ -234,14 +236,33 @@ class Daemon:
         """The recording pill's supervisor. Disabled means: never spawn anything."""
         enabled = bool(self.config.get("ui.overlay", True))
         position = str(self.config.get("ui.overlay_position", "bottom") or "bottom")
-        language = str(self.config.get("general.language", "en") or "en")
         # The helper is started with --lang, so that is the badge it already
-        # shows: what we track here is the last language it was *told*.
-        self._overlay_language = language
+        # shows: what we track here is the last language it was *told*. A
+        # respawn reads it again rather than the one baked in at build time.
+        self._overlay_language = str(self.config.get("general.language", "en") or "en")
+        self._overlay_settings = self._overlay_snapshot()
         verbose = log.isEnabledFor(logging.DEBUG)
         allow_fallback = bool(self.config.get("ui.overlay_allow_fallback", False))
         return OverlayClient(enabled, launcher=lambda: default_launcher(
-            position=position, lang=language, verbose=verbose, allow_fallback=allow_fallback))
+            position=position, lang=self._overlay_language, verbose=verbose,
+            allow_fallback=allow_fallback))
+
+    def _overlay_snapshot(self) -> tuple:
+        """Everything _make_overlay bakes into the helper's command line.
+
+        Not the language: that travels as a message to the running helper, and
+        restarting the pill for it would take it off the screen mid-notice.
+        """
+        return (dict(self.config.get("ui", {}) or {}), log.isEnabledFor(logging.DEBUG))
+
+    def _rebuild_overlay_if_needed(self) -> None:
+        """A [ui] change needs a new helper; anything else leaves it running."""
+        if self.overlay is None or self._overlay_snapshot() == self._overlay_settings:
+            return
+        log.info("recording overlay settings changed; restarting the helper")
+        self.overlay.stop()
+        self.overlay = self._make_overlay()
+        self.overlay.start()
 
     def _on_level(self, level: float) -> None:
         """Audio reader thread. Must not block: the client queues and returns."""
@@ -429,6 +450,7 @@ class Daemon:
         self.dictation.set_injector(self.injector)
         self.tray.set_profiles(list(self.config.get("stt.profiles", {}) or {}), self.config.get("stt.active"))
         self.tray.set_languages(self.config.languages(), self.config.get("general.language"))
+        self._rebuild_overlay_if_needed()
         self._sync_overlay_language()
 
     def _set_profile(self, name: str) -> None:

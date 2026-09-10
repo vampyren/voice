@@ -287,6 +287,10 @@ class Dictation:
                 return
             if res.method == "clipboard-only":
                 self.sv.notify("Text copied", "Could not paste automatically. Paste with Ctrl+V.", "normal")
+            elif res.method == "clipboard":
+                # inject.mode = "clipboard": the user asked for this, so it reads
+                # as a result rather than as the paste failure above.
+                self.sv.notify("Copied", "Press Ctrl+V to paste.", "normal")
             self.last_error = None
             self._set(State.IDLE, f"{len(text)} chars via {res.method} in {entry.elapsed_s:.1f}s")
         except Exception as exc:  # never leave the daemon stuck in INJECTING - mirrors _process's net

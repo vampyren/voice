@@ -414,3 +414,42 @@ def test_a_job_that_raises_does_not_kill_the_worker(caplog):
         assert done.wait(2)
     assert "dictation job failed" in caplog.text
     worker.shutdown()
+
+
+def _recording_notify():
+    """A notify that keeps the urgency the pipeline chose, unlike make()'s default."""
+    calls = []
+    return calls, lambda title, body, urgency="normal": calls.append((title, body, urgency))
+
+
+def test_deliberate_clipboard_mode_says_press_ctrl_v_without_alarming_the_user():
+    # inject.mode = "clipboard" is a choice, not a failure: friendly wording,
+    # normal urgency, and the dictation still lands in history and IDLE.
+    calls, notify = _recording_notify()
+    d, sv, states, _ = make(inj=FakeInjector(method="clipboard"), notify=notify)
+    d.start(); d.stop()
+    assert len(calls) == 1
+    title, body, urgency = calls[0]
+    assert urgency == "normal"
+    assert "could not" not in (title + body).lower()      # nothing went wrong
+    assert "Ctrl+V" in body
+    assert states[-1] == State.IDLE
+    assert sv.history.last().text == "hello world"
+    assert sv.injector.texts == ["hello world"]
+
+
+def test_the_failure_path_keeps_its_own_wording():
+    calls, notify = _recording_notify()
+    d, sv, states, _ = make(inj=FakeInjector(method="clipboard-only"), notify=notify)
+    d.start(); d.stop()
+    assert calls == [("Text copied", "Could not paste automatically. Paste with Ctrl+V.", "normal")]
+    assert states[-1] == State.IDLE
+    assert sv.history.last().text == "hello world"
+
+
+def test_a_successful_paste_still_notifies_nothing():
+    calls, notify = _recording_notify()
+    d, sv, states, _ = make(notify=notify)
+    d.start(); d.stop()
+    assert calls == []
+    assert states[-1] == State.IDLE

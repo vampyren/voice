@@ -166,9 +166,13 @@ def _confirm_language(code: str, reply: dict) -> int:
             print(f"language: {latest}")
             return 0
         if time.monotonic() >= deadline:
-            print(f"{APP_NAME}: the daemon is still on "
-                  f"{latest if latest else 'no language it will name'}, not {wanted}; "
-                  "the switch did not take (see the daemon's log)", file=sys.stderr)
+            # Said as what was measured, not as a verdict: a Qt thread stuck in
+            # a model load applies the switch late, and this is also what that
+            # looks like from here. Still a failure - nothing confirmed it.
+            print(f"{APP_NAME}: {wanted} was accepted but is not in force after "
+                  f"{LANGUAGE_POLL_TIMEOUT_S:g}s; the daemon is still on "
+                  f"{latest if latest else 'a language it will not name'} "
+                  "(see the daemon's log)", file=sys.stderr)
             return 1
         time.sleep(LANGUAGE_POLL_INTERVAL_S)
 

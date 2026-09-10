@@ -150,6 +150,29 @@ def helper_command() -> list[str] | None:
     return probe_helper().command
 
 
+def pill_takes_focus(config, probe: Callable[[], object] | None = None) -> bool:
+    """True when the pill on screen can only be a window that steals the keyboard.
+
+    GTK 4 dropped the "do not focus me" hints, so only a layer-shell surface can
+    refuse focus - and gtk4-layer-shell being installed is not enough, the
+    compositor has to implement it, which GNOME does not. Three things have to
+    line up for the pill to be in the paste's way: it is switched on, this
+    desktop cannot give it a layer surface, and the user allowed the fallback
+    window anyway. Without that last one the helper exits instead of showing
+    one, so there is no pill to work around - and the config alone answers
+    that, which is why the probe (two interpreters, up to ten seconds each) is
+    only ever run for the people it can actually affect.
+    """
+    if not config.get("ui.overlay", True):
+        return False
+    if not config.get("ui.overlay_allow_fallback", False):
+        return False
+    # Resolved here rather than as a default argument: a default would bind the
+    # module's own `cached_probe` once, at import, and no test could substitute it.
+    found = (probe or cached_probe)()
+    return getattr(found, "command", None) is not None and not getattr(found, "layer_shell", False)
+
+
 #: probe_helper() spawns interpreters and waits up to PROBE_TIMEOUT_S each. What
 #: it measures - which packages are installed - cannot change under a running
 #: daemon, so it is answered once and then remembered: a helper that dies mid

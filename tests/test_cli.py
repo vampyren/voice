@@ -132,6 +132,31 @@ def test_status_prints_what_the_overlay_is_doing(isolated_xdg, capsys):
         srv.stop()
 
 
+def test_status_prints_how_the_text_gets_into_the_window(isolated_xdg, capsys):
+    """The owner's "ctrl-v dont work with auto paste" has to be visible here."""
+    line = "clipboard - press Ctrl+V (the pill takes focus on this desktop)"
+    srv = ipc.Server(lambda r: {"ok": True, "state": "idle", "profile": "local", "backend": "fake",
+                                "last_error": None, "keyboard": True, "insertion": line})
+    srv.start()
+    try:
+        assert main(["status"]) == 0
+        assert f"insertion: {line}" in capsys.readouterr().out
+    finally:
+        srv.stop()
+
+
+def test_status_says_nothing_about_insertion_against_an_older_daemon(isolated_xdg, capsys):
+    """A daemon from before this key simply does not have the row."""
+    srv = ipc.Server(lambda r: {"ok": True, "state": "idle", "profile": "local", "backend": "fake",
+                                "last_error": None, "keyboard": True})
+    srv.start()
+    try:
+        assert main(["status"]) == 0
+        assert "insertion" not in capsys.readouterr().out
+    finally:
+        srv.stop()
+
+
 def test_a_pending_next_waits_until_the_language_actually_moves(isolated_xdg, capsys):
     """`next` is resolved on the daemon's Qt thread, so its reply cannot name
     the language and a single `status` read back races that thread: live, the

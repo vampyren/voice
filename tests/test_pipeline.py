@@ -453,3 +453,26 @@ def test_a_successful_paste_still_notifies_nothing():
     d.start(); d.stop()
     assert calls == []
     assert states[-1] == State.IDLE
+
+
+def test_the_focus_stealing_pill_explains_itself_once_and_only_once():
+    """`clipboard-pill`: the paste was refused because the pill has the keyboard.
+
+    That needs its own wording - "could not paste" would send the owner
+    debugging the portal - and it needs to be said once, not on every single
+    dictation for the rest of the session.
+    """
+    calls, notify = _recording_notify()
+    d, sv, states, _ = make(inj=FakeInjector(method="clipboard-pill"), notify=notify)
+    d.start(); d.stop()
+    assert len(calls) == 1
+    title, body, urgency = calls[0]
+    assert urgency == "normal"
+    assert "pill" in body.lower() and "Ctrl+V" in body
+    assert "could not" not in (title + body).lower()      # nothing is broken
+    assert states[-1] == State.IDLE
+    assert sv.history.last().text == "hello world"
+
+    d.start(); d.stop()
+    assert len(calls) == 1, f"said it again: {calls}"
+    assert sv.injector.texts == ["hello world", "hello world"]

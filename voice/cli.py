@@ -78,6 +78,11 @@ def _print_status(reply: dict) -> None:
             ("language", reply.get("language")),
             ("hotkeys", reply.get("hotkey_backend", "unknown")),
             ("overlay", reply.get("overlay", "unknown"))]
+    if reply.get("insertion"):
+        # How the text actually reaches the window - which is not always what
+        # `inject.mode` asks for: a pill that takes keyboard focus can cost the
+        # paste. Absent from a daemon older than that answer, and then not shown.
+        rows.append(("insertion", reply["insertion"]))
     keyboard = reply.get("keyboard")
     if reply.get("hotkey_backend") == "portal":
         # There is no keyboard to have access to on this backend: the desktop

@@ -19,6 +19,12 @@ from voice.text import apply_replacements, normalize_text
 
 log = logging.getLogger(__name__)
 
+#: Said once when the recording pill has the keyboard and the paste was
+#: therefore not attempted. It has to name the pill: "could not paste" would
+#: send the owner off debugging the portal instead.
+PILL_FOCUS_NOTICE = ("The pill takes focus on this desktop, so the text is on "
+                     "the clipboard - press Ctrl+V.")
+
 
 class State(str, Enum):
     IDLE = "idle"
@@ -103,6 +109,10 @@ class Dictation:
         self._state = State.IDLE
         self.on_state: Callable[[State, str], None] = lambda s, d: None
         self.last_error: str | None = None
+        #: The focus-stealing-pill explanation is worth saying once per daemon
+        #: run, not once per dictation: it describes the desktop, and nothing
+        #: about it changes between two sentences.
+        self._pill_notice_shown = False
         # Owned by this pipeline rather than the module, so quitting can end it.
         self._worker = Worker()
         self._executor = executor or self._worker.submit
@@ -291,6 +301,12 @@ class Dictation:
                 # inject.mode = "clipboard": the user asked for this, so it reads
                 # as a result rather than as the paste failure above.
                 self.sv.notify("Copied", "Press Ctrl+V to paste.", "normal")
+            elif res.method == "clipboard-pill" and not self._pill_notice_shown:
+                # Nothing is broken: this desktop cannot give the pill a surface
+                # that refuses focus, so pasting into it would be pasting into
+                # the wrong window. Said once - see _pill_notice_shown.
+                self._pill_notice_shown = True
+                self.sv.notify("Text copied", PILL_FOCUS_NOTICE, "normal")
             self.last_error = None
             self._set(State.IDLE, f"{len(text)} chars via {res.method} in {entry.elapsed_s:.1f}s")
         except Exception as exc:  # never leave the daemon stuck in INJECTING - mirrors _process's net

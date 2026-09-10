@@ -128,6 +128,45 @@ def test_overlay_probe_separates_an_unusable_layer_shell_from_a_missing_one(monk
     assert "it will take focus" in detail
 
 
+def test_overlay_probe_says_what_the_focus_stealing_pill_costs_the_paste(monkeypatch, isolated_xdg):
+    """The owner's "ctrl-v dont work with auto paste", answered where they look.
+
+    A pill that can only be an ordinary window has the keyboard when the chord
+    is sent. `voice doctor` has to say which of the three answers is in force.
+    """
+    from voice.config import Config
+    from voice.doctor import default_probes
+    from voice.ui.overlay_client import HelperProbe
+
+    monkeypatch.setattr("voice.doctor.probe_helper", lambda: HelperProbe(
+        ["/usr/bin/python3", "-m", "voice.ui.overlay"], ("gtk4", "layer-shell-unsupported")))
+    cfg = Config.load()
+    cfg.set("ui.overlay_allow_fallback", True)
+    cfg.save()
+    detail = default_probes()["overlay"]()[1]
+    assert "hidden for the chord" in detail, detail
+
+    cfg.set("inject.pill_focus", "clipboard")
+    cfg.save()
+    detail = default_probes()["overlay"]()[1]
+    assert "Ctrl+V" in detail and "clipboard" in detail, detail
+
+    cfg.set("inject.pill_focus", "paste")
+    cfg.save()
+    assert "forced" in default_probes()["overlay"]()[1]
+
+
+def test_overlay_probe_stays_quiet_about_the_paste_where_layer_shell_works(monkeypatch, isolated_xdg):
+    """On KDE the pill floats and none of this applies; saying so is noise."""
+    from voice.doctor import default_probes
+    from voice.ui.overlay_client import HelperProbe
+
+    monkeypatch.setattr("voice.doctor.probe_helper", lambda: HelperProbe(
+        ["/usr/bin/python3", "-m", "voice.ui.overlay"], ("gtk4", "layer-shell")))
+    detail = default_probes()["overlay"]()[1]
+    assert "chord" not in detail and "Ctrl+V" not in detail, detail
+
+
 def test_the_probe_tells_an_unsupported_layer_shell_from_a_present_one():
     from voice.ui.overlay_client import HelperProbe
 

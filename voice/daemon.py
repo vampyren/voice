@@ -20,14 +20,15 @@ from voice.hotkey.keyspec import KeySpec, Tracker, parse_keyspec
 from voice.hotkey.portal_listener import STATE_BOUND, STATE_UNASSIGNED, PortalListener
 from voice.inject.clipboard import Clipboard
 from voice.inject.fallback import make_key_sender
-from voice.inject.injector import Injector, run_window_command
+from voice.inject.injector import (Injector, insertion_status, pill_policy,
+                                   pill_settle_s, run_window_command)
 from voice.ipc import (NEXT_LANGUAGE, PENDING_LANGUAGE, IPCError, Server, is_running,
                        send)
 from voice.pipeline import Dictation, Services, State
 from voice.stt import make_transcriber
 from voice.stt.base import TranscriptionError
 from voice.ui.notify import Notifier
-from voice.ui.overlay_client import OverlayClient, default_launcher
+from voice.ui.overlay_client import OverlayClient, default_launcher, pill_takes_focus
 from voice.ui.settings import SettingsDialog
 from voice.ui.tray import Tray
 
@@ -174,6 +175,12 @@ def window_class_getter(config: Config) -> Callable[[], str | None]:
     return lambda: run_window_command(config.get("inject.active_window_command", "") or "")
 
 
+#: How long the daemon waits for `{"state": "hidden"}` to reach the helper
+#: before the injector starts its own settle. The helper unmaps the window on
+#: its next frame, ~33 ms later.
+OVERLAY_HIDE_FLUSH_S = 0.5
+
+
 class _BrokenTranscriber:
     """Placeholder used when the active stt profile can't be built; keeps the daemon alive."""
 
@@ -237,6 +244,9 @@ class Daemon:
         #: The last microphone listing, so the settings window can open on it
         #: instead of waiting for `pw-dump`. Only ever written on the Qt thread.
         self._source_cache: list = []
+        #: What the focus-stealing pill costs the paste, if anything; set by
+        #: _make_injector, reported by `status`. See pill_policy().
+        self._pill_policy = "none"
         #: One background refresh of each kind at a time; see _refresh_off_thread.
         self._refreshers: dict[str, threading.Thread] = {}
         self._bridge = _Bridge()
@@ -248,8 +258,7 @@ class Daemon:
         self.listener, self.hotkey_backend = self._make_listener()
         self._hotkey_settings = self._hotkey_snapshot()
         self._sender = self._sender or make_key_sender()
-        self.injector = Injector(self._clipboard, self._sender, self.config.get("inject", {}) or {},
-                                 self.listener.modifiers_held, window_class_getter(self.config))
+        self.injector = self._make_injector()
         self._active_profile = self._profile_snapshot()
         services = Services(recorder=self._recorder, transcriber=self._make_transcriber(),
                             injector=self.injector, history=self.history, notify=self._notifier.notify,
@@ -269,6 +278,34 @@ class Daemon:
         self._bridge.triggers_refreshed.connect(self._on_triggers_refreshed)
         self._bridge.sources_listed.connect(self._on_sources_listed)
         self._server = Server(self.handle)
+
+    def _make_injector(self) -> Injector:
+        """The injector, told what the recording pill is going to do to it.
+
+        Built here rather than inline so `build()` and `apply_config()` cannot
+        drift: the pill policy is re-read on every reload, so changing it in the
+        settings window takes effect without restarting the daemon.
+        """
+        self._pill_policy = pill_policy(self.config, pill_takes_focus(self.config))
+        return Injector(self._clipboard, self._sender, self.config.get("inject", {}) or {},
+                        self.listener.modifiers_held, window_class_getter(self.config),
+                        pill_policy=self._pill_policy, hide_pill=self._hide_pill_for_paste,
+                        settle_s=pill_settle_s(self.config))
+
+    def _hide_pill_for_paste(self) -> None:
+        """Take the pill off screen so the paste chord reaches the user's window.
+
+        Called by the injector on the dictation worker, immediately before the
+        chord, and only when the pill is a focus-stealing window. The helper
+        unmaps on its next frame, so the flush below and the injector's own
+        settle are both needed - the flush only proves the line was written.
+        The pill comes straight back: the IDLE that follows a successful
+        insertion sends `done`, which is the checkmark.
+        """
+        if self.overlay is None:
+            return
+        self.overlay.send({"state": "hidden"})
+        self.overlay.flush(OVERLAY_HIDE_FLUSH_S)
 
     def _make_overlay(self) -> OverlayClient:
         """The recording pill's supervisor. Disabled means: never spawn anything."""
@@ -671,8 +708,7 @@ class Daemon:
             self._active_profile = current
             self.dictation.set_transcriber(self._make_transcriber())
             self._start_warmup()
-        self.injector = Injector(self._clipboard, self._sender, self.config.get("inject", {}) or {},
-                                 self.listener.modifiers_held, window_class_getter(self.config))
+        self.injector = self._make_injector()
         self.dictation.set_injector(self.injector)
         self.tray.set_profiles(list(self.config.get("stt.profiles", {}) or {}), self.config.get("stt.active"))
         self.tray.set_languages(self.config.languages(), self.config.get("general.language"))
@@ -866,7 +902,8 @@ class Daemon:
                     "version": __version__, "keyboard": self.listener.devices_ok(),
                     "hotkey_backend": self.hotkey_backend, **self._shortcut_status(),
                     "language": self.config.get("general.language"),
-                    "overlay": self.overlay.status() if self.overlay else "off"}
+                    "overlay": self.overlay.status() if self.overlay else "off",
+                    "insertion": insertion_status(self.config, self._pill_policy)}
         if cmd == "profile":
             name = request.get("name", "")
             if name not in (self.config.get("stt.profiles", {}) or {}):

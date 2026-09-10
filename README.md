@@ -119,6 +119,45 @@ once and carries on without a pill. `voice doctor` and `voice status` report the
 thing (`overlay: disabled: no layer-shell`). Set `ui.overlay_allow_fallback = true` if
 you want the pill anyway and accept that it takes focus.
 
+#### The pill and auto-paste, per desktop
+
+Whether the pill can float without stealing the keyboard is the compositor's decision,
+not ours, and it decides what happens to `inject.mode = "paste"`:
+
+| Desktop | Layer-shell | What you get |
+| --- | --- | --- |
+| KDE Plasma, wlroots (Sway, Hyprland, river) | yes | the pill floats, never takes focus, and auto-paste works. Nothing below applies. |
+| GNOME / Mutter | no — `Gtk4LayerShell.is_supported()` is False even with the library installed | the pill can only be an ordinary window, and it has the keyboard while it is on screen |
+
+On GNOME, then, a pill on screen would swallow the Ctrl+V — the chord goes to the pill,
+and with `inject.restore_clipboard = true` the transcript is replaced by the old
+clipboard contents 150 ms later, so the text is lost outright. `inject.pill_focus`
+decides what happens instead:
+
+- **`"hide"` (the default)** — just before the chord the daemon sends the pill
+  `{"state": "hidden"}`, the helper unmaps the window on its next frame, and the injector
+  waits `inject.pill_settle_ms` (150 ms) for the compositor to hand focus back to whatever
+  had it. Then the chord is sent, and the pill comes straight back with the checkmark. You
+  keep both the pill and automatic pasting. Raise `pill_settle_ms` if your compositor is
+  slower than that; it is a guess about someone else's window manager, not a fact.
+- **`"clipboard"`** — do not paste at all. The text is copied, nothing is restored over
+  it, and a notification says so once per daemon run: *"The pill takes focus on this
+  desktop, so the text is on the clipboard - press Ctrl+V."* This is the honest fallback if
+  hiding does not work on your setup.
+- **`"paste"`** — the escape hatch: send the chord anyway, pill and all, for a compositor
+  that hands it on regardless.
+
+Which one is in force is visible in both `voice status` and `voice doctor`:
+
+```
+insertion: paste (the pill takes focus here, so it is hidden for the chord)
+insertion: clipboard - press Ctrl+V (the pill takes focus on this desktop)
+```
+
+None of this happens when the pill is switched off (`ui.overlay = false`), when
+`ui.overlay_allow_fallback` is false (there is no pill to be in the way), or when
+`inject.mode` is already `"clipboard"` — there is no chord to protect.
+
 ### Language
 
 `general.language` is the language passed to the transcriber (`"auto"` detects it), and
@@ -268,6 +307,14 @@ terminal_chord = "ctrl+shift+v"
 terminal_classes = ["konsole", "org.kde.konsole", "kitty", "alacritty", "foot", "wezterm", "org.gnome.Ptyxis", "gnome-terminal"]
 active_window_command = ""   # command printing the focused window class; "" = unknown
 restore_clipboard = true
+pill_focus = "hide"        # what to do when the recording pill can only be an ordinary
+                           # window that takes keyboard focus (GNOME, where there is no
+                           # layer-shell) and mode = "paste": "hide" takes the pill off
+                           # screen for the chord and brings it straight back,
+                           # "clipboard" does not paste at all and says so once,
+                           # "paste" sends the chord anyway and hopes
+pill_settle_ms = 150       # how long to let the compositor hand focus back after the
+                           # pill is hidden, before the chord is sent
 ```
 
 **Hotkey backend.** `hotkeys.backend` decides how the hotkey is seen:
@@ -400,6 +447,11 @@ instead, since most terminals reserve Ctrl+V. `inject.active_window_command` sho
 command that prints the focused window's class to stdout; leave it empty if you don't
 have one (the default chord is used, unknown window). The previous clipboard contents
 are restored after the paste.
+
+On a desktop where the recording pill cannot refuse keyboard focus (GNOME), the pill is
+taken off screen for the chord and brought straight back — see
+[The pill and auto-paste, per desktop](#the-pill-and-auto-paste-per-desktop) for the two
+other things `inject.pill_focus` can do instead.
 
 ## Troubleshooting
 

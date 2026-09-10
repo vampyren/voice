@@ -182,3 +182,105 @@ def test_paste_is_the_mode_a_config_without_the_key_gets():
     res2 = Injector(clip2, sender2, {**SETTINGS, "mode": "paste"}, lambda: False,
                     lambda: "firefox", sleep=lambda s: None).inject("hello")
     assert res2 == res and clip2.log == clip.log and sender2.chords == sender.chords
+
+
+# -- a pill that takes keyboard focus (GNOME: no layer-shell) -----------------
+class Recorder:
+    """One log of everything the injector does, so ordering can be asserted."""
+
+    def __init__(self):
+        self.log = []
+
+    def hide_pill(self):
+        self.log.append("hide pill")
+
+    def sleep(self, seconds):
+        self.log.append(("sleep", round(seconds, 3)))
+
+    def sender(self):
+        rec = self
+
+        class Sender:
+            name = "fake"
+
+            def send_chord(self, codes):
+                rec.log.append(("chord", codes))
+
+            def available(self):
+                return True
+
+        return Sender()
+
+
+def _injector(rec, policy, settle=0.15, **kwargs):
+    return Injector(FakeClipboard(), rec.sender(), SETTINGS, modifiers_held=lambda: False,
+                    window_class=lambda: "firefox", sleep=rec.sleep,
+                    pill_policy=policy, hide_pill=rec.hide_pill, settle_s=settle, **kwargs)
+
+
+def test_the_pill_is_hidden_before_the_chord_and_the_compositor_given_a_moment():
+    """The owner's "ctrl-v dont work with auto paste".
+
+    Without layer-shell the pill is an ordinary window and it has the keyboard
+    when the chord is sent, so the paste lands in the pill. Taking it off screen
+    first and letting the compositor hand focus back is what fixes it - and the
+    order is the whole fix: hide, settle, *then* chord.
+    """
+    rec = Recorder()
+    res = _injector(rec, "hide", settle=0.2).inject("hello")
+    assert rec.log == ["hide pill", ("sleep", 0.2), ("chord", [29, 47]), ("sleep", 0.15)]
+    assert res.method == "fake" and res.restored is True
+
+
+def test_a_pill_that_cannot_take_focus_is_left_alone():
+    """With a real layer-shell surface the pill never has the keyboard, so
+    hiding it would be a flicker for nothing."""
+    rec = Recorder()
+    _injector(rec, "none").inject("hello")
+    assert "hide pill" not in rec.log
+
+
+def test_the_clipboard_policy_refuses_to_paste_into_the_pill():
+    """The honest second line of defence: no chord at all, and no restore.
+
+    Sending it anyway loses the transcript outright - the chord goes to the
+    pill and `restore_clipboard` puts the old contents back 150 ms later.
+    """
+    rec = Recorder()
+    clip = FakeClipboard()
+    inj = Injector(clip, rec.sender(), SETTINGS, lambda: False, lambda: None,
+                   sleep=rec.sleep, pill_policy="clipboard", hide_pill=rec.hide_pill)
+    res = inj.inject("hello")
+    assert res == InjectResult(method="clipboard-pill", chord="", restored=False)
+    assert clip.log == [("set", "hello")]        # no snapshot, and nothing restored
+    assert rec.log == []                         # no chord, no hide, no sleep
+
+
+def test_the_paste_policy_is_the_escape_hatch_and_changes_nothing():
+    """For a user whose compositor does hand the chord on regardless."""
+    rec = Recorder()
+    res = _injector(rec, "paste").inject("hello")
+    assert "hide pill" not in rec.log
+    assert ("chord", [29, 47]) in rec.log
+    assert res.method == "fake"
+
+
+def test_hiding_the_pill_is_never_allowed_to_stop_the_paste():
+    """The pill is decoration; a helper that has died must not eat the text."""
+    def boom():
+        raise RuntimeError("the helper is gone")
+
+    rec = Recorder()
+    inj = Injector(FakeClipboard(), rec.sender(), SETTINGS, lambda: False, lambda: None,
+                   sleep=rec.sleep, pill_policy="hide", hide_pill=boom, settle_s=0.2)
+    assert inj.inject("hello").method == "fake"
+    assert ("chord", [29, 47]) in rec.log
+
+
+def test_an_explicit_clipboard_mode_still_wins_over_the_pill_policy():
+    """`inject.mode = "clipboard"` is the user's own choice, not a workaround."""
+    rec = Recorder()
+    inj = Injector(FakeClipboard(), rec.sender(), dict(SETTINGS, mode="clipboard"),
+                   lambda: False, lambda: None, sleep=rec.sleep,
+                   pill_policy="clipboard", hide_pill=rec.hide_pill)
+    assert inj.inject("hello").method == "clipboard"

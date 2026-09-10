@@ -368,6 +368,38 @@ def test_an_empty_mapping_value_means_no_profile_for_that_language(isolated_xdg)
     assert [e for e in cfg.errors() if "language_profiles" in e] == []
 
 
+def test_the_pill_is_hidden_for_the_paste_by_default(isolated_xdg):
+    """The fix, not the fallback: the owner keeps both the pill and auto-paste."""
+    cfg = Config.load()
+    assert cfg.get("inject.pill_focus") == "hide"
+    assert cfg.get("inject.pill_settle_ms") == 150
+
+
+def test_errors_rejects_an_unknown_pill_focus(isolated_xdg):
+    cfg = Config.load()
+    cfg.set("inject.pill_focus", "telepathy")
+    assert any("inject.pill_focus" in e and "telepathy" in e for e in cfg.errors())
+
+
+def test_errors_accepts_every_pill_focus_and_a_file_without_the_key(isolated_xdg):
+    cfg = Config.load()
+    for choice in ("hide", "clipboard", "paste"):
+        cfg.set("inject.pill_focus", choice)
+        assert [e for e in cfg.errors() if "inject.pill_focus" in e] == []
+    doc = cfg._doc
+    del doc["inject"]["pill_focus"]
+    assert [e for e in cfg.errors() if "inject.pill_focus" in e] == []
+
+
+def test_errors_rejects_a_settle_that_is_not_a_time(isolated_xdg):
+    cfg = Config.load()
+    for bad in ("soon", -20):
+        cfg.set("inject.pill_settle_ms", bad)
+        assert any("inject.pill_settle_ms" in e for e in cfg.errors()), bad
+    cfg.set("inject.pill_settle_ms", 0)
+    assert [e for e in cfg.errors() if "inject.pill_settle_ms" in e] == []
+
+
 def test_default_inject_mode_is_paste(isolated_xdg):
     assert Config.load().get("inject.mode") == "paste"
 

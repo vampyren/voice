@@ -11,7 +11,8 @@ from typing import Callable
 
 from voice import APP_ID, __version__
 from voice.hotkey.portal_listener import NO_TRIGGER, STATE_BOUND, STATE_UNASSIGNED
-from voice.ui.overlay_client import probe_helper
+from voice.inject.injector import insertion_status, pill_policy
+from voice.ui.overlay_client import pill_takes_focus, probe_helper
 
 REQUIRED = {"portal", "wl-clipboard", "pw-record", "keyboard access", "config"}
 
@@ -164,7 +165,12 @@ def _overlay() -> tuple[bool, str]:
                  f"- {fallback}")
     else:
         shell = f"layer-shell absent - {fallback}"
-    return True, f"enabled, helper via {probe.command[0]} (gtk4 ok, {shell})"
+    line = f"enabled, helper via {probe.command[0]} (gtk4 ok, {shell})"
+    # Only where it applies: on a compositor that gives the pill a real layer
+    # surface none of this happens, and a sentence about it is noise.
+    if pill_takes_focus(cfg, lambda: probe):
+        line += f"; text insertion: {insertion_status(cfg, pill_policy(cfg, True))}"
+    return True, line
 
 
 def _sources() -> tuple[bool, str]:

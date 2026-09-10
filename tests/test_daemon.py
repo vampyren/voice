@@ -1465,6 +1465,204 @@ def test_a_profile_that_vanished_from_the_file_is_not_written(isolated_xdg, qapp
     d.shutdown()
 
 
+# -- a pill that takes keyboard focus (GNOME: no layer-shell) ------------------
+class FakeProbe:
+    """What `cached_probe()` answers: does the helper get a layer-shell surface?"""
+
+    def __init__(self, command=("python3",), layer_shell=False):
+        self.command = list(command) if command else None
+        self.layer_shell = layer_shell
+
+
+def _focus_daemon(monkeypatch, *, overlay=True, allow_fallback=True, layer_shell=False,
+                  command=("python3",), mode="paste", pill_focus=None, settle_ms=None):
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.ui.overlay_client.cached_probe",
+                        lambda: FakeProbe(command, layer_shell))
+    cfg = Config.load()
+    cfg.set("ui.overlay", overlay)
+    cfg.set("ui.overlay_allow_fallback", allow_fallback)
+    cfg.set("inject.mode", mode)
+    if pill_focus is not None:
+        cfg.set("inject.pill_focus", pill_focus)
+    if settle_ms is not None:
+        cfg.set("inject.pill_settle_ms", settle_ms)
+    cfg.save()
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray(),
+               notifier=QuietNotifier())
+    d.build()
+    return d
+
+
+def test_a_pill_that_cannot_refuse_focus_makes_the_injector_hide_it(isolated_xdg, qapp, monkeypatch):
+    """The owner's "ctrl-v dont work with auto paste".
+
+    No layer-shell and the fallback window allowed: the pill is an ordinary
+    window with the keyboard, so the injector is built to take it off screen
+    for the chord rather than paste into it.
+    """
+    d = _focus_daemon(monkeypatch)
+    try:
+        assert d.injector._pill_policy == "hide"
+        assert d.injector._settle_s == pytest.approx(0.15)
+    finally:
+        d.shutdown()
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"layer_shell": True},                 # a real layer surface never takes focus
+    {"allow_fallback": False},             # the helper exits instead of showing one
+    {"overlay": False},                    # no pill at all
+    {"command": None},                     # no helper can run here
+    {"mode": "clipboard"},                 # not pasting anyway
+])
+def test_a_pill_that_is_not_in_the_way_leaves_the_paste_alone(isolated_xdg, qapp, monkeypatch, kwargs):
+    d = _focus_daemon(monkeypatch, **kwargs)
+    try:
+        assert d.injector._pill_policy == "none"
+    finally:
+        d.shutdown()
+
+
+@pytest.mark.parametrize("choice,expected", [
+    ("hide", "hide"),
+    ("clipboard", "clipboard"),
+    ("paste", "paste"),
+    ("nonsense", "hide"),                  # a hand edit falls back to the fix
+])
+def test_inject_pill_focus_chooses_what_happens(isolated_xdg, qapp, monkeypatch, choice, expected):
+    d = _focus_daemon(monkeypatch, pill_focus=choice)
+    try:
+        assert d.injector._pill_policy == expected
+    finally:
+        d.shutdown()
+
+
+def test_the_settle_is_configurable_without_a_rebuild(isolated_xdg, qapp, monkeypatch):
+    """How long a compositor takes to hand focus back is a guess, so it is a key."""
+    d = _focus_daemon(monkeypatch, settle_ms=320)
+    try:
+        assert d.injector._settle_s == pytest.approx(0.32)
+    finally:
+        d.shutdown()
+
+
+def test_hiding_the_pill_takes_it_off_screen_and_waits_for_the_write(isolated_xdg, qapp, monkeypatch):
+    """What the injector calls just before the chord."""
+    d = _focus_daemon(monkeypatch)
+    sent, flushed = [], []
+
+    class FakeOverlay:
+        def send(self, message): sent.append(message)
+        def flush(self, timeout=1.0): flushed.append(timeout); return True
+        def stop(self): pass
+        def status(self): return "running"
+
+    d.overlay = FakeOverlay()
+    try:
+        d._hide_pill_for_paste()
+        assert sent == [{"state": "hidden"}]
+        assert flushed, "the message has to have reached the helper before the chord"
+    finally:
+        d.shutdown()
+
+
+def test_status_says_the_pill_is_hidden_for_the_chord(isolated_xdg, qapp, monkeypatch):
+    d = _focus_daemon(monkeypatch)
+    try:
+        insertion = d.handle({"cmd": "status"})["insertion"]
+        assert insertion.startswith("paste")
+        assert "pill" in insertion and "focus" in insertion
+    finally:
+        d.shutdown()
+
+
+def test_status_says_when_the_pill_has_cost_the_owner_auto_paste(isolated_xdg, qapp, monkeypatch):
+    d = _focus_daemon(monkeypatch, pill_focus="clipboard")
+    try:
+        insertion = d.handle({"cmd": "status"})["insertion"]
+        assert insertion.startswith("clipboard")
+        assert "Ctrl+V" in insertion and "pill" in insertion
+    finally:
+        d.shutdown()
+
+
+def test_status_is_quiet_when_nothing_is_in_the_way(isolated_xdg, qapp, monkeypatch):
+    d = _focus_daemon(monkeypatch, layer_shell=True)
+    try:
+        assert d.handle({"cmd": "status"})["insertion"] == "paste"
+    finally:
+        d.shutdown()
+
+
+def test_the_pill_goes_off_screen_settles_and_only_then_is_the_chord_sent(
+        isolated_xdg, qapp, monkeypatch):
+    """The whole fix, in order, through the daemon's real wiring.
+
+    The pipeline drives INJECTING, then `injector.inject`, then the IDLE that
+    carries the checkmark; this drives those three by hand so the ordering is
+    observable in one log. The injector's clock is replaced, so every settle is
+    recorded rather than waited for and nothing here reads the wall clock.
+    """
+    from voice.pipeline import State
+
+    d = _focus_daemon(monkeypatch, settle_ms=180)
+    log = []
+
+    class RecordingOverlay:
+        def send(self, message): log.append(message)
+        def flush(self, timeout=1.0): return True
+        def stop(self): pass
+        def status(self): return "running"
+
+    class RecordingSender:
+        name = "fake"
+        def send_chord(self, codes): log.append(("chord", codes))
+        def available(self): return True
+
+    class RecordingClipboard:
+        def snapshot(self): return type("S", (), {"text": "old"})()
+        def set_text(self, text): log.append(("copy", text))
+        def restore(self, snap): log.append("restore"); return True
+
+    d.overlay = RecordingOverlay()
+    d.injector._sender = RecordingSender()
+    d.injector._clip = RecordingClipboard()
+    d.injector._sleep = lambda seconds: log.append(("settle", round(seconds, 3)))
+    try:
+        d._on_dictation_state(State.INJECTING)
+        d.injector.inject("hello")
+        d._on_dictation_state(State.IDLE, "5 chars via fake in 0.1s")
+    finally:
+        d.shutdown()
+
+    assert log == [
+        ("copy", "hello"),
+        {"state": "hidden"},                 # the pill lets go of the keyboard
+        ("settle", 0.18),                    # the compositor hands focus back
+        ("chord", [29, 47]),                 # and only now, ctrl+v
+        ("settle", 0.15),                    # the injector's own paste settle
+        "restore",
+        {"state": "done"},                   # the pill comes straight back
+    ], log
+
+
+def test_a_reload_re_reads_the_pill_policy(isolated_xdg, qapp, monkeypatch):
+    """Changing it in the settings window must not need a daemon restart."""
+    d = _focus_daemon(monkeypatch)
+    try:
+        assert d.injector._pill_policy == "hide"
+        external = Config.load()
+        external.set("inject.pill_focus", "clipboard")
+        external.save()
+        d.apply_config()
+        assert d.injector._pill_policy == "clipboard"
+    finally:
+        d.shutdown()
+
+
 # -- rebinding the portal shortcuts on save ------------------------------------
 class FakePortalListener(FakeListener):
     """Records the shortcuts it was built with, like the real one binds them."""

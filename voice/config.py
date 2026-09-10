@@ -11,6 +11,7 @@ import tomlkit
 from tomlkit.exceptions import TOMLKitError
 
 from voice import paths
+from voice.inject.injector import PILL_FOCUS_CHOICES
 from voice.inject.keys import parse_chord
 
 DEFAULT_CONFIG = '''# voice configuration. Edited by the settings window; hand edits are fine too.
@@ -102,6 +103,14 @@ terminal_chord = "ctrl+shift+v"
 terminal_classes = ["konsole", "org.kde.konsole", "kitty", "alacritty", "foot", "wezterm", "org.gnome.Ptyxis", "gnome-terminal"]
 active_window_command = ""   # command printing the focused window class; "" = unknown
 restore_clipboard = true
+pill_focus = "hide"        # what to do when the recording pill can only be an ordinary
+                           # window that takes keyboard focus (GNOME, where there is no
+                           # layer-shell) and mode = "paste": "hide" takes the pill off
+                           # screen for the chord and brings it straight back,
+                           # "clipboard" does not paste at all and says so once,
+                           # "paste" sends the chord anyway and hopes
+pill_settle_ms = 150       # how long to let the compositor hand focus back after the
+                           # pill is hidden, before the chord is sent
 '''
 
 #: Shipped portal triggers, also the fallback for a config.toml written before
@@ -112,6 +121,8 @@ DEFAULT_PORTAL_TRIGGERS = {"dictate": "CTRL+space", "recall": "", "cancel": "",
 _VALID_MODES = {"hold", "toggle"}
 #: `inject.mode`: send the paste chord, or leave the text on the clipboard and say so.
 INJECT_MODES = ("paste", "clipboard")
+#: `inject.pill_focus`: see PILL_FOCUS_CHOICES, and the README's GNOME section.
+DEFAULT_PILL_SETTLE_MS = 150
 _VALID_HOTKEY_BACKENDS = {"auto", "evdev", "portal"}
 _VALID_BACKENDS = {"local", "openai_compatible"}
 
@@ -282,6 +293,14 @@ class Config:
         inject_mode = self.get("inject.mode", "paste")
         if inject_mode not in INJECT_MODES:
             errs.append(f"inject.mode must be one of {sorted(INJECT_MODES)}, got {inject_mode!r}")
+        pill_focus = self.get("inject.pill_focus", "hide")
+        if pill_focus not in PILL_FOCUS_CHOICES:
+            errs.append(f"inject.pill_focus must be one of {sorted(PILL_FOCUS_CHOICES)}, "
+                        f"got {pill_focus!r}")
+        settle = self.get("inject.pill_settle_ms", DEFAULT_PILL_SETTLE_MS)
+        if not isinstance(settle, (int, float)) or isinstance(settle, bool) or settle < 0:
+            errs.append("inject.pill_settle_ms must be a non-negative number of milliseconds, "
+                        f"got {settle!r}")
         for key in ("inject.paste_chord", "inject.terminal_chord"):
             chord = self.get(key)
             if chord is None:

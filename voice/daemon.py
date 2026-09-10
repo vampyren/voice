@@ -310,7 +310,7 @@ class Daemon:
     def _make_overlay(self) -> OverlayClient:
         """The recording pill's supervisor. Disabled means: never spawn anything."""
         enabled = bool(self.config.get("ui.overlay", True))
-        position = str(self.config.get("ui.overlay_position", "bottom") or "bottom")
+        position, margin_x, margin_y = self.config.overlay_placement()
         # The helper is started with --lang, so that is the badge it already
         # shows: what we track here is the last language it was *told*. A
         # respawn reads it again rather than the one baked in at build time.
@@ -319,8 +319,8 @@ class Daemon:
         verbose = log.isEnabledFor(logging.DEBUG)
         allow_fallback = bool(self.config.get("ui.overlay_allow_fallback", False))
         return OverlayClient(enabled, launcher=lambda: default_launcher(
-            position=position, lang=self._overlay_language, verbose=verbose,
-            allow_fallback=allow_fallback))
+            position=position, margin_x=margin_x, margin_y=margin_y,
+            lang=self._overlay_language, verbose=verbose, allow_fallback=allow_fallback))
 
     def _overlay_snapshot(self) -> tuple:
         """Everything _make_overlay bakes into the helper's command line.

@@ -15,6 +15,11 @@ from voice.ui.overlay_client import (_PROBE_SCRIPT, FRAME_S, NO_LAYER_SHELL_EXIT
                                      probe_helper, repo_root)
 
 
+def _flag(cmd, name):
+    """The value the helper's command line gives `name`."""
+    return cmd[cmd.index(name) + 1]
+
+
 def _client(launcher, clock=None, enabled=True):
     return OverlayClient(enabled, launcher=launcher, clock=clock)
 
@@ -247,9 +252,12 @@ def test_default_launcher_passes_the_repo_and_the_session_environment(monkeypatc
         seen["cmd"], seen["kwargs"] = cmd, kwargs
         return "proc"
 
-    assert default_launcher(position="top", lang="sv", popen=fake_popen) == "proc"
+    assert default_launcher(position="top-right", lang="sv", margin_x=16, margin_y=64,
+                            popen=fake_popen) == "proc"
     assert seen["cmd"][:3] == ["/usr/bin/python3", "-m", "voice.ui.overlay"]
-    assert "--position" in seen["cmd"] and "top" in seen["cmd"]
+    assert _flag(seen["cmd"], "--position") == "top-right"
+    assert _flag(seen["cmd"], "--margin-x") == "16"
+    assert _flag(seen["cmd"], "--margin-y") == "64"
     assert "--lang" in seen["cmd"] and "sv" in seen["cmd"]
     env = seen["kwargs"]["env"]
     assert env["WAYLAND_DISPLAY"] == "wayland-0"
@@ -266,7 +274,27 @@ def test_default_launcher_rejects_a_nonsense_position(monkeypatch):
     seen = {}
     default_launcher(position="sideways", lang="", popen=lambda cmd, **kw: seen.update(cmd=cmd))
     assert "sideways" not in seen["cmd"]
-    assert seen["cmd"][seen["cmd"].index("--position") + 1] == "bottom"
+    assert _flag(seen["cmd"], "--position") == "bottom-center"
+
+
+@pytest.mark.parametrize("legacy,expected", [("bottom", "bottom-center"), ("top", "top-center")])
+def test_default_launcher_spells_out_an_older_position(monkeypatch, legacy, expected):
+    """The helper takes both, but the command line the daemon logs should not
+    make the owner wonder which of the nine they are looking at."""
+    monkeypatch.setattr("voice.ui.overlay_client._probe", lambda python: ("gtk4", "layer-shell"))
+    seen = {}
+    default_launcher(position=legacy, lang="", popen=lambda cmd, **kw: seen.update(cmd=cmd))
+    assert _flag(seen["cmd"], "--position") == expected
+
+
+def test_default_launcher_defaults_the_margins_and_clamps_the_wild_ones(monkeypatch):
+    monkeypatch.setattr("voice.ui.overlay_client._probe", lambda python: ("gtk4", "layer-shell"))
+    seen = {}
+    default_launcher(lang="", popen=lambda cmd, **kw: seen.update(cmd=cmd))
+    assert (_flag(seen["cmd"], "--margin-x"), _flag(seen["cmd"], "--margin-y")) == ("0", "48")
+    default_launcher(lang="", margin_x="wide", margin_y=99999,
+                     popen=lambda cmd, **kw: seen.update(cmd=cmd))
+    assert (_flag(seen["cmd"], "--margin-x"), _flag(seen["cmd"], "--margin-y")) == ("0", "2000")
 
 
 def test_helper_command_helper_is_the_probes_command(monkeypatch):

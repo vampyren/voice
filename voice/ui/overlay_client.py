@@ -27,6 +27,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from voice.ui.placement import (DEFAULT_MARGIN_X, DEFAULT_MARGIN_Y, DEFAULT_POSITION,
+                                clamp_margin, normalise_position)
+
 log = logging.getLogger(__name__)
 
 #: One frame at the helper's redraw rate: at most one level per window.
@@ -195,8 +198,9 @@ def reset_probe_cache() -> None:
         _PROBE_CACHE.clear()
 
 
-def default_launcher(position: str = "bottom", lang: str = "en", verbose: bool = False,
-                     allow_fallback: bool = False, popen: Callable = subprocess.Popen):
+def default_launcher(position: str = DEFAULT_POSITION, lang: str = "en", verbose: bool = False,
+                     allow_fallback: bool = False, margin_x: object = DEFAULT_MARGIN_X,
+                     margin_y: object = DEFAULT_MARGIN_Y, popen: Callable = subprocess.Popen):
     """Spawn the helper, or return None when this machine cannot run it.
 
     The current environment is passed through unchanged (WAYLAND_DISPLAY,
@@ -212,7 +216,12 @@ def default_launcher(position: str = "bottom", lang: str = "en", verbose: bool =
     root = str(repo_root())
     env["PYTHONPATH"] = os.pathsep.join([root] + [p for p in [env.get("PYTHONPATH")] if p])
     cmd = list(probe.command)
-    cmd += ["--position", position if position in ("bottom", "top") else "bottom"]
+    # Normalised here as well as in the config: this is the command line that
+    # ends up in the daemon's log, and an owner reading it back should see one
+    # of the nine, not whatever their file happens to hold.
+    cmd += ["--position", normalise_position(position),
+            "--margin-x", str(clamp_margin(margin_x, DEFAULT_MARGIN_X)),
+            "--margin-y", str(clamp_margin(margin_y, DEFAULT_MARGIN_Y))]
     if lang:
         cmd += ["--lang", lang]
     if not allow_fallback:

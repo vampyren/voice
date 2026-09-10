@@ -1185,7 +1185,8 @@ def test_the_fallback_window_flag_reaches_the_launcher(isolated_xdg, qapp, monke
     d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
     d.build()
     d.overlay.start()
-    assert seen == [{"position": "top", "lang": "sv", "verbose": False, "allow_fallback": True}]
+    assert seen == [{"position": "top-center", "margin_x": 0, "margin_y": 48, "lang": "sv",
+                     "verbose": False, "allow_fallback": True}]
     d.shutdown()
 
 
@@ -1332,7 +1333,7 @@ def test_reload_rebuilds_the_pill_only_when_the_ui_section_changed(
     d.build()
     d.overlay.start()
     first = d.overlay
-    assert seen[-1]["position"] == "bottom"
+    assert seen[-1]["position"] == "bottom-center"
 
     d.apply_config()
     assert d.overlay is first                       # unchanged: the pill stays up
@@ -1343,9 +1344,38 @@ def test_reload_rebuilds_the_pill_only_when_the_ui_section_changed(
     external.save()
     d.apply_config()
     assert d.overlay is not first
-    assert seen[-1]["position"] == "top"            # the new helper knows
+    assert seen[-1]["position"] == "top-center"     # the new helper knows
     assert len(helper_processes.made) == 2
     assert first.status() == "stopped"              # and the old one was stopped
+    d.shutdown()
+
+
+def test_reload_moves_the_pill_when_only_a_margin_changed(
+        isolated_xdg, qapp, monkeypatch, helper_processes):
+    """The margins are baked into the command line exactly as the position is."""
+    seen = []
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    monkeypatch.setattr("voice.daemon.default_launcher",
+                        lambda **kw: seen.append(kw) or helper_processes())
+    cfg = Config.load()
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    d.overlay.start()
+    first = d.overlay
+    assert (seen[-1]["margin_x"], seen[-1]["margin_y"]) == (0, 48)
+
+    external = Config.load()
+    external.set("ui.overlay_position", "middle-right")
+    external.set("ui.overlay_margin_x", 24)
+    external.set("ui.overlay_margin_y", 0)
+    external.save()
+    d.apply_config()
+    assert d.overlay is not first
+    assert seen[-1]["position"] == "middle-right"
+    assert (seen[-1]["margin_x"], seen[-1]["margin_y"]) == (24, 0)
+    assert len(helper_processes.made) == 2
+    assert first.status() == "stopped"
     d.shutdown()
 
 

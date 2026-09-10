@@ -221,8 +221,12 @@ class SettingsDialog(QDialog):
         margins = QHBoxLayout()
         margins.addWidget(QLabel("x"))
         margins.addWidget(self.pill_margin_x)
+        margins.addSpacing(12)
         margins.addWidget(QLabel("y"))
         margins.addWidget(self.pill_margin_y)
+        # Two small boxes and their labels, not two half-width fields: the row
+        # keeps each spin box beside the letter it belongs to.
+        margins.addStretch()
         self.language_profile_table = QTableWidget(0, 2)
         self.language_profile_table.setHorizontalHeaderLabels(["Language", "Profile"])
         self.language_profile_table.horizontalHeader().setStretchLastSection(True)

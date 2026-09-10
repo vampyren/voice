@@ -227,6 +227,8 @@ def test_status_still_reports_keyboard_access_on_the_evdev_backend(isolated_xdg,
     ("bound", {"dictate": "F13"}, "shortcuts: bound (dictate=F13)"),
     ("unassigned", {"dictate": ""},
      "shortcuts: registered, no key assigned \u2014 assign it in your desktop's keyboard settings"),
+    ("unassigned", {"dictate": "", "language_toggle": "F14"},
+     "no key assigned \u2014 assign it in your desktop's keyboard settings (dictate)"),
     ("denied", {}, "shortcuts: NOT BOUND (accept the desktop's shortcut dialog)"),
 ])
 def test_status_separates_a_bound_shortcut_from_one_with_no_key(isolated_xdg, capsys, state,

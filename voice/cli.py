@@ -53,7 +53,10 @@ def _shortcut_row(reply: dict, keyboard) -> str:
     state = reply.get("shortcut_state")
     triggers = reply.get("shortcut_triggers") or {}
     if state == "unassigned":
-        return UNASSIGNED_SHORTCUT
+        # Naming the ids matters as soon as there is more than one: "no key
+        # assigned" with `language_toggle` working reads as a total failure.
+        missing = ", ".join(sid for sid, trigger in triggers.items() if not trigger)
+        return f"{UNASSIGNED_SHORTCUT} ({missing})" if missing else UNASSIGNED_SHORTCUT
     if state == "denied":
         return DENIED_SHORTCUT
     if state == "bound":

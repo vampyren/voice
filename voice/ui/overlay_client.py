@@ -221,6 +221,10 @@ class OverlayClient:
         self._idle.set()
         self._dead = False
         self._stopped = False
+        #: Set by stop(): what actually ends the writer thread. A queued sentinel
+        #: can be dropped by a full queue, and then the pipe would stay open on a
+        #: thread parked in queue.get() forever.
+        self._halt = threading.Event()
         self._status = "not started" if self.enabled else "off"
         self._restarts = 0
         self._pending_level: dict | None = None
@@ -261,6 +265,8 @@ class OverlayClient:
             self._restarts = 0
             self._respawn_queued = False
             self._pending_level = None
+            self._halt.clear()              # a surviving pump goes back to work
+            self._drain()                   # ... but not on the old helper's backlog
             if self.enabled:
                 self._status = "not started"
                 self._spawn()
@@ -275,11 +281,14 @@ class OverlayClient:
         self.flush(DRAIN_S)                       # let the writer drain first: it
         with self._lock:                          # needs self._proc to write at all
             proc, self._proc = self._proc, None
-        try:
-            self._queue.put_nowait(None)          # release the writer thread
-        except queue.Full:
-            pass
-        writer, self._writer = self._writer, None
+            writer = self._writer
+            # The event, not the sentinel, is what ends the pump; draining first
+            # then guarantees the wake-up fits, and keeps _inflight honest for
+            # anyone who calls flush() after us.
+            self._halt.set()
+            self._drain()
+            if writer is not None and writer.is_alive():
+                self._put(None)               # a wake-up for a parked queue.get()
         if writer is not None:
             writer.join(timeout=DRAIN_S)
             if writer.is_alive():
@@ -289,8 +298,25 @@ class OverlayClient:
                 # child goes first: losing the read end EPIPEs the write.
                 self._unblock(proc)
                 writer.join(timeout=STOP_WAIT_S)
+        finished = writer is None or not writer.is_alive()
+        with self._lock:
+            if finished:
+                self._writer = None           # a later restart() gets a fresh pump
+                self._drain()                 # nothing is left to write it away
         # Never close stdin under a live writer thread - that is the deadlock.
-        self._close(proc, close_stdin=writer is None or not writer.is_alive())
+        self._close(proc, close_stdin=finished)
+
+    def _drain(self) -> None:
+        """Caller holds the lock. Drop what is queued, keeping _inflight true."""
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
+            self._queue.task_done()
+            self._inflight = max(0, self._inflight - 1)
+        if self._inflight == 0:
+            self._idle.set()
 
     def _unblock(self, proc) -> None:
         """Kill the helper so a writer parked on its full pipe is released."""
@@ -481,11 +507,13 @@ class OverlayClient:
 
     # -- writer thread ------------------------------------------------------
     def _pump(self) -> None:
-        while True:
+        while not self._halt.is_set():
             item = self._queue.get()
             try:
-                if item is None:
+                if self._halt.is_set():
                     return
+                if item is None:
+                    continue                # a wake-up from a stop() restart() undid
                 if item is _RESPAWN:
                     self._respawn()
                 else:

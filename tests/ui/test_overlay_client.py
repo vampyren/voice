@@ -537,3 +537,106 @@ def test_a_respawn_that_cannot_be_queued_can_still_be_retried(helper_processes):
     assert {"state": "again"} in helper_processes.made[1].lines()
     assert client.status() == "running"
     client.stop()
+
+
+# -- stop() must not leak the writer thread ------------------------------------
+class _ParkedPipe:
+    """A pipe whose write parks until the test releases it, and whose helper
+    ignores signals: nothing stop() can do frees the writer thread."""
+
+    def __init__(self):
+        self.data = b""
+        self.closed = False
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def write(self, blob: bytes) -> int:
+        self.entered.set()
+        self.release.wait(10)
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _StuckHelper:
+    """A helper that neither reads its stdin nor dies when it is signalled."""
+
+    def __init__(self):
+        self.stdin = _ParkedPipe()
+        self.returncode = None
+        self.terminated = False
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        raise subprocess.TimeoutExpired("voice-overlay", timeout)
+
+    def terminate(self):
+        self.terminated = True
+
+    kill = terminate
+
+
+def _writer_threads():
+    return [t for t in threading.enumerate() if t.name == "overlay-writer" and t.is_alive()]
+
+
+def test_stop_releases_the_writer_even_when_the_queue_is_full():
+    """put_nowait(None) is dropped on a full queue, so the sentinel never
+    arrives: the writer thread survives stop() and stdin is never closed."""
+    proc = _WedgedHelper()
+    client = _client(lambda: proc)
+    client.start()
+    client.send({"state": "recording"})
+    assert proc.stdin.entered.wait(2.0)             # the writer is parked in write()
+    for i in range(QUEUE_MAX + 4):                  # ... and the queue has no room
+        client.send({"state": f"filler-{i}"})
+    writer = client._writer
+
+    stopped = threading.Event()
+    threading.Thread(target=lambda: (client.stop(), stopped.set()),
+                     name="stopper", daemon=True).start()
+    assert stopped.wait(5.0), "stop() never returned"
+    writer.join(2.0)
+    assert not writer.is_alive(), "stop() leaked the writer thread"
+    assert proc.stdin.closed is True, "stop() left the helper's stdin open"
+
+
+def test_restart_after_a_stop_that_timed_out_starts_no_second_pump(helper_processes):
+    """A writer that outlived stop() still owns the queue; a second pump on it
+    would race the first for every message."""
+    before = _writer_threads()
+    stuck = _StuckHelper()
+    calls = []
+
+    def launcher():
+        calls.append(None)
+        return stuck if len(calls) == 1 else helper_processes()
+
+    client = _client(launcher)
+    client.start()
+    client.send({"state": "recording"})
+    assert stuck.stdin.entered.wait(2.0)
+    parked = client._writer
+
+    client.stop()                                   # times out: nothing frees the writer
+    assert parked.is_alive()
+
+    client.restart()
+    extra = [t for t in _writer_threads() if t not in before]
+    assert len(extra) == 1, f"{len(extra)} pumps on one queue"
+    assert extra[0] is parked
+
+    stuck.stdin.release.set()                       # let the parked write fail out
+    assert client.flush(2.0)
+    client.send({"state": "done"})                  # the surviving pump serves the new helper
+    assert client.flush(2.0)
+    assert helper_processes.made[0].lines() == [{"state": "done"}]
+    client.stop()
+    parked.join(2.0)
+    assert not parked.is_alive()

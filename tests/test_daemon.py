@@ -1136,6 +1136,78 @@ def test_a_changed_hotkey_backend_rebuilds_the_listener(isolated_xdg, qapp, monk
     d.shutdown()
 
 
+class FakeEvdevListener(FakeListener):
+    """Records every construction, so a needless rebuild is visible."""
+
+    made: list = []
+
+    def __init__(self, tracker, on_event):
+        super().__init__()
+        FakeEvdevListener.made.append(self)
+
+
+def _evdev_daemon(monkeypatch):
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    FakeEvdevListener.made = []
+    monkeypatch.setattr("voice.daemon.EvdevListener", FakeEvdevListener)
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", "evdev")
+    cfg.save()
+    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    d.listener.start()
+    return d
+
+
+def test_a_portal_trigger_does_not_rebuild_the_evdev_listener(isolated_xdg, qapp, monkeypatch):
+    """The snapshot carried the portal triggers whatever the backend was, so
+    editing one tore down and rebuilt an evdev listener that never reads them -
+    dropping the /dev/input file descriptors for nothing."""
+    d = _evdev_daemon(monkeypatch)
+    first = d.listener
+    assert len(FakeEvdevListener.made) == 1
+
+    external = Config.load()
+    external.set("hotkeys.portal_dictate", "CTRL+ALT+d")
+    external.set("hotkeys.portal_language_toggle", "CTRL+SHIFT+l")
+    external.save()
+    d.apply_config()
+
+    assert len(FakeEvdevListener.made) == 1
+    assert d.listener is first and first.started is True
+    d.shutdown()
+
+
+def test_a_listener_that_cannot_be_rebuilt_says_so_and_leaves_the_daemon_running(
+        isolated_xdg, qapp, monkeypatch):
+    """The old session is already closed when the new listener is built. A
+    failure there used to propagate out of apply_config, leaving the stopped
+    listener in place: no hotkeys, nothing said, and the rest of the reload
+    (transcriber, injector, tray) never applied."""
+    d = _portal_daemon(monkeypatch)
+    first = d.listener
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("portal said no")
+
+    monkeypatch.setattr("voice.daemon.PortalListener", boom)
+    external = Config.load()
+    external.set("hotkeys.portal_dictate", "CTRL+ALT+d")
+    external.set("general.language", "sv")
+    external.save()
+
+    d.apply_config()                                    # must not raise
+
+    title, body, urgency = d._notifier.sent[-1]
+    assert title == "Hotkeys are off"
+    assert "portal said no" in body and urgency == "critical"
+    assert d.listener is first                          # still an object, not a crater
+    assert d.handle({"cmd": "status"})["ok"] is True    # and the daemon still answers
+    assert d.config.get("general.language") == "sv"     # the rest of the reload applied
+    d.shutdown()
+
+
 # -- a profile per language -----------------------------------------------------
 def _profile_daemon(cfg, monkeypatch, **kwargs):
     """A built daemon plus the list of models its transcribers were built from."""

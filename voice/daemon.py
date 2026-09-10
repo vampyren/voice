@@ -335,9 +335,16 @@ class Daemon:
         """What the listener was built from. The portal binds its shortcuts once,
         when the session is created, so a change here needs a new listener - the
         configured backend rather than the resolved one, to avoid re-probing the
-        keyboards and the seat on every reload."""
-        return (str(self.config.get("hotkeys.backend", "auto") or "auto").strip().lower(),
-                portal_shortcuts(self.config))
+        keyboards and the seat on every reload.
+
+        Only the triggers the *running* backend actually binds: the evdev
+        listener reads `hotkeys.<name>` through the tracker, which apply_config
+        updates in place, so rebuilding it for an edited portal trigger would
+        drop its /dev/input descriptors for a setting it never looks at.
+        """
+        backend = str(self.config.get("hotkeys.backend", "auto") or "auto").strip().lower()
+        triggers = portal_shortcuts(self.config) if self.hotkey_backend == "portal" else {}
+        return (backend, triggers)
 
     def _rebind_hotkeys_if_needed(self) -> None:
         """Rebuild the listener when the backend or a portal trigger changed.
@@ -352,7 +359,20 @@ class Daemon:
             self.listener.stop()
         except Exception:
             log.exception("failed to stop the listener while rebinding")
-        self.listener, self.hotkey_backend = self._make_listener()
+        try:
+            listener, backend = self._make_listener()
+        except Exception as exc:
+            # The old session is already closed, so there are no hotkeys either
+            # way; say so rather than leaving a stopped listener behind in
+            # silence. `_hotkey_settings` is deliberately left alone: the next
+            # reload tries again, which is how a fixed trigger recovers without
+            # restarting the daemon. Everything after this call still applies.
+            log.exception("failed to build the new hotkey listener")
+            self._notifier.notify("Hotkeys are off",
+                                  f"{exc}. Fix the setting and run `voice reload`, or restart "
+                                  f"{APP_NAME}.", "critical")
+            return
+        self.listener, self.hotkey_backend = listener, backend
         self._hotkey_settings = self._hotkey_snapshot()
         try:
             self.listener.start()

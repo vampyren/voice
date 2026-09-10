@@ -57,6 +57,18 @@ def test_capture_button_requests_key_and_fills_field(qapp):
     assert dlg.hotkey_edit.text() == "KEY_F14"
 
 
+def test_invalid_beam_size_blocks_save(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.profile_list.setCurrentRow(0)                       # local
+    fired = []
+    dlg.saved.connect(lambda: fired.append(True))
+    dlg.profile_form["beam_size"].setText("abc")
+    dlg.save_button.click()
+    assert "beam_size" in dlg.error_label.text()
+    assert fired == []
+    assert Config.load().get("stt.profiles.local.beam_size") == 5
+
+
 def test_add_profile_from_template_and_replacements_roundtrip(qapp):
     cfg, dlg, _ = make(qapp)
     dlg.add_profile_combo.setCurrentText("mistral")

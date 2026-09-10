@@ -196,14 +196,24 @@ class SettingsDialog(QDialog):
             self.profile_form[field] = edit
             self._form_layout.addRow(field, edit)
 
-    def _commit_profile_form(self) -> None:
+    def _commit_profile_form(self) -> bool:
         if not self._current_profile or not self.profile_form:
-            return
+            return True
+        values: dict[str, object] = {}
         for field, edit in self.profile_form.items():
             value: object = edit.text()
             if field == "beam_size":
-                value = int(value or 5)
+                try:
+                    value = int(value or 5)
+                except ValueError:
+                    value = None
+                if value is None or value < 1:
+                    self.error_label.setText(f"{self._current_profile}.{field} must be a positive integer")
+                    return False
+            values[field] = value
+        for field, value in values.items():
             self._cfg.set(f"stt.profiles.{self._current_profile}.{field}", value)
+        return True
 
     def _add_profile(self) -> None:
         name = self.add_profile_combo.currentText()
@@ -241,7 +251,8 @@ class SettingsDialog(QDialog):
         c.set("hotkeys.dictate_mode", self.mode_combo.currentText())
         c.set("audio.device", self.device_combo.currentData() or "")
         c.set("audio.max_seconds", self.max_seconds.value())
-        self._commit_profile_form()
+        if not self._commit_profile_form():
+            return
         rules = []
         for r in range(self.replacements_table.rowCount()):
             cells = [self.replacements_table.item(r, col) for col in range(3)]

@@ -1,3 +1,5 @@
+import itertools
+
 from voice.ui.icons import icon_for, pixmap_for
 from voice.ui.tray import Tray
 
@@ -5,7 +7,8 @@ from voice.ui.tray import Tray
 def test_icons_exist_and_differ_per_state(qapp):
     imgs = {s: pixmap_for(s, 32).toImage() for s in ("idle", "recording", "transcribing", "error")}
     assert all(not i.isNull() for i in imgs.values())
-    assert imgs["idle"] != imgs["recording"] != imgs["transcribing"]
+    for a, b in itertools.combinations(imgs, 2):
+        assert imgs[a] != imgs[b], f"{a} and {b} icons are identical"
     assert not icon_for("idle").isNull()
 
 

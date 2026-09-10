@@ -208,13 +208,20 @@ def _dot(ctx: cairo.Context, cx: float, cy: float, s: float, model: OverlayModel
     ctx.fill()
 
 
+#: Every bar is drawn this much taller than the model's 0..1 says, clamped to
+#: the well. The model keeps its meaning - 1.0 is still "as loud as it gets" -
+#: while ordinary speech, which sits well below 1.0, reads taller on screen.
+#: The owner asked for this after the shape was right; a crest clips at the
+#: top rather than the middle of the wave filling in and going square.
+BAR_LIFT = 1.10
+
 def _bars(ctx, model: OverlayModel, x: float, cy: float, s: float) -> None:
     heights = model.bar_heights
     n = len(heights)
     gap = BAR_GAP * s
     bar_w = (WELL_W * s - gap * (n - 1)) / n
     for i, height in enumerate(heights):
-        px = height * WELL_H * s
+        px = min(WELL_H * s, height * WELL_H * s * BAR_LIFT)
         if px < 0.35:
             continue
         colour = _mix(VIOLET, TEAL, i / (n - 1))

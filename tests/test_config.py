@@ -195,6 +195,23 @@ def test_errors_wants_a_portal_trigger_when_the_portal_backend_is_forced(isolate
     assert [e for e in cfg.errors() if "portal_dictate" in e] == []
 
 
+def test_the_default_config_calls_the_portal_triggers_a_first_run_preference():
+    """The comment used to read like a setting. It is not one: on GNOME these
+    keys are never applied at all, and a user who believes the comment spends
+    the evening editing a field that cannot move their binding."""
+    lines = DEFAULT_CONFIG.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("portal_dictate"))
+    above = []
+    row = start - 1
+    while row >= 0 and lines[row].lstrip().startswith("#"):
+        above.append(lines[row])
+        row -= 1
+    comment = " ".join(reversed(above)).lower()
+    assert "first-run preference" in comment
+    assert "gnome" in comment                       # where it is never applied
+    assert "keyboard shortcuts" in comment          # and where the key is really set
+
+
 def test_readme_shows_the_current_defaults():
     """The README prints config.toml verbatim; drift there misinforms every new user."""
     import re

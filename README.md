@@ -198,8 +198,13 @@ dictate_mode = "hold"      # "hold" (push-to-talk) or "toggle"
 recall = ""                # re-insert the last dictation
 cancel = "KEY_ESC"         # discard the current recording
 language_toggle = ""       # cycle through general.languages
-# Portal backend triggers (XDG shortcut syntax). Compositors reject bare
-# modifiers, so these need a combination. Empty = not bound.
+# Portal backend triggers (XDG shortcut syntax): a first-run preference, not a
+# setting. Once your desktop knows a shortcut the key belongs to the desktop,
+# and on GNOME that is true from the very first run - these are never applied
+# there. Set the key in Settings -> Keyboard -> Keyboard Shortcuts; `voice
+# status` and the settings window show what the desktop actually holds.
+# Compositors reject bare modifiers, so a preference needs a combination.
+# Empty = not bound.
 portal_dictate = "CTRL+space"
 portal_recall = ""
 portal_cancel = ""
@@ -300,25 +305,42 @@ and every press does nothing. That is what used to happen on **every daemon star
 is why a key you had set could quietly stop working.
 
 `voice` only expresses a preference when the desktop can tell it the shortcut is genuinely
-new. **On GNOME it never can** — the portal's `ListShortcuts` is scoped to the session
-`voice` has just created, so it reports nothing whether or not GNOME has held a key for
-months — so on GNOME `hotkeys.portal_*` (and the Hotkeys tab) is never applied and the key
-is always yours to set below. Editing it changes nothing, no matter how often you reload
-or restart.
+new. **On GNOME it never can.** The portal's `ListShortcuts` is scoped to the session
+`voice` has just created, and that session is necessarily new when we ask, so it reports
+nothing whether or not GNOME has held a key for months. Measured on GNOME 50 with three
+shortcuts assigned for this app id, the whole answer is:
+
+```
+ListShortcuts -> 0
+raw results: {'shortcuts': ('a(sa{sv})', [])}
+```
+
+An empty listing is therefore no evidence of anything, and reading it as "never seen" is
+exactly how the key got destroyed. The rule that follows: **an answer that cannot separate
+"never seen" from "seen and assigned" counts as "seen", and no preference goes out** — so
+on GNOME `hotkeys.portal_*` (and the Hotkeys tab's trigger fields) is never applied, and
+the key is always yours to set below. Editing it changes nothing, no matter how often you
+reload or restart.
 
 To set the key, or change one:
 
 - **GNOME** — open **Settings → Keyboard → Keyboard Shortcuts**, where `voice` appears
   under its own name, and set the key there. It takes effect immediately; nothing needs
-  restarting. The desktop's own dialog on the first bind is the other place to set it.
+  restarting, and `voice status` follows the change as the desktop makes it. The desktop's
+  own dialog on the first bind is the other place to set it. The settings window's **Open
+  shortcut settings** button opens this panel for you (`gnome-control-center keyboard`).
 - **KDE Plasma** — implements version 2 of the portal interface, which has a reconfigure
-  dialog: the settings window's "Capture key" button asks KDE to open it, and KDE System
-  Settings → Shortcuts lists the binding as well.
+  dialog: **Open shortcut settings** (and "Capture key") asks KDE to open it, and KDE
+  System Settings → Shortcuts lists the binding as well. Because that version *can* answer
+  ListShortcuts usefully, `hotkeys.portal_*` is honoured there on a genuine first run.
 
 `voice doctor`'s **portal shortcuts** line shows the effective trigger per shortcut id, or
 `no key assigned` where the desktop registered a shortcut without one; `voice status` says
-the same in one line. If a shortcut comes back with no key, `voice` also tells you once,
-with a notification pointing here.
+the same in one line, and the settings window shows it beside each trigger field. All three
+follow the desktop as it changes: the portal announces a rebinding and `voice` takes it,
+and a reload or opening the settings window asks outright in case the announcement was
+missed. If a shortcut comes back with no key, `voice` also tells you once, with a
+notification pointing here — and again if you lose the key a second time.
 
 <details>
 <summary>Last resort: writing GNOME's dconf key by hand</summary>
@@ -349,7 +371,17 @@ before anything else sees it — so the Hotkeys tab shows the four triggers them
 (`portal_dictate`, `portal_recall`, `portal_cancel`, `portal_language_toggle`) as text
 fields in the desktop's own syntax: `F14`, `CTRL+space`, `CTRL+SHIFT+l`. They are what
 `voice` asks for the first time the desktop meets each shortcut and nothing after that —
-see [The desktop owns the trigger](#the-desktop-owns-the-trigger).
+see [The desktop owns the trigger](#the-desktop-owns-the-trigger) — and the tab says so
+above them.
+
+Beside each field is the key the desktop **actually** holds for that shortcut, re-read
+every time the window opens: the trigger itself, `no key assigned` for a shortcut the
+desktop registered without one, `not registered` for one `voice` never asked it to bind
+(an empty `portal_*` value), or `waiting for the desktop` before the portal has answered.
+That is the line to read — the field above it is only ever a request. **Open shortcut
+settings** takes you to where the key really lives: KDE's reconfigure dialog on portal
+version 2, otherwise `gnome-control-center keyboard` or `systemsettings kcm_keys`,
+whichever is installed, and failing both it prints the path to click yourself.
 
 **Profiles.** `stt.active` picks one of the `[stt.profiles.*]` tables. Add a cloud
 profile by pasting an API key: either `api_key = "sk-..."` inline, or set the

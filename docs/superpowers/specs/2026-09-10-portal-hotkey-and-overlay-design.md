@@ -58,6 +58,41 @@ is active must not drop the evdev listener's device descriptors - and a listener
 built (the portal refuses the session) is reported as "Hotkeys are off" rather than left as a
 stopped listener, with the next reload free to try again.
 
+**The hardest limit is that `ListShortcuts` cannot answer the question we ask it.** Measured
+against the live portal on GNOME 50 - `Registry.Register`, `CreateSession`, `ListShortcuts`, no
+`BindShortcuts`, with three shortcuts assigned in dconf for the same app id throughout:
+
+```
+CreateSession -> 0 {'session_handle': ('s', '/org/freedesktop/portal/desktop/session/1_1403/voiceedd2e784')}
+ListShortcuts -> 0
+raw results: {'shortcuts': ('a(sa{sv})', [])}
+```
+
+`dconf read` before and after the probe was byte-identical, so nothing was written; the call is
+simply scoped to a session that is necessarily new when we ask. **Rule: an answer that cannot
+separate "never seen" from "seen and assigned" - an error, a missing member, or an empty array -
+counts as "seen", and no `preferred_trigger` goes out for any id.** The user-facing consequence
+per desktop, which is what the README, `voice status`, `voice doctor` and the settings window all
+have to say:
+
+- **GNOME** (portal version 1): `hotkeys.portal_*` is never applied, on a first run or any
+  other. The key is set in **Settings -> Keyboard -> Keyboard Shortcuts**, where the app appears
+  by name, and takes effect immediately.
+- **KDE Plasma** (portal version 2): `ListShortcuts` is informative and the first-run preference
+  is honoured; afterwards the key is changed in the portal's own reconfigure dialog
+  (`ConfigureShortcuts`) or System Settings -> Shortcuts.
+
+So the four `hotkeys.portal_*` fields are a **first-run preference, and the settings window must
+say so** rather than presenting four editable boxes that on GNOME do nothing. It keeps them - they
+are still the preference, and KDE honours them - and shows the *effective* trigger beside each
+one (the trigger, `no key assigned`, `not registered` for an id we never asked to bind, or
+`waiting for the desktop` before the portal answers), with an **Open shortcut settings** button:
+`ConfigureShortcuts` where the portal is version 2, else `gnome-control-center keyboard` or
+`systemsettings kcm_keys` by whichever is on PATH, else the path to the setting in words. The
+evdev rendering is untouched. The dialog is cached and reused, so it takes the capture callable
+late-bound (a rebind swaps the listener under it) and is rebuilt when `hotkey_backend` changes,
+which decides its whole widget set.
+
 **The trigger belongs to the desktop, and `hotkeys.portal_*` is a first-run preference we must
 stop re-sending.** Verified live on GNOME Shell 50 (portal `GlobalShortcuts` version 1): the
 confirmed trigger is stored in dconf under
@@ -93,7 +128,13 @@ wrong, and being wrong costs the user's binding.
 **Reporting follows the effective trigger, never the requested one.** Each shortcut's
 `trigger_description` is read back from the `BindShortcuts` response (falling back to a second
 `ListShortcuts` where a backend answers with a bare vardict) and kept as
-`effective_triggers()`. `shortcut_state()` is then one of `bound` / `unassigned` / `denied`,
+`effective_triggers()`, and kept current for the life of the daemon rather than read once:
+`ShortcutsChanged` (which the dispatcher used to drop) merges the desktop's new trigger in and
+re-announces the resulting state, and `refresh_triggers()` asks `ListShortcuts` outright on every
+`apply_config` and every settings-window open, for the case where nobody heard the signal. Both
+merge per id - an id the portal did not mention is one it said nothing about, and a
+session-scoped empty listing must never wipe a key the desktop is holding.
+`shortcut_state()` is then one of `bound` / `unassigned` / `denied`,
 `devices_ok()` is True only for `bound`, the startup log prints the effective triggers, and
 `on_ready` carries the state word rather than a bool. `voice status` renders `unassigned` as
 "registered, no key assigned"; `voice doctor`'s **portal shortcuts** line asks the running
@@ -101,7 +142,8 @@ daemon and prints the trigger per id (or `no key assigned`), falling back to `dc
 nothing is running (no new dependency, and its absence is not an error). The daemon sends one
 notification per run when a shortcut comes back unassigned - once, because a reload rebuilds
 the listener and a repeated critical notification for a state the user is already looking at is
-noise they cannot switch off.
+noise they cannot switch off. The latch is cleared when a shortcut comes back `bound`, so losing
+the key a second time is news again.
 
 The user assigns the key in GNOME Settings -> Keyboard -> Keyboard Shortcuts (the app appears
 there by name). KDE Plasma implements version 2 of the interface and exposes a reconfigure

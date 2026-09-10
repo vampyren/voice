@@ -32,8 +32,13 @@ dictate_mode = "hold"      # "hold" (push-to-talk) or "toggle"
 recall = ""                # re-insert the last dictation
 cancel = "KEY_ESC"         # discard the current recording
 language_toggle = ""       # cycle through general.languages
-# Portal backend triggers (XDG shortcut syntax). Compositors reject bare
-# modifiers, so these need a combination. Empty = not bound.
+# Portal backend triggers (XDG shortcut syntax): a first-run preference, not a
+# setting. Once your desktop knows a shortcut the key belongs to the desktop,
+# and on GNOME that is true from the very first run - these are never applied
+# there. Set the key in Settings -> Keyboard -> Keyboard Shortcuts; `voice
+# status` and the settings window show what the desktop actually holds.
+# Compositors reject bare modifiers, so a preference needs a combination.
+# Empty = not bound.
 portal_dictate = "CTRL+space"
 portal_recall = ""
 portal_cancel = ""

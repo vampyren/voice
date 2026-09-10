@@ -23,6 +23,10 @@ Status: phase 1 (dictation core). See `docs/superpowers/specs/` for the full des
   `xdg-desktop-portal-gnome`), and [`uv`](https://docs.astral.sh/uv/).
 - Optional: an NVIDIA GPU with a recent driver for local transcription on CUDA. Without
   one, the local backend falls back to CPU (slower, but works).
+- Optional, for the recording pill: `python-gobject` with GTK 4 (system package, already
+  present on KDE and GNOME) and `gtk4-layer-shell` (Debian/Ubuntu:
+  `gir1.2-gtk4layershell-1.0`). See "Recording pill" below for why the second one is not
+  really optional. The JetBrains Mono font is used for the timer if it is installed.
 
 ## Install
 
@@ -77,12 +81,54 @@ voice retry            # re-send the last recording's audio (e.g. after a transi
 voice status           # state, active profile, backend, keyboard access, last error
 voice settings         # raise the settings window
 voice profile <name>   # switch the active STT profile (local, openai, groq, openrouter, ...)
+voice language <code>  # switch dictation language ("sv", "auto", or "next" to cycle)
 voice reload           # re-read config.toml without restarting
 voice quit             # stop the daemon
 voice doctor           # check this machine for everything voice needs
 voice --verbose ...    # DEBUG logging to stderr (default: INFO)
 voice --version
 ```
+
+### Recording pill
+
+While you dictate, a small dark capsule floats near the bottom of the screen: a live
+waveform driven by the microphone level, an elapsed `m:ss` counter, and a language badge
+("EN", "SV", "AUTO"). It turns into a progress line while transcribing, flashes a
+checkmark when the text is inserted, and shows the error in amber for two seconds when
+something fails. It is never clickable and never takes focus.
+
+It runs as a separate helper process (`voice.ui.overlay`, GTK 4 through PyGObject), so a
+crash there cannot affect dictation - the daemon logs it, restarts it once, and carries
+on without it. Switch it off with `ui.overlay = false`, or move it with
+`ui.overlay_position = "top"`.
+
+**gtk4-layer-shell is required in practice.** GTK 4 removed the "do not focus me" window
+hints, so without that library the pill is an ordinary window that takes keyboard focus
+when it appears - and the paste would land in the pill instead of your editor. When the
+library is missing the daemon leaves the pill off and says so once in the log and in
+`voice doctor`. If you want it anyway, start the daemon with
+`VOICE_OVERLAY_ALLOW_PLAIN_WINDOW=1`.
+
+### Language
+
+`general.language` is the language passed to the transcriber (`"auto"` detects it), and
+`general.languages` is the cycle the fast switch walks through:
+
+```toml
+[general]
+language = "en"
+languages = ["en", "sv"]
+
+[hotkeys]
+language_toggle = "KEY_F15"        # evdev backend
+portal_language_toggle = "CTRL+ALT+l"   # portal backend
+```
+
+Pressing the toggle moves to the next language in the list, wrapping around; the pill
+shows "EN → SV" for two seconds. The same switch is in the tray's Language submenu and on
+the command line (`voice language sv`, `voice language next`), and `voice status` reports
+which one is active. Every switch is saved to `config.toml` and applies to the next
+dictation.
 
 ## Configuration
 
@@ -223,6 +269,9 @@ are restored after the paste.
 - **hotkey backend** — informational: which listener the daemon would use here and why
   (`evdev`, or `portal (no local seat)`). Never fails the run; see
   [Configuration](#configuration).
+- **overlay** — informational: whether the recording pill can run here, which
+  interpreter starts its helper, and whether `gtk4-layer-shell` was found. Never fails
+  the run; see [Recording pill](#recording-pill).
 - **pw-record** — PipeWire's recording tool is on PATH.
 - **wl-clipboard** — `wl-copy`/`wl-paste` are installed.
 - **portal** — the `RemoteDesktop` portal is reachable (`xdg-desktop-portal-kde` on KDE,
@@ -290,9 +339,9 @@ STT, inject, tray, notifications, history/recall, CLI, doctor, install script, R
 - **Phase 3 — Text-to-speech**: `kokoro`, `chatterbox` and `openai_speech` backends,
   per-voice profiles (including a Swedish Chatterbox fine-tune), and a "read selection
   aloud" hotkey.
-- **Phase 4 — Nice-to-have**: a floating on-screen pill via layer-shell on KWin, and
-  direct typing via libei text events once KWin/Mutter ship it. (The GlobalShortcuts
-  portal hotkey backend landed early, in phase 1 — see `hotkeys.backend`.)
+- **Phase 4 — Nice-to-have**: direct typing via libei text events once KWin/Mutter ship
+  it. (The GlobalShortcuts portal hotkey backend and the layer-shell recording pill both
+  landed early, in phase 1 — see `hotkeys.backend` and `ui.overlay`.)
 
 ## External components
 

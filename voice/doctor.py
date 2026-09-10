@@ -1,0 +1,119 @@
+"""`voice doctor`: tells the owner what works on this machine and what to fix."""
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+from voice import __version__
+
+REQUIRED = {"portal", "wl-clipboard", "pw-record", "keyboard access", "config"}
+
+
+@dataclass(frozen=True)
+class Check:
+    name: str
+    ok: bool
+    detail: str
+
+
+def _which(binary: str) -> tuple[bool, str]:
+    path = shutil.which(binary)
+    return (True, path) if path else (False, f"{binary} not found in PATH")
+
+
+def _config() -> tuple[bool, str]:
+    from voice.config import Config
+    cfg = Config.load()
+    errs = cfg.errors()
+    return (not errs, "; ".join(errs) or str(cfg.path))
+
+
+def _keyboard() -> tuple[bool, str]:
+    from voice.hotkey.evdev_listener import list_keyboards
+    devs = list_keyboards()
+    if not devs:
+        return False, "no readable keyboards: run install.sh (udev rule) or add yourself to the 'input' group"
+    return True, ", ".join(d.name for d in devs)
+
+
+def _sources() -> tuple[bool, str]:
+    from voice.audio.capture import list_sources
+    srcs = list_sources()
+    return (bool(srcs), ", ".join(f"{s.description}{' *' if s.is_default else ''}" for s in srcs) or "no microphones")
+
+
+def _portal() -> tuple[bool, str]:
+    from voice.inject.portal import portal_available
+    return (True, "RemoteDesktop portal v2+") if portal_available() else (False, "RemoteDesktop portal missing (xdg-desktop-portal-kde/gnome)")
+
+
+def _cuda() -> tuple[bool, str]:
+    try:
+        import ctranslate2
+        n = ctranslate2.get_cuda_device_count()
+    except Exception as exc:
+        return False, f"ctranslate2 cuda probe failed: {exc}"
+    if n == 0:
+        return False, "no CUDA device; local transcription will run on CPU (install with --extra gpu on the NVIDIA PC)"
+    return True, f"{n} CUDA device(s)"
+
+
+def _model_cache() -> tuple[bool, str]:
+    from voice.config import Config
+    from voice.stt.local import resolve_model_name
+    cfg = Config.load()
+    _, profile = cfg.stt_profile()
+    if profile.get("backend") != "local":
+        return True, "active profile is cloud; nothing to cache"
+    name = resolve_model_name(profile["model"]).replace("/", "--")
+    hub = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub" / f"models--{name}"
+    return (True, str(hub)) if hub.exists() else (False, f"{profile['model']} not downloaded yet (first dictation downloads it)")
+
+
+def _senders() -> tuple[bool, str]:
+    found = [b for b in ("wtype", "ydotool") if shutil.which(b)]
+    return True, ", ".join(found) or "none (portal is the primary path)"
+
+
+def default_probes() -> dict[str, Callable[[], tuple[bool, str]]]:
+    return {
+        "python": lambda: (True, f"{sys.version.split()[0]} · voice {__version__}"),
+        "config": _config,
+        "keyboard access": _keyboard,
+        "pw-record": lambda: _which("pw-record"),
+        "microphones": _sources,
+        "wl-clipboard": lambda: (_which("wl-copy")[0] and _which("wl-paste")[0], "wl-copy/wl-paste" if _which("wl-copy")[0] else "install wl-clipboard"),
+        "portal": _portal,
+        "cuda": _cuda,
+        "model cache": _model_cache,
+        "notify-send": lambda: _which("notify-send"),
+        "fallback senders": _senders,
+    }
+
+
+def run_checks(probes: dict[str, Callable[[], tuple[bool, str]]] | None = None) -> list[Check]:
+    out = []
+    for name, probe in (probes or default_probes()).items():
+        try:
+            ok, detail = probe()
+        except Exception as exc:
+            ok, detail = False, str(exc)
+        out.append(Check(name, ok, detail))
+    return out
+
+
+def run_doctor() -> int:
+    checks = run_checks()
+    failed_required = False
+    for c in checks:
+        mark = "✔" if c.ok else "✘"
+        tag = "" if c.ok or c.name in REQUIRED else " (optional)"
+        print(f"{mark} {c.name}{tag}: {c.detail}")
+        if not c.ok and c.name in REQUIRED:
+            failed_required = True
+    print("\nall required checks passed" if not failed_required else "\nfix the ✘ required items above")
+    return 1 if failed_required else 0

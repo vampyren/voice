@@ -22,6 +22,15 @@ def isolated_xdg(tmp_path, monkeypatch, request):
     yield tmp_path
 
 
+@pytest.fixture(autouse=True)
+def fresh_overlay_probe():
+    """The helper probe is answered once per process; tests stub the interpreters."""
+    from voice.ui.overlay_client import reset_probe_cache
+    reset_probe_cache()
+    yield
+    reset_probe_cache()
+
+
 class FakeStdin:
     """A stdin pipe that records what the daemon writes to the overlay helper."""
 

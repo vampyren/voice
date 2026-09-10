@@ -1,6 +1,7 @@
 """The daemon side of the overlay protocol: spawn, throttle, survive, stop."""
 import subprocess
 import threading
+import time
 
 import pytest
 
@@ -379,3 +380,105 @@ def test_stop_kills_the_helper_instead_of_blocking_on_its_stdin():
     threading.Thread(target=stop, name="stopper", daemon=True).start()
     assert stopped.wait(1.0), "stop() blocked on the helper's stdin"
     assert proc.terminated is True
+
+
+# -- a helper that stops taking writes -----------------------------------------
+class _SlowStdin:
+    """A pipe whose write is still in flight when someone swaps the process."""
+
+    def __init__(self):
+        self.data = b""
+        self.closed = False
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def write(self, blob: bytes) -> int:
+        self.entered.set()
+        self.release.wait(5)
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+        self.data += blob
+        return len(blob)
+
+    def flush(self) -> None:
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_a_helper_that_stops_taking_writes_is_restarted_once(helper_processes):
+    """A write failure is the helper dying mid-message, so it falls under the
+    restart-once policy - it used to disable the pill for the whole session."""
+    client = _client(helper_processes)
+    client.start()
+    helper_processes.made[0].stdin.close()          # writing now raises ValueError
+    client.send({"state": "recording"})
+    assert client.flush(2.0)
+    assert len(helper_processes.made) == 2          # replaced, not given up on
+    assert client.status() == "running"
+
+    client.send({"state": "transcribing"})          # later messages reach the new one
+    assert client.flush(2.0)
+    assert helper_processes.made[1].lines() == [{"state": "transcribing"}]
+
+    helper_processes.made[1].stdin.close()
+    client.send({"state": "done"})
+    assert client.flush(2.0)
+    assert len(helper_processes.made) == 2          # and then it stays off
+    assert client.status() == "disabled: helper not writable"
+    client.stop()
+
+
+def test_a_swap_under_an_in_flight_write_does_not_kill_the_new_helper(helper_processes):
+    """restart() closes the old stdin while the writer may be inside write();
+    the ValueError that raises belongs to the process that is already gone."""
+    client = _client(helper_processes)
+    client.start()
+    slow = _SlowStdin()
+    helper_processes.made[0].stdin = slow
+    client.send({"state": "recording"})
+    assert slow.entered.wait(2.0)                   # the writer is inside write()
+
+    client.restart()                                # closes the old stdin under it
+    assert len(helper_processes.made) == 2
+    slow.release.set()                              # the stale write now raises
+
+    client.send({"state": "transcribing"})
+    assert client.flush(2.0)
+    assert client.status() == "running"
+    assert helper_processes.made[1].lines() == [{"state": "transcribing"}]
+    client.stop()
+
+
+def test_send_returns_at_once_while_the_helper_is_respawned(helper_processes):
+    """The respawn re-runs the interpreter probe; send() is called from the
+    pw-record reader thread and must never wait for it."""
+    def launcher():
+        if helper_processes.made:                   # the respawn, not the first start
+            time.sleep(0.5)                         # like the interpreter probe
+        return helper_processes()
+
+    client = _client(launcher)
+    client.start()
+    helper_processes.made[0].exit(1)
+
+    started = time.monotonic()
+    client.send({"state": "recording"})
+    assert time.monotonic() - started < 0.05
+
+    assert client.flush(2.0)
+    assert len(helper_processes.made) == 2
+    assert helper_processes.made[1].lines() == [{"state": "recording"}]
+    client.stop()
+
+
+def test_the_interpreter_probe_runs_once_per_process(monkeypatch):
+    """Every respawn used to pay for the probe again - up to 10 s of subprocess."""
+    probed = []
+    monkeypatch.setattr("voice.ui.overlay_client._probe",
+                        lambda python: probed.append(python) or ("gtk4",))
+    default_launcher(popen=lambda cmd, **kw: "proc")
+    default_launcher(popen=lambda cmd, **kw: "proc")
+    assert probed == ["/usr/bin/python3"]

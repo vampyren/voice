@@ -66,6 +66,9 @@ NO_LAYER_SHELL_EXIT = 2
 #: What `voice status` shows for an overlay that gave up for that reason.
 NO_LAYER_SHELL_STATUS = "disabled: no layer-shell"
 
+#: Queue item meaning "the helper is gone; bring it back before the next line".
+_RESPAWN = object()
+
 
 def repo_root() -> Path:
     """The directory holding the `voice` package, for the helper's PYTHONPATH."""
@@ -123,6 +126,28 @@ def helper_command() -> list[str] | None:
     return probe_helper().command
 
 
+#: probe_helper() spawns interpreters and waits up to PROBE_TIMEOUT_S each. What
+#: it measures - which packages are installed - cannot change under a running
+#: daemon, so it is answered once and then remembered: a helper that dies mid
+#: dictation is respawned without paying for the probe again.
+_PROBE_CACHE: list[HelperProbe] = []
+_PROBE_CACHE_LOCK = threading.Lock()
+
+
+def cached_probe() -> HelperProbe:
+    """`probe_helper()`, run at most once in this process."""
+    with _PROBE_CACHE_LOCK:
+        if not _PROBE_CACHE:
+            _PROBE_CACHE.append(probe_helper())
+        return _PROBE_CACHE[0]
+
+
+def reset_probe_cache() -> None:
+    """Forget the remembered probe. For tests, which stub the interpreters."""
+    with _PROBE_CACHE_LOCK:
+        _PROBE_CACHE.clear()
+
+
 def default_launcher(position: str = "bottom", lang: str = "en", verbose: bool = False,
                      allow_fallback: bool = False, popen: Callable = subprocess.Popen):
     """Spawn the helper, or return None when this machine cannot run it.
@@ -132,7 +157,7 @@ def default_launcher(position: str = "bottom", lang: str = "en", verbose: bool =
     with the repository prepended to PYTHONPATH so the system interpreter can
     import `voice.ui.overlay`.
     """
-    probe = probe_helper()
+    probe = cached_probe()
     if probe.command is None:
         log.warning("recording overlay disabled: %s", probe.reason)
         return None
@@ -182,6 +207,10 @@ class OverlayClient:
         self._restarts = 0
         self._pending_level: dict | None = None
         self._last_level: float | None = None
+        #: Bumped on every spawn, so a write that fails after the process it was
+        #: aimed at has been replaced cannot condemn its replacement.
+        self._generation = 0
+        self._respawn_queued = False
 
     # -- lifecycle ----------------------------------------------------------
     def status(self) -> str:
@@ -192,7 +221,9 @@ class OverlayClient:
         """
         with self._lock:
             if self.enabled and not self._stopped and self._proc is not None:
-                self._alive()
+                # `voice status` is a user command on its own thread, so unlike
+                # send() it can afford the spawn itself.
+                self._alive(spawn_here=True)
             return self._status
 
     def start(self) -> None:
@@ -210,6 +241,7 @@ class OverlayClient:
             self._dead = False
             self._stopped = False
             self._restarts = 0
+            self._respawn_queued = False
             self._pending_level = None
             if self.enabled:
                 self._status = "not started"
@@ -294,6 +326,7 @@ class OverlayClient:
             self._status = "disabled: no helper"
             return False
         self._proc = proc
+        self._generation += 1
         self._dead = False
         self._status = "running"
         if self._writer is None or not self._writer.is_alive():
@@ -338,20 +371,31 @@ class OverlayClient:
 
     def _enqueue(self, message: dict) -> None:
         line = (json.dumps(message, separators=(",", ":")) + "\n").encode()
-        try:
-            self._queue.put_nowait(line)
-        except queue.Full:
+        if not self._put(line):
             log.debug("overlay queue full; dropping %s", message)
-            return
+
+    def _put(self, item) -> bool:
+        """Caller holds the lock. Hand one item to the writer thread."""
+        try:
+            self._queue.put_nowait(item)
+        except queue.Full:
+            return False
         self._inflight += 1
         self._idle.clear()
+        return True
 
-    def _alive(self) -> bool:
-        """Caller holds the lock. Restarts a helper that exited, once."""
+    def _alive(self, spawn_here: bool = False) -> bool:
+        """Caller holds the lock. Restarts a helper that exited, once.
+
+        `spawn_here` decides *where*: send() runs on the audio reader thread, so
+        it only asks the writer thread for the restart and returns.
+        """
         if self._dead or self._proc is None:
             return False
         if self._proc.poll() is None:
             return True
+        if self._respawn_queued:
+            return True                     # the writer is already bringing it back
         code = self._proc.returncode
         if code == NO_LAYER_SHELL_EXIT:
             # The helper refused to show a window that would take the focus.
@@ -367,10 +411,40 @@ class OverlayClient:
             return False
         self._restarts += 1
         log.warning("recording overlay helper exited (%s); restarting it once", code)
-        self._close(self._proc)
-        self._proc = None
-        self._last_level = None
-        return self._spawn()
+        if spawn_here:
+            proc, self._proc = self._proc, None
+            self._last_level = None
+            self._close(proc)
+            return self._spawn()
+        return self._queue_respawn()
+
+    def _queue_respawn(self) -> bool:
+        """Caller holds the lock. Ask the writer thread to bring the helper back.
+
+        Queued rather than done here so the message that noticed the death is
+        written to the replacement, in order, and so no caller ever pays for a
+        spawn: `send` runs on the pw-record reader thread.
+        """
+        if self._respawn_queued:
+            return True
+        if not self._put(_RESPAWN):
+            log.debug("overlay queue full; not restarting the helper yet")
+            return False
+        self._respawn_queued = True
+        return True
+
+    def _respawn(self) -> None:
+        """Writer thread: replace the helper the queue told us to give up on."""
+        with self._lock:
+            self._respawn_queued = False
+            if self._dead or self._stopped or not self.enabled:
+                return
+            proc, self._proc = self._proc, None
+            self._last_level = None
+        self._close(proc)                   # bounded, and never under the lock
+        with self._lock:
+            if not (self._dead or self._stopped) and self._proc is None:
+                self._spawn()
 
     def _die(self, status: str, message: str) -> None:
         """Give up on the helper, saying so exactly once."""
@@ -384,11 +458,14 @@ class OverlayClient:
     # -- writer thread ------------------------------------------------------
     def _pump(self) -> None:
         while True:
-            line = self._queue.get()
+            item = self._queue.get()
             try:
-                if line is None:
+                if item is None:
                     return
-                self._write(line)
+                if item is _RESPAWN:
+                    self._respawn()
+                else:
+                    self._write(item)
             finally:
                 self._queue.task_done()
                 with self._lock:
@@ -398,7 +475,7 @@ class OverlayClient:
 
     def _write(self, line: bytes) -> None:
         with self._lock:
-            proc = self._proc
+            proc, generation = self._proc, self._generation
         stdin = getattr(proc, "stdin", None) if proc is not None else None
         if stdin is None:
             return
@@ -406,8 +483,30 @@ class OverlayClient:
             stdin.write(line)
             stdin.flush()
         except Exception as exc:
-            self._die("disabled: helper not writable",
-                      f"recording overlay: cannot write to the helper ({exc})")
+            self._write_failed(generation, exc)
+
+    def _write_failed(self, generation: int, exc: Exception) -> None:
+        """Writer thread: the helper stopped taking writes. That is it dying.
+
+        Treated exactly like an exit, restart-once included - anything else
+        would leave a helper that broke mid-message off for the session.
+        """
+        with self._lock:
+            if generation != self._generation:
+                # The process was swapped while this write was in flight (a
+                # restart, or an earlier failure): closing the old stdin is what
+                # raised, and it says nothing about the helper running now.
+                log.debug("overlay write to a replaced helper failed (%s)", exc)
+                return
+            if self._dead or self._stopped:
+                return
+            if self._restarts >= 1:
+                self._die("disabled: helper not writable",
+                          f"recording overlay: cannot write to the helper ({exc}); it stays off")
+                return
+            self._restarts += 1
+        log.warning("recording overlay: the helper stopped reading (%s); restarting it once", exc)
+        self._respawn()
 
     def flush(self, timeout: float = 1.0) -> bool:
         """Wait for queued messages to reach the helper. For stop() and tests."""

@@ -186,6 +186,12 @@ def _language_after(reply: dict, before: str | None = None) -> str:
     language = reply.get("language")
     if language != PENDING_LANGUAGE:
         return str(language)
+    if before is None:
+        # The pre-switch read failed or named nothing, so a read-back has
+        # nothing to be different from: the first one would return whatever the
+        # daemon happens to say, which is the language being cycled away from
+        # until the Qt thread gets to the switch. Better to name none at all.
+        return "switched (could not read the previous language)"
     deadline = time.monotonic() + LANGUAGE_POLL_TIMEOUT_S
     while True:
         try:

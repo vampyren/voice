@@ -179,6 +179,51 @@ def test_a_pending_next_that_never_moves_prints_what_it_last_read(isolated_xdg, 
     assert capsys.readouterr().out.splitlines() == ["language: en"]
 
 
+def test_a_pending_next_says_so_when_it_never_read_the_old_language(isolated_xdg, capsys):
+    """The pre-switch read is the only thing that tells a daemon which has
+    applied the cycle from one which has not. Without it the first read-back
+    returned immediately - printing the language being cycled *away from*."""
+    seen = []
+
+    def handler(req):
+        seen.append(req["cmd"])
+        if req["cmd"] == "status":
+            return {"ok": True}                 # a status that names no language
+        return {"ok": True, "language": "pending"}
+
+    srv = ipc.Server(handler)
+    srv.start()
+    try:
+        assert main(["language", "next"]) == 0
+    finally:
+        srv.stop()
+    assert seen == ["status", "language"]        # nothing to compare a read-back to
+    out = capsys.readouterr().out.splitlines()
+    assert out == ["language: switched (could not read the previous language)"]
+    assert "language: en" not in out
+
+
+def test_a_pending_next_says_so_when_the_pre_read_raised(isolated_xdg, capsys, monkeypatch):
+    """Same hole, reached the other way: the pre-switch `status` raised."""
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise ipc.IPCError("the daemon is not running")
+        return "en"                              # the language it is cycling away from
+
+    monkeypatch.setattr("voice.cli._current_language", flaky)
+    srv = ipc.Server(lambda r: {"ok": True, "language": "pending"})
+    srv.start()
+    try:
+        assert main(["language", "next"]) == 0
+    finally:
+        srv.stop()
+    assert capsys.readouterr().out.splitlines() == [
+        "language: switched (could not read the previous language)"]
+
+
 def test_a_named_language_is_confirmed_before_it_is_reported(isolated_xdg, capsys):
     """handle() replies ok before the Qt thread has applied anything, so an ok
     reply is not a switch: the CLI reads the language back like `next` does."""

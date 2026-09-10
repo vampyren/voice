@@ -1,7 +1,9 @@
 # Portal hotkey backend and recording overlay
 
 Design addendum to `2026-09-10-voice-dictation-design.md`, written 2026-09-10 after the first
-live test. Status: approved by the owner 2026-09-10 (visual reference supplied as a screenshot).
+live test. Status: approved by the owner 2026-09-10 (visual reference supplied as a screenshot);
+all three sections were built in phase 1b, and this document has been brought back into line
+with what was built.
 
 ## Why
 
@@ -23,18 +25,22 @@ while recording.
 backend = "auto"       # "auto" | "evdev" | "portal"
 dictate = "KEY_RIGHTCTRL"          # evdev name (kernel listener)
 portal_dictate = "CTRL+space"      # XDG shortcut trigger (portal listener); user can change it in the compositor dialog
+portal_language_toggle = ""        # and the same for recall, cancel and the language toggle
 ```
 `auto` chooses `evdev` when at least one keyboard device is readable and the session has a local
 seat, otherwise `portal`. `voice doctor` and `voice status` report the active backend.
+
+Both syntaxes accept combinations joined with `+`: `KEY_LEFTMETA+KEY_SPACE` for evdev,
+`CTRL+space` or `CTRL+SHIFT+l` for the portal.
 
 **Module.** `voice/hotkey/portal_listener.py` exposes the same interface as `EvdevListener`
 (`start/stop/capture_next/held/modifiers_held/devices_ok`) so the daemon swaps them without
 other changes. Flow over jeepney on the session bus: `CreateSession` → `BindShortcuts` with one
 shortcut id `dictate` (description "Voice dictation", `preferred_trigger` from config) → listen
 for `Activated` (press) and `Deactivated` (release) on the session → feed the existing
-`Tracker`-shaped events (`("dictate", "press"|"release")`) to the daemon. `recall` and `cancel`
-are bound as extra shortcuts when configured. The compositor shows its shortcut dialog once;
-the session handle is reused while the daemon runs. Non-sandboxed apps need an app id: the
+`Tracker`-shaped events (`("dictate", "press"|"release")`) to the daemon. `recall`, `cancel`
+and `language_toggle` are bound as extra shortcuts when configured (empty trigger = not bound).
+The compositor shows its shortcut dialog once; the session handle is reused while the daemon runs. Non-sandboxed apps need an app id: the
 daemon already runs with `APP_ID` and the installer ships `packaging/voice.desktop`; the
 listener sets the `handle_token`/`session_handle_token` options and, where the portal is
 ≥ 1.21, registers via `org.freedesktop.host.portal.Registry` with that app id.
@@ -42,7 +48,11 @@ listener sets the `handle_token`/`session_handle_token` options and, where the p
 **Limits.** Compositors reject a bare modifier as a global shortcut, so the portal path needs a
 combination (Ctrl+Space by default). `modifiers_held()` returns False for the portal backend
 (the compositor has already consumed the chord), so the injector's modifier wait is skipped.
-Capture-key in settings shows the compositor dialog instead of reading a raw key.
+There is no key to capture on this backend - the compositor consumes the chord before anything
+else sees it - so the settings window replaces the capture button with text fields for the four
+triggers themselves. Saving a changed trigger (or a changed `hotkeys.backend`) rebuilds the
+listener on `apply_config`, which creates a new portal session: the desktop may ask for
+permission again, and that is the price of applying it without restarting the daemon.
 
 **Tests.** Unit: a fake bus that emits `Activated`/`Deactivated` messages drives the listener
 and the daemon receives press/release; backend selection table for `auto`. Boundary (VM):
@@ -65,14 +75,30 @@ message in amber for 2 s. Nothing is clickable; it never takes focus.
 `voice.ui.overlay:main`), written with GTK4 through the already-installed PyGObject. The daemon
 spawns it on startup and talks to it over the helper's stdin with one JSON line per event:
 `{"state": "recording"}`, `{"level": 0.42}`, `{"state": "transcribing"}`, `{"state": "done"}`,
-`{"state": "error", "text": "..."}`, `{"state": "hidden"}`. A crash or absence of the helper
-never affects dictation; the daemon just logs it.
+`{"state": "error", "text": "..."}`, `{"state": "hidden"}`, `{"language": "sv"}` and
+`{"state": "notice", "text": "EN → SV"}`. A crash or absence of the helper never affects
+dictation; the daemon just logs it.
 
-**Placement.** With `gtk4-layer-shell` present (Arch `extra`, needed on KDE Plasma and on
-wlroots) the window is a layer-shell surface on the overlay layer, anchored bottom, 48 px
-margin, no keyboard interactivity, so it floats above everything. Without it (GNOME, or the
-package missing) it falls back to a plain undecorated GTK window that the compositor places;
-functional, not pinned.
+Two ordering rules the daemon keeps: a `{"language": ...}` message precedes every `recording`,
+so the pill never appears showing the language of the last dictation; and more generally it
+precedes any state message whose language differs from the last one sent, which is how a switch
+made from the settings window or the tray reaches a pill that is already on screen. `done` is
+sent once per dictation, on the idle that follows a successful insertion - the injection itself
+sends nothing.
+
+**Placement, and the focus rule.** With `gtk4-layer-shell` present (Arch `extra`, needed on KDE
+Plasma and on wlroots) the window is a layer-shell surface on the overlay layer, anchored bottom,
+48 px margin, no keyboard interactivity, so it floats above everything and cannot take the
+keyboard. Without it, a plain undecorated GTK window is all that is left - and GTK 4 dropped the
+accept-focus and focus-on-map hints, so such a window *is* focused when it maps and the paste
+chord would land in the pill. The helper therefore refuses to show one unless
+`ui.overlay_allow_fallback` is set, and the daemon runs without a pill instead.
+
+**Layer-shell present but unsupported by the compositor counts as absent.** The library needs
+`zwlr_layer_shell_v1`, which GNOME does not implement; installed-but-inert would otherwise map
+the focus-taking toplevel while `voice doctor` reported "layer-shell ok". The helper asks
+`Gtk4LayerShell.is_supported()` and treats False exactly like a missing typelib, and doctor
+says "layer-shell: installed but unsupported by this compositor".
 
 **Audio levels.** `Recorder` gains an optional `on_level(rms: float)` callback computed per
 4096-byte chunk on the reader thread (RMS of int16 samples, normalised to 0..1 with a soft
@@ -82,26 +108,32 @@ knee). The daemon forwards levels to the helper, throttled to 30/s.
 ```toml
 [ui]
 overlay = true
-overlay_position = "bottom"   # "bottom" | "top"
+overlay_position = "bottom"        # "bottom" | "top"
+overlay_allow_fallback = false     # show a focus-taking window rather than no pill
 ```
+`[ui]` is baked into the helper's command line, so `voice reload` compares the table against
+what the running helper was started with and rebuilds the client only when it differs. The
+language is not part of that comparison: it travels to the running helper as a message, because
+restarting the pill for it would take it off the screen mid-notice.
 
 **Tests.** Unit: level computation; the helper's state machine and drawing model with a fake
-clock (bar heights decay, state transitions, hide timer); daemon forwards events and survives
-a dead helper. Visual: screenshots of each state rendered offscreen, inspected. Boundary
-(VM): overlay appears during a real dictation.
+clock (bar heights, automatic gain, state transitions, hold timers); the three layer-shell cases
+(absent, present-unsupported, present-supported) against a stubbed `gi`; daemon forwards events,
+restarts a helper that dies or stops reading exactly once, and never blocks a caller on a spawn.
+Visual: screenshots of each state rendered offscreen, inspected. Boundary (VM): overlay appears
+during a real dictation.
 
-## Out of scope for this addendum
+## 3. Fast language switch
 
-Click actions on the pill, dragging it, showing partial transcripts, and the KDE-specific
-tray/notification polish already listed in the phase plan.
-
-## 3. Fast language switch (added 2026-09-10 at the owner's request)
+Status: built in phase 1b alongside sections 1 and 2.
 
 **What the user sees.** The pill shows a small language badge ("EN", "SV", "AUTO") next to the
 elapsed counter. A `language_toggle` hotkey cycles through `general.languages`; on each change
-the pill appears for 2 s in a `notice` state showing "EN → SV" (no bars), then hides. The tray
-menu gets a "Language" submenu with radio entries for the same list. CLI: `voice language <code>`
-and `voice language next`.
+the pill shows a `notice` for 2 s reading "EN → SV" (no bars). A notice is an overlay on
+whatever was on screen: when it expires the pill returns to that state with its timers intact -
+a recording keeps counting underneath it and resumes with the time it had left - and it hides
+only when the state it interrupted was `hidden`. The tray menu gets a "Language" submenu with
+radio entries for the same list. CLI: `voice language <code>` and `voice language next`.
 
 **Config.**
 ```toml
@@ -114,10 +146,36 @@ language_toggle = ""            # evdev key name
 portal_language_toggle = ""     # portal trigger
 ```
 
-**Behaviour.** Switching sets `general.language`, saves the config on the Qt thread (same path
-as profile switching), applies it, and is read by the next dictation. The overlay protocol
-gains `{"language": "sv"}` and `{"state": "notice", "text": "EN → SV"}`. The pill remains
+**Behaviour.** Switching sets `general.language` and saves the config on the Qt thread (same
+path as profile switching, including re-reading the file first so the write lands on top of it),
+then applies it. `general.language` is read at transcription time rather than when recording
+starts, so a switch made mid-recording applies to that recording. The overlay protocol gains
+`{"language": "sv"}` and `{"state": "notice", "text": "EN → SV"}`. The pill remains
 non-interactive.
 
-**Tests.** IPC `language` command (valid, invalid, `next` wraps around); toggle hotkey cycles and
-persists; overlay model `notice` state hides after 2 s; badge rendered in the PNG check.
+**The cycle.** `general.languages` is the toggle's order, and `general.language` need not be in
+it (a language chosen by name or from the tray is honoured whatever the list says).
+
+- No list at all - a config written before this feature - means the cycle is the one language
+  in force, so a toggle bound in a newer build does nothing rather than jumping somewhere the
+  user never chose.
+- `next` from a language outside the cycle enters it at the first entry.
+- A cycle with nowhere to move to - one entry, already in force - makes the toggle a no-op:
+  no save, no reload, no "EN → EN" flashing on the pill. Switching to the language already in
+  force is the same no-op, whichever route asked for it.
+- `next` is resolved on the Qt thread, where the config is written, not on the caller's: two
+  toggles in quick succession are two steps. The IPC reply therefore cannot name the result and
+  says `{"ok": true, "language": "pending"}`; `voice language next` reads it back with one
+  `status` call.
+
+**Tests.** IPC `language` command (valid, invalid, `next` wraps around, `next` resolved on the Qt
+thread so a double tap is two steps, a switch to the current language changes nothing); toggle
+hotkey cycles and persists (asserted through `Config.load()`, i.e. the file); a single-entry
+cycle is a no-op; the overlay model's `notice` returns to the state it interrupted with its
+timers intact and hides only from `hidden`; the badge is rendered in the PNG check; the settings
+dialog does not revert a language switched while it was open.
+
+## Out of scope for this addendum
+
+Click actions on the pill, dragging it, showing partial transcripts, and the KDE-specific
+notification polish already listed in the phase plan.

@@ -746,10 +746,12 @@ def test_the_language_toggle_hotkey_cycles_without_touching_the_pipeline(
     d._on_hotkey("language_toggle", "press")
     qapp.processEvents()
     assert d.config.get("general.language") == "sv"
+    assert Config.load().get("general.language") == "sv"   # and it reached the file
     assert d.dictation.state.value == "idle"          # it is not a dictation key
     d._on_hotkey("language_toggle", "release")        # release does nothing
     qapp.processEvents()
     assert d.config.get("general.language") == "sv"
+    assert Config.load().get("general.language") == "sv"
     d.shutdown()
 
 

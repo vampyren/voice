@@ -23,3 +23,22 @@ def test_bad_regex_is_skipped():
 
 def test_normalize_text():
     assert normalize_text("  “Hi”  there ’s \n more ") == '"Hi" there \'s more'
+
+
+def test_literal_target_is_inserted_verbatim():
+    # A literal rule's target is text, not an re template: backslash escapes must
+    # survive and group references must not be expanded (or rejected).
+    assert apply_replacements("open new line here", [["new line", r"C:\new"]]) == r"open C:\new here"
+    assert apply_replacements("say foo", [["foo", r"\1bar"]]) == r"say \1bar"
+    assert apply_replacements("a b", [["a", "x\\y"]]) == "x\\y b"
+
+
+def test_literal_rule_matches_phrases_with_non_word_edges():
+    assert apply_replacements("I write c++ daily", [["c++", "C++"]]) == "I write C++ daily"
+    assert apply_replacements("obs bot. yes", [["obs bot.", "OBS Bot."]]) == "OBS Bot. yes"
+    assert apply_replacements("(paren) here", [["(paren)", "PAREN"]]) == "PAREN here"
+
+
+def test_non_word_edges_do_not_widen_the_word_boundary_on_the_other_side():
+    # The leading edge is still guarded: "c++" has a word char at the front.
+    assert apply_replacements("abc++ daily", [["c++", "C++"]]) == "abc++ daily"

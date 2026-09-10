@@ -440,8 +440,8 @@ class Daemon:
         if self._server:
             self._server.stop()
 
-    def apply_config(self) -> None:
-        """Re-reads config. Runs on the Qt thread only (see _Bridge.apply_config)."""
+    def _reload_config(self) -> bool:
+        """Re-read the file. Qt thread only. False means nothing was applied."""
         try:
             self.config.reload()
         except ValueError as exc:
@@ -449,6 +449,12 @@ class Daemon:
             # the user learns nothing was applied is this notification.
             log.warning("config reload failed, keeping previous settings: %s", exc)
             self._notifier.notify("Config error, keeping previous settings", str(exc), "critical")
+            return False
+        return True
+
+    def apply_config(self) -> None:
+        """Re-reads config. Runs on the Qt thread only (see _Bridge.apply_config)."""
+        if not self._reload_config():
             return
         self.tracker.set_specs(hotkey_specs(self.config))
         self._notifier.set_enabled(bool(self.config.get("general.notifications", True)))
@@ -466,7 +472,20 @@ class Daemon:
         self._sync_overlay_language()
 
     def _set_profile(self, name: str) -> None:
-        """Qt thread: persist the profile switch, then apply it."""
+        """Qt thread: persist the profile switch, then apply it.
+
+        The file is re-read first: this Config is a whole-document snapshot, so
+        saving it back would otherwise revert every edit made since it loaded -
+        a hand edit, or the settings dialog's own save.
+        """
+        if not self._reload_config():
+            return
+        if name not in (self.config.get("stt.profiles", {}) or {}):
+            # Validated on the IPC thread against the document we had then.
+            log.warning("profile %r is no longer in the config; not switching", name)
+            self._notifier.notify("Profile is gone",
+                                  f"'{name}' is no longer defined in config.toml", "critical")
+            return
         try:
             self.config.set("stt.active", name)
             self.config.save()
@@ -483,6 +502,8 @@ class Daemon:
         thread that owns the config, so two toggles queued before this drains
         are two steps rather than the same one twice.
         """
+        if not self._reload_config():       # never write back a stale document
+            return
         previous = str(self.config.get("general.language", "en") or "en")
         code = self._next_language() if code == NEXT_LANGUAGE else code
         if not code or code == previous:

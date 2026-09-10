@@ -692,6 +692,7 @@ def test_language_next_wraps_around_the_configured_cycle(isolated_xdg, qapp, mon
                                                          helper_processes):
     cfg = Config.load()
     cfg.set("general.languages", ["en", "sv", "auto"])
+    cfg.save()                    # the daemon re-reads the file before it writes
     d = _overlay_daemon(cfg, monkeypatch, helper_processes)
     for expected in ("sv", "auto", "en", "sv"):
         # "next" is resolved on the Qt thread, so the reply cannot name it yet.
@@ -790,6 +791,7 @@ def test_a_cycle_of_one_language_makes_the_toggle_a_no_op(isolated_xdg, qapp, mo
                                                           helper_processes):
     cfg = Config.load()
     cfg.set("general.languages", ["en"])
+    cfg.save()
     d = _overlay_daemon(cfg, monkeypatch, helper_processes)
     assert d._next_language() is None                 # nowhere to go
 
@@ -806,6 +808,7 @@ def test_two_toggles_before_the_qt_thread_drains_are_two_steps(isolated_xdg, qap
     resolved twice from the same current language and lost a step."""
     cfg = Config.load()
     cfg.set("general.languages", ["en", "sv", "auto"])
+    cfg.save()
     d = _overlay_daemon(cfg, monkeypatch, helper_processes)
 
     replies = []
@@ -959,3 +962,62 @@ def test_quit_returns_from_run_and_leaves_nothing_holding_the_process(
     # the interpreter alive once the socket is gone.
     assert _live_threads() == []
     release.set()
+
+
+# -- writing the config without clobbering it ----------------------------------
+def test_a_profile_switch_keeps_edits_made_to_the_file_meanwhile(isolated_xdg, qapp, monkeypatch):
+    """The daemon holds a whole-document snapshot, so set+save wrote back
+    everything - reverting a hand edit, or the settings dialog's own save."""
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray())
+    d.build()
+
+    external = Config.load()
+    external.set("stt.profiles.openai.model", "gpt-4o-mini-transcribe")
+    external.set("audio.max_seconds", 42)
+    external.save()
+
+    d.handle({"cmd": "profile", "name": "openai"})
+    qapp.processEvents()
+    again = Config.load()
+    assert again.get("stt.active") == "openai"                          # the switch landed
+    assert again.get("stt.profiles.openai.model") == "gpt-4o-mini-transcribe"
+    assert again.get("audio.max_seconds") == 42                         # and so did the edit
+    d.shutdown()
+
+
+def test_a_language_switch_keeps_edits_made_to_the_file_meanwhile(isolated_xdg, qapp, monkeypatch,
+                                                                  helper_processes):
+    d = _overlay_daemon(Config.load(), monkeypatch, helper_processes)
+    external = Config.load()
+    external.set("audio.max_seconds", 42)
+    external.save()
+
+    d.handle({"cmd": "language", "code": "sv"})
+    qapp.processEvents()
+    again = Config.load()
+    assert again.get("general.language") == "sv"
+    assert again.get("audio.max_seconds") == 42
+    d.shutdown()
+
+
+def test_a_profile_that_vanished_from_the_file_is_not_written(isolated_xdg, qapp, monkeypatch):
+    """Validated on the IPC thread against the old document; by the time the Qt
+    thread applies it the file may no longer define it, and writing it would
+    leave a config the daemon itself rejects."""
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray())
+    d.build()
+
+    from voice import paths
+    text = paths.config_file().read_text().replace("[stt.profiles.openai]", "[stt.profiles.gone]")
+    paths.config_file().write_text(text)
+
+    d.handle({"cmd": "profile", "name": "openai"})
+    qapp.processEvents()
+    again = Config.load()
+    assert again.get("stt.active") == "local"        # unchanged
+    assert again.errors() == []
+    d.shutdown()

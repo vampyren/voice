@@ -4,9 +4,18 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 
 from voice import APP_NAME, __version__
-from voice.ipc import PENDING_LANGUAGE, IPCError, is_running, send
+from voice.ipc import NEXT_LANGUAGE, PENDING_LANGUAGE, IPCError, is_running, send
+
+#: How long, and how often, `language next` asks the daemon what it landed on.
+#: The switch happens on the daemon's Qt thread after the reply, so a single
+#: immediate read can still see the language we asked it to leave.
+LANGUAGE_POLL_TIMEOUT_S = 1.5
+LANGUAGE_POLL_INTERVAL_S = 0.05
+
+log = logging.getLogger(__name__)
 
 SIMPLE = ["start", "stop", "toggle", "cancel", "recall", "retry", "status", "settings", "quit", "reload"]
 
@@ -75,10 +84,18 @@ def main(argv: list[str] | None = None) -> int:
         from voice.daemon import main as daemon_main
         return daemon_main()
     request = {"cmd": args.cmd}
+    before = None
     if args.cmd == "profile":
         request["name"] = args.name
     if args.cmd == "language":
         request["code"] = args.code
+        if args.code.strip().lower() == NEXT_LANGUAGE:
+            # What we are cycling away from, so the read-back below can tell a
+            # daemon that has not applied the switch yet from one that has.
+            try:
+                before = _current_language()
+            except IPCError as exc:
+                log.debug("could not read the language before switching: %s", exc)
     try:
         reply = send(request)
     except IPCError as exc:
@@ -90,25 +107,41 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "status":
         _print_status(reply)
     elif args.cmd == "language":
-        print(f"language: {_language_after(reply)}")
+        print(f"language: {_language_after(reply, before)}")
     return 0
 
 
-def _language_after(reply: dict) -> str:
+def _language_after(reply: dict, before: str | None = None) -> str:
     """What the daemon actually switched to.
 
     `next` is resolved on the daemon's Qt thread - two toggles in a row must be
-    two steps - so its reply names no language and one `status` reads back the
-    result instead.
+    two steps - so its reply names no language and `status` reads the result
+    back. That read races the Qt thread, so it is repeated until the language
+    has left `before`, briefly and with a bound: a toggle is allowed to be a
+    no-op (a one-entry cycle, an entry the daemon refuses), and then the last
+    language read is the right answer.
     """
     language = reply.get("language")
     if language != PENDING_LANGUAGE:
         return str(language)
-    try:
-        return str(send({"cmd": "status"}).get("language"))
-    except IPCError as exc:
-        # The switch itself already happened; only the read-back failed.
-        return f"switched (could not read it back: {exc})"
+    deadline = time.monotonic() + LANGUAGE_POLL_TIMEOUT_S
+    while True:
+        try:
+            latest = _current_language()
+        except IPCError as exc:
+            # The switch itself already happened; only the read-back failed.
+            return f"switched (could not read it back: {exc})"
+        if latest is None:
+            return "switched (the daemon did not say what to)"
+        if latest != before or time.monotonic() >= deadline:
+            return latest
+        time.sleep(LANGUAGE_POLL_INTERVAL_S)
+
+
+def _current_language() -> str | None:
+    """The language the daemon reports now; None when its reply does not say."""
+    language = send({"cmd": "status"}).get("language")
+    return None if language is None else str(language)
 
 
 if __name__ == "__main__":

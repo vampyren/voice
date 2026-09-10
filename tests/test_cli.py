@@ -89,6 +89,8 @@ def test_language_is_forwarded_and_the_result_printed(isolated_xdg, capsys):
 
     def handler(req):
         seen.append(req)
+        if req["cmd"] == "status":                 # what `next` reads the result back with
+            return {"ok": True, "language": "en"}
         return {"ok": True, "language": "sv" if req["code"] == "sv" else "auto"}
 
     srv = ipc.Server(handler)
@@ -98,7 +100,8 @@ def test_language_is_forwarded_and_the_result_printed(isolated_xdg, capsys):
         assert main(["language", "next"]) == 0
     finally:
         srv.stop()
-    assert [(r["cmd"], r["code"]) for r in seen] == [("language", "sv"), ("language", "next")]
+    assert [(r["cmd"], r.get("code")) for r in seen] == [
+        ("language", "sv"), ("status", None), ("language", "next")]
     out = capsys.readouterr().out.splitlines()
     assert out == ["language: sv", "language: auto"]
 
@@ -126,15 +129,19 @@ def test_status_prints_what_the_overlay_is_doing(isolated_xdg, capsys):
         srv.stop()
 
 
-def test_a_pending_next_is_read_back_with_one_status_call(isolated_xdg, capsys):
+def test_a_pending_next_waits_until_the_language_actually_moves(isolated_xdg, capsys):
     """`next` is resolved on the daemon's Qt thread, so its reply cannot name
-    the language; the CLI asks what it landed on rather than printing a token."""
+    the language and a single `status` read back races that thread: live, the
+    CLI printed "en" while the daemon had already moved to "sv"."""
     seen = []
+    answers = iter(["en", "en", "sv"])      # before the call, one racing read, then the switch
+    current = {"language": "en"}
 
     def handler(req):
         seen.append(req["cmd"])
         if req["cmd"] == "status":
-            return {"ok": True, "language": "auto"}
+            current["language"] = next(answers, current["language"])
+            return {"ok": True, "language": current["language"]}
         return {"ok": True, "language": "pending"}
 
     srv = ipc.Server(handler)
@@ -143,8 +150,30 @@ def test_a_pending_next_is_read_back_with_one_status_call(isolated_xdg, capsys):
         assert main(["language", "next"]) == 0
     finally:
         srv.stop()
-    assert seen == ["language", "status"]              # exactly one extra round trip
-    assert capsys.readouterr().out.splitlines() == ["language: auto"]
+    assert seen == ["status", "language", "status", "status"]
+    assert capsys.readouterr().out.splitlines() == ["language: sv"]
+
+
+def test_a_pending_next_that_never_moves_prints_what_it_last_read(isolated_xdg, capsys, monkeypatch):
+    """A toggle can legitimately be a no-op (a one-entry cycle, an unusable
+    entry). The poll is bounded and prints the language it last saw."""
+    monkeypatch.setattr("voice.cli.LANGUAGE_POLL_TIMEOUT_S", 0.0)
+    seen = []
+
+    def handler(req):
+        seen.append(req["cmd"])
+        if req["cmd"] == "status":
+            return {"ok": True, "language": "en"}
+        return {"ok": True, "language": "pending"}
+
+    srv = ipc.Server(handler)
+    srv.start()
+    try:
+        assert main(["language", "next"]) == 0
+    finally:
+        srv.stop()
+    assert seen == ["status", "language", "status"]
+    assert capsys.readouterr().out.splitlines() == ["language: en"]
 
 
 def test_a_named_language_needs_no_second_round_trip(isolated_xdg, capsys):

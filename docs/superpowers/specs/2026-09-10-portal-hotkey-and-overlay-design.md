@@ -165,8 +165,14 @@ it (a language chosen by name or from the tray is honoured whatever the list say
   force is the same no-op, whichever route asked for it.
 - `next` is resolved on the Qt thread, where the config is written, not on the caller's: two
   toggles in quick succession are two steps. The IPC reply therefore cannot name the result and
-  says `{"ok": true, "language": "pending"}`; `voice language next` reads it back with one
-  `status` call.
+  says `{"ok": true, "language": "pending"}`. `voice language next` reads the current language
+  before it asks, then polls `status` (every 50 ms, up to 1.5 s) until the language has left
+  that one - a single immediate read races the Qt thread and printed the language just left.
+  A toggle is allowed to be a no-op, so the poll is bounded and then prints what it last read.
+- The daemon validates the resolved target before writing it: `general.languages` is not
+  checked on the way in, and an entry that is not `"auto"` or a two-letter code would otherwise
+  be written to `general.language`, where every later load rejects it. Such an entry is logged,
+  notified and skipped, and the language stays as it was.
 
 **Tests.** IPC `language` command (valid, invalid, `next` wraps around, `next` resolved on the Qt
 thread so a double tap is two steps, a switch to the current language changes nothing); toggle

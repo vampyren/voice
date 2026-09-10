@@ -349,3 +349,24 @@ def test_an_empty_mapping_value_means_no_profile_for_that_language(isolated_xdg)
     assert cfg.language_profiles() == {}
     assert cfg.profile_for_language("sv") is None
     assert [e for e in cfg.errors() if "language_profiles" in e] == []
+
+
+def test_default_inject_mode_is_paste(isolated_xdg):
+    assert Config.load().get("inject.mode") == "paste"
+
+
+def test_errors_rejects_an_unknown_inject_mode(isolated_xdg):
+    cfg = Config.load()
+    cfg.set("inject.mode", "telepathy")
+    assert any("inject.mode" in e and "telepathy" in e for e in cfg.errors())
+
+
+def test_errors_accepts_both_inject_modes_and_a_file_without_the_key(isolated_xdg):
+    cfg = Config.load()
+    for mode in ("paste", "clipboard"):
+        cfg.set("inject.mode", mode)
+        assert [e for e in cfg.errors() if "inject.mode" in e] == []
+    # A config written before this option existed has no key at all and stays valid.
+    doc = cfg._doc
+    del doc["inject"]["mode"]
+    assert [e for e in cfg.errors() if "inject.mode" in e] == []

@@ -89,6 +89,9 @@ replacements = [
 ]
 
 [inject]
+mode = "paste"             # "paste" sends the paste chord; "clipboard" only copies and
+                           # tells you to press Ctrl+V yourself (remote desktops, and any
+                           # compositor that refuses synthetic keystrokes)
 paste_chord = "ctrl+v"
 terminal_chord = "ctrl+shift+v"
 terminal_classes = ["konsole", "org.kde.konsole", "kitty", "alacritty", "foot", "wezterm", "org.gnome.Ptyxis", "gnome-terminal"]
@@ -102,6 +105,8 @@ DEFAULT_PORTAL_TRIGGERS = {"dictate": "CTRL+space", "recall": "", "cancel": "",
                            "language_toggle": ""}
 
 _VALID_MODES = {"hold", "toggle"}
+#: `inject.mode`: send the paste chord, or leave the text on the clipboard and say so.
+INJECT_MODES = ("paste", "clipboard")
 _VALID_HOTKEY_BACKENDS = {"auto", "evdev", "portal"}
 _VALID_BACKENDS = {"local", "openai_compatible"}
 
@@ -267,6 +272,11 @@ class Config:
         errs += self._language_profile_errors(profiles)
         if not isinstance(self.get("audio.max_seconds"), int) or self.get("audio.max_seconds") <= 0:
             errs.append("audio.max_seconds must be a positive integer")
+        # Absent in a config written before this option existed: that file pastes,
+        # exactly as it did then.
+        inject_mode = self.get("inject.mode", "paste")
+        if inject_mode not in INJECT_MODES:
+            errs.append(f"inject.mode must be one of {sorted(INJECT_MODES)}, got {inject_mode!r}")
         for key in ("inject.paste_chord", "inject.terminal_chord"):
             chord = self.get(key)
             if chord is None:

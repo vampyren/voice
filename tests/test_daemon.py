@@ -914,3 +914,48 @@ def test_switching_the_pill_off_by_reload_stops_the_helper(isolated_xdg, qapp, m
     assert d.overlay.enabled is False
     assert len(helper_processes.made) == 1          # no second helper was started
     d.shutdown()
+
+
+# -- quitting ------------------------------------------------------------------
+def _live_threads() -> list[str]:
+    """Non-daemon threads: the ones that keep the interpreter alive at exit."""
+    return sorted(t.name for t in threading.enumerate()
+                  if not t.daemon and t is not threading.main_thread() and t.is_alive())
+
+
+def test_quit_returns_from_run_and_leaves_nothing_holding_the_process(
+        isolated_xdg, qapp, monkeypatch, helper_processes):
+    """`voice quit` unlinked the socket - so a second daemon could start - and
+    then the process stayed alive: the dictation pool's worker is not a daemon
+    thread, so the interpreter waits for it at exit."""
+    import time
+
+    from PySide6.QtCore import QTimer
+
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    monkeypatch.setattr("voice.daemon.default_launcher", lambda **kw: helper_processes())
+    monkeypatch.setattr("voice.daemon.is_running", lambda: False)
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray())
+
+    blocked, release = threading.Event(), threading.Event()
+
+    def stuck():
+        blocked.set()
+        release.wait(10)
+
+    def quit_it():
+        d.dictation._executor(stuck)             # a job still running when we quit
+        assert blocked.wait(2)
+        assert d.handle({"cmd": "quit"}) == {"ok": True}
+
+    QTimer.singleShot(20, quit_it)
+    QTimer.singleShot(5000, qapp.quit)           # so a broken quit fails, not hangs
+    started = time.monotonic()
+    assert d.run() == 0
+    assert time.monotonic() - started < 4.0, "app.exec() did not return on quit"
+
+    # Even with that job still in flight: nothing the daemon starts may keep
+    # the interpreter alive once the socket is gone.
+    assert _live_threads() == []
+    release.set()

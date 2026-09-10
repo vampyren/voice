@@ -368,3 +368,49 @@ def test_the_catch_all_does_not_cancel_when_no_recording_is_in_flight():
     d.on_hotkey("dictate", "press")              # fails before anything was recorded
     assert sv.recorder.cancelled == 0
     assert d.state == State.IDLE
+
+
+# -- the worker thread ---------------------------------------------------------
+def test_the_dictation_worker_runs_jobs_in_order_on_a_daemon_thread():
+    """A ThreadPoolExecutor's threads are joined at interpreter exit, so a job
+    still running there held a quitting daemon open. This one cannot."""
+    from voice.pipeline import Worker
+
+    done = threading.Event()
+    seen = []
+    worker = Worker()
+    worker.submit(lambda: seen.append(1))
+    worker.submit(lambda: seen.append(2))
+    worker.submit(done.set)
+    assert done.wait(2)
+    assert seen == [1, 2]
+    assert worker._thread.daemon is True
+    worker.shutdown()
+
+
+def test_shutdown_drops_work_queued_behind_the_running_job():
+    from voice.pipeline import Worker
+
+    started, release = threading.Event(), threading.Event()
+    ran = []
+    worker = Worker()
+    worker.submit(lambda: (started.set(), release.wait(5)))
+    worker.submit(lambda: ran.append("queued"))
+    assert started.wait(2)
+    worker.shutdown()
+    release.set()
+    time.sleep(0.1)
+    assert ran == []                       # quitting does not wait for it
+
+
+def test_a_job_that_raises_does_not_kill_the_worker(caplog):
+    from voice.pipeline import Worker
+
+    done = threading.Event()
+    worker = Worker()
+    with caplog.at_level("ERROR", logger="voice.pipeline"):
+        worker.submit(lambda: 1 / 0)
+        worker.submit(done.set)
+        assert done.wait(2)
+    assert "dictation job failed" in caplog.text
+    worker.shutdown()

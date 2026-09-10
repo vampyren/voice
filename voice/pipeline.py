@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import logging
+import queue
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
@@ -40,23 +40,75 @@ class Services:
     trim: Callable[[np.ndarray], np.ndarray] = trim_silence
 
 
-_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dictation")
+class Worker:
+    """One daemon thread running submitted jobs in order.
 
+    Deliberately not a ThreadPoolExecutor: its worker threads are *not* daemon
+    threads, and concurrent.futures joins them from an atexit hook - so a
+    transcription or a paste still in flight held the whole process open after
+    quit, with the IPC socket already unlinked and nothing left to reach it
+    with. Started on first use, because most daemons never transcribe anything.
+    """
 
-def _thread_executor(fn: Callable[[], None]) -> None:
-    _pool.submit(fn)
+    def __init__(self, name: str = "dictation"):
+        self._name = name
+        self._lock = threading.Lock()
+        self._jobs: queue.Queue = queue.Queue()
+        self._thread: threading.Thread | None = None
+
+    def submit(self, fn: Callable[[], None]) -> None:
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._run, args=(self._jobs,),
+                                                name=self._name, daemon=True)
+                self._thread.start()
+            self._jobs.put(fn)
+
+    def _run(self, jobs: queue.Queue) -> None:
+        while True:
+            fn = jobs.get()
+            if fn is None:                    # shutdown()
+                return
+            try:
+                fn()
+            except Exception:                 # the pipeline nets its own errors
+                log.exception("dictation job failed")
+
+    def shutdown(self) -> None:
+        """Stop the worker, dropping whatever is queued behind the running job.
+
+        Quitting must not wait on a transcription nobody will ever see; the job
+        already running finishes into the void, on a thread that cannot hold
+        the interpreter open.
+        """
+        with self._lock:
+            thread, self._thread = self._thread, None
+            jobs, self._jobs = self._jobs, queue.Queue()
+        if thread is None:
+            return
+        while True:
+            try:
+                jobs.get_nowait()
+            except queue.Empty:
+                break
+        jobs.put(None)
 
 
 class Dictation:
-    def __init__(self, services: Services, executor: Callable = _thread_executor, timer_factory=threading.Timer):
+    def __init__(self, services: Services, executor: Callable | None = None, timer_factory=threading.Timer):
         self.sv = services
-        self._executor = executor
         self._timer_factory = timer_factory
         self._timer = None
         self._lock = threading.RLock()
         self._state = State.IDLE
         self.on_state: Callable[[State, str], None] = lambda s, d: None
         self.last_error: str | None = None
+        # Owned by this pipeline rather than the module, so quitting can end it.
+        self._worker = Worker()
+        self._executor = executor or self._worker.submit
+
+    def shutdown(self) -> None:
+        self._worker.shutdown()
 
     # -- state ----------------------------------------------------------------
     @property

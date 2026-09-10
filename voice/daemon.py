@@ -415,6 +415,12 @@ class Daemon:
             self._notifier.notify("Model failed to load", str(exc), "critical")
 
     def shutdown(self) -> None:
+        """Give every thread we own its marching orders, in order, bounded.
+
+        Nothing here may raise or block: the socket is unlinked at the end, so
+        anything that hangs after that point leaves a daemon nobody can reach
+        and nobody can quit.
+        """
         try:
             self.dictation.cancel()
         except Exception:
@@ -425,6 +431,12 @@ class Daemon:
             log.exception("failed to stop listener during shutdown")
         if self.overlay is not None:
             self.overlay.stop()
+        try:
+            # The pool's worker is not a daemon thread: left running it holds
+            # the interpreter open at exit, long after the socket is gone.
+            self.dictation.shutdown()
+        except Exception:
+            log.exception("failed to stop the dictation worker during shutdown")
         if self._server:
             self._server.stop()
 

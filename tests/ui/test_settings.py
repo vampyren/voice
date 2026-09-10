@@ -351,3 +351,21 @@ def test_use_this_profile_wins_over_the_map(qapp):
     again = Config.load()
     assert again.get("general.language") == "sv"
     assert again.get("stt.active") == "groq"           # the explicit choice stands
+
+
+def test_a_profile_added_from_a_template_can_be_mapped_at_once(qapp):
+    """The README's two steps are one visit: add local-swedish, then map sv to it."""
+    cfg, dlg, _ = make(qapp)
+    combo = dlg.language_profile_combos["sv"]
+    combo.setCurrentIndex(combo.findData("openai"))          # a choice already made here
+    dlg.add_profile_combo.setCurrentText("local-swedish")
+    dlg.add_profile_button.click()
+
+    combo = dlg.language_profile_combos["sv"]                # rebuilt with the new profile
+    assert combo.findData("local-swedish") > 0
+    assert combo.currentData() == "openai"                   # the choice survived the rebuild
+    combo.setCurrentIndex(combo.findData("local-swedish"))
+    dlg.save_button.click()
+    again = Config.load()
+    assert again.get("general.language_profiles") == {"sv": "local-swedish"}
+    assert again.errors() == []

@@ -230,9 +230,13 @@ class SettingsDialog(QDialog):
         self._load_language_profiles()
         self._language_changed = False     # populating the combo is not a user edit
 
-    def _load_language_profiles(self) -> None:
-        """One row per general.languages entry, each with the profiles that exist."""
-        mapping = self._cfg.language_profiles()
+    def _load_language_profiles(self, mapping: dict[str, str] | None = None) -> None:
+        """One row per general.languages entry, each with the profiles that exist.
+
+        `mapping` overrides what the file says, so the table can be rebuilt after a
+        profile is added without losing choices made here but not yet saved.
+        """
+        mapping = self._cfg.language_profiles() if mapping is None else mapping
         profiles = list(self._cfg.get("stt.profiles", {}) or {})
         codes = self._cfg.languages()
         table = self.language_profile_table
@@ -310,6 +314,9 @@ class SettingsDialog(QDialog):
             self._cfg.set(f"stt.profiles.{name}.{field}", value)
         self.profile_list.addItem(name)
         self.profile_list.setCurrentRow(self.profile_list.count() - 1)
+        # The new profile has to be selectable per language straight away: adding
+        # local-swedish and mapping sv to it is one visit to this window.
+        self._load_language_profiles(self._chosen_language_profiles())
 
     def _activate_profile(self) -> None:
         if self._current_profile:
@@ -371,6 +378,11 @@ class SettingsDialog(QDialog):
             self.language_combo.setCurrentIndex(index)   # show what was really saved
         self._language_changed = False         # that was us, not the user
 
+    def _chosen_language_profiles(self) -> dict[str, str]:
+        """The table as a map, with the "(keep current)" rows left out."""
+        return {code.strip().lower(): combo.currentData()
+                for code, combo in self.language_profile_combos.items() if combo.currentData()}
+
     def _save_language_profiles(self) -> None:
         """Write the map, then apply it when the language was picked here.
 
@@ -378,8 +390,7 @@ class SettingsDialog(QDialog):
         already had a map: an owner who ignores the feature keeps the commented
         example the default config ships.
         """
-        mapping = {code.strip().lower(): combo.currentData()
-                   for code, combo in self.language_profile_combos.items() if combo.currentData()}
+        mapping = self._chosen_language_profiles()
         if mapping or (self._cfg.get("general.language_profiles") or {}):
             self._cfg.set("general.language_profiles", mapping)
         if not self._language_changed or self._active_changed:

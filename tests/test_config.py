@@ -64,3 +64,16 @@ def test_load_with_invalid_toml_raises_clear_error(isolated_xdg):
     paths.config_file().write_text("this = [unclosed")
     with pytest.raises(ValueError, match="config.toml"):
         Config.load()
+
+
+def test_errors_reports_unparseable_paste_chords(isolated_xdg):
+    cfg = Config.load()
+    cfg.set("inject.paste_chord", "hyper+v")
+    cfg.set("inject.terminal_chord", "ctrl+shift+nope")
+    errs = cfg.errors()
+    assert any("inject.paste_chord" in e and "hyper" in e for e in errs)
+    assert any("inject.terminal_chord" in e and "nope" in e for e in errs)
+
+
+def test_errors_accepts_the_default_chords(isolated_xdg):
+    assert [e for e in Config.load().errors() if "chord" in e] == []

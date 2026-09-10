@@ -9,6 +9,7 @@ import tomlkit
 from tomlkit.exceptions import TOMLKitError
 
 from voice import paths
+from voice.inject.keys import parse_chord
 
 DEFAULT_CONFIG = '''# voice configuration. Edited by the settings window; hand edits are fine too.
 
@@ -148,6 +149,14 @@ class Config:
                 errs.append(f"stt.profiles.{name}.backend must be one of {sorted(_VALID_BACKENDS)}")
         if not isinstance(self.get("audio.max_seconds"), int) or self.get("audio.max_seconds") <= 0:
             errs.append("audio.max_seconds must be a positive integer")
+        for key in ("inject.paste_chord", "inject.terminal_chord"):
+            chord = self.get(key)
+            if chord is None:
+                continue
+            try:
+                parse_chord(str(chord))
+            except ValueError as exc:
+                errs.append(f"{key}: {exc}")
         return errs
 
 

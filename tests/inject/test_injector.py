@@ -127,3 +127,21 @@ def test_run_window_command_nonzero_exit_returns_none():
 
 def test_run_window_command_oserror_returns_none():
     assert run_window_command("cmd", run=RecordingRun(raise_exc=OSError("boom"))) is None
+
+
+def test_unparseable_chord_leaves_the_text_on_the_clipboard():
+    # A hand-edited inject.paste_chord must degrade to clipboard-only, not raise
+    # out of inject() - which skipped the restore and lost the dictation.
+    clip, sender = FakeClipboard(), FakeSender()
+    inj = Injector(clip, sender, {**SETTINGS, "paste_chord": "hyper+v"},
+                   lambda: False, lambda: None, sleep=lambda s: None)
+    res = inj.inject("keep me")
+    assert res == InjectResult("clipboard-only", "hyper+v", False)
+    assert clip.log == ["snapshot", ("set", "keep me")]   # not restored over
+    assert sender.chords == []
+
+
+def test_unparseable_terminal_chord_is_handled_too():
+    inj = Injector(FakeClipboard(), FakeSender(), {**SETTINGS, "terminal_chord": "ctrl+shift+nope"},
+                   lambda: False, lambda: "konsole", sleep=lambda s: None)
+    assert inj.inject("x").method == "clipboard-only"

@@ -55,7 +55,14 @@ class Injector:
             waited += POLL_S
         chord = self._chord()
         try:
-            self._sender.send_chord(parse_chord(chord))
+            codes = parse_chord(chord)
+        except ValueError as exc:
+            # A hand-edited chord must degrade to clipboard-only like any other
+            # paste failure; raising here skipped the restore and lost the text.
+            log.warning("invalid paste chord %r, text left on clipboard: %s", chord, exc)
+            return InjectResult("clipboard-only", chord, False)
+        try:
+            self._sender.send_chord(codes)
         except KeySendError as exc:
             log.warning("paste failed, text left on clipboard: %s", exc)
             return InjectResult("clipboard-only", chord, False)

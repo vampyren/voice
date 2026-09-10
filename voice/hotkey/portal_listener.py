@@ -24,6 +24,11 @@ call is scoped to the session and the session is necessarily new. An empty
 listing is therefore no evidence at all, and on such a desktop we never express
 a preference - the user assigns the key in their keyboard settings, and
 `shortcut_state()` says so until they do.
+
+**And the key keeps moving after that.** What the desktop holds is read back at
+every opportunity rather than once: `ShortcutsChanged` updates it as the user
+assigns one, and `refresh_triggers()` asks outright for the case nobody heard
+the signal (a reload, or opening the settings window).
 """
 from __future__ import annotations
 
@@ -70,6 +75,9 @@ CALL_TIMEOUT_S = 5
 CONFIGURE_TIMEOUT_S = 2
 #: ListShortcuts shows no dialog, so it must never wait like one.
 LIST_TIMEOUT_S = 10
+#: refresh_triggers() runs on the Qt thread (a reload, or opening the settings
+#: window), so it waits like capture_next rather than like the initial bind.
+REFRESH_TIMEOUT_S = 2
 #: The `a(sa{sv})` member both ListShortcuts and BindShortcuts answer with, and
 #: the per-shortcut key holding the trigger the desktop actually bound.
 SHORTCUTS_RESULT = "shortcuts"
@@ -214,6 +222,48 @@ class PortalListener:
         with self._state_lock:
             return dict(self._triggers)
 
+    def refresh_triggers(self) -> dict[str, str]:
+        """Ask the portal what it holds now, and answer with the result.
+
+        The desktop can rebind our shortcut at any moment - that is the whole
+        point of the design - so a value read once at startup goes stale the
+        first time the user visits Keyboard Settings. `ShortcutsChanged` covers
+        a desktop that announces the change; this covers the rest: a signal sent
+        while the daemon was still starting is one nobody heard.
+
+        A portal that cannot answer leaves the triggers we already have: "we
+        could not ask" is not "no key assigned", and neither is an answer that
+        omits an id (the listing is scoped to the session, so on GNOME it can
+        come back empty while the desktop holds every one of our keys).
+        """
+        if self._conn is None or self._session is None or self._bound is not True:
+            return self.effective_triggers()
+        try:
+            with self._bus_lock:
+                listed = self._list_shortcuts(timeout=REFRESH_TIMEOUT_S)
+        except Exception:
+            # _list_shortcuts swallows the portal's own failures; this is the
+            # connection dying under us, which the listener thread reports.
+            log.debug("portal trigger refresh failed", exc_info=True)
+            return self.effective_triggers()
+        if listed:
+            self._merge_triggers(listed)
+        return self.effective_triggers()
+
+    def _merge_triggers(self, reported: dict[str, str]) -> bool:
+        """Take the reported triggers for the ids we bound; leave the rest alone.
+
+        Merging rather than replacing is the same caution as everywhere else
+        here: an id the portal did not mention is an id it said nothing about.
+        Returns True when this actually moved something.
+        """
+        with self._state_lock:
+            before = dict(self._triggers)
+            for sid in self._shortcuts:
+                if sid in reported:
+                    self._triggers[sid] = reported[sid]
+            return self._triggers != before
+
     # -- setup --------------------------------------------------------------
     @staticmethod
     def _signal_rule() -> MatchRule:
@@ -277,7 +327,7 @@ class PortalListener:
         return ", ".join(f"{sid}={trigger or NO_TRIGGER}"
                          for sid, trigger in self.effective_triggers().items())
 
-    def _list_shortcuts(self) -> dict[str, str] | None:
+    def _list_shortcuts(self, timeout: float = LIST_TIMEOUT_S) -> dict[str, str] | None:
         """What the portal already holds for us, or None when it cannot say.
 
         None is the safe answer: `_bindings` then expresses no preference at all,
@@ -286,7 +336,7 @@ class PortalListener:
         try:
             code, results = call_with_response(
                 self._conn, SHORTCUTS, "ListShortcuts", "oa{sv}", (self._session, {}),
-                timeout=LIST_TIMEOUT_S)
+                timeout=timeout)
         except Exception as exc:
             log.info("portal ListShortcuts unavailable (%s); binding without a preferred "
                      "trigger so any key you already assigned survives", exc)
@@ -412,9 +462,12 @@ class PortalListener:
                     log.exception("hotkey handler failed for %s", getattr(msg, "body", msg))
 
     def _dispatch(self, msg) -> None:
-        kind = {"Activated": "press", "Deactivated": "release"}.get(
-            msg.header.fields.get(HeaderFields.member))
-        if kind is None:                       # ShortcutsChanged and friends
+        member = msg.header.fields.get(HeaderFields.member)
+        if member == "ShortcutsChanged":
+            self._shortcuts_changed(msg)
+            return
+        kind = {"Activated": "press", "Deactivated": "release"}.get(member)
+        if kind is None:
             return
         session, shortcut_id = msg.body[0], msg.body[1]
         if session != self._session or shortcut_id not in self._shortcuts:
@@ -425,3 +478,20 @@ class PortalListener:
             else:
                 self._active.discard(shortcut_id)
         self._on_event(shortcut_id, kind)
+
+    def _shortcuts_changed(self, msg) -> None:
+        """The desktop rebound one of our shortcuts while we were running.
+
+        This is the portal telling us what `voice status` would otherwise keep
+        getting wrong for the rest of the run, so the new trigger is taken as
+        the effective one and the daemon hears the resulting state - including
+        the recovery from "no key assigned", which lets it warn again if the
+        key is ever lost a second time.
+        """
+        body = getattr(msg, "body", ()) or ()
+        if len(body) < 2 or body[0] != self._session:
+            return
+        if not self._merge_triggers(shortcut_triggers({SHORTCUTS_RESULT: body[1]}) or {}):
+            return                             # nothing of ours moved
+        log.info("desktop changed our shortcuts: %s", self._describe_triggers())
+        self._announce()

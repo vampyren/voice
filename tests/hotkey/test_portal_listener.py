@@ -94,6 +94,14 @@ class FakeConn:
         with self._lock:
             self._signals.append(new_signal(SHORTCUTS, member, "osta{sv}", (session, shortcut_id, 12345, {})))
 
+    def emit_changed(self, triggers: dict, session: str = SESSION) -> None:
+        """ShortcutsChanged: the desktop rebound one of our shortcuts."""
+        with self._lock:
+            self._signals.append(new_signal(
+                SHORTCUTS, "ShortcutsChanged", "oa(sa{sv})",
+                (session, [(sid, {"description": ("s", sid), "trigger_description": ("s", trig)})
+                           for sid, trig in triggers.items()])))
+
     def bodies(self, member: str) -> list[tuple]:
         with self._lock:
             return [body for name, body in self.calls if name == member]
@@ -459,6 +467,103 @@ def test_signals_from_another_session_or_an_unbound_id_are_ignored():
         assert events == [("dictate", "press")]
     finally:
         listener.stop()
+
+
+# -- the desktop rebinding our shortcut while we run ---------------------------
+def test_shortcuts_changed_updates_the_effective_trigger():
+    """The user assigns the key in Settings while the daemon runs. The portal
+    says so with ShortcutsChanged, so `voice status` must follow it without a
+    restart - it used to report the startup value for the rest of the run."""
+    states: list[str] = []
+    listener, conn, _ = make({"dictate": "CTRL+space"}, bind_triggers={"dictate": ""},
+                             on_ready=states.append)
+    try:
+        listener.start()
+        started(listener)
+        assert listener.shortcut_state() == STATE_UNASSIGNED
+        assert states == [STATE_UNASSIGNED]
+
+        conn.emit_changed({"dictate": "F13"})
+        assert wait_for(lambda: listener.effective_triggers() == {"dictate": "F13"})
+        assert listener.shortcut_state() == STATE_BOUND
+        assert listener.devices_ok() is True
+        assert states[-1] == STATE_BOUND          # the daemon hears the new state too
+    finally:
+        listener.stop()
+
+
+def test_a_shortcuts_changed_that_changes_nothing_is_not_re_announced():
+    """Otherwise every repeat of the signal re-fires the daemon's readiness
+    callback, and with it the notification the user already read."""
+    states: list[str] = []
+    listener, conn, _ = make({"dictate": "CTRL+space"}, bind_triggers={"dictate": "F13"},
+                             on_ready=states.append)
+    try:
+        listener.start()
+        started(listener)
+        assert states == [STATE_BOUND]
+        conn.emit_changed({"dictate": "F13"})
+        conn.emit("Activated")                    # queued behind it: proves both were read
+        assert wait_for(lambda: listener.held() == frozenset({"dictate"}))
+        assert states == [STATE_BOUND]
+    finally:
+        listener.stop()
+
+
+def test_a_shortcuts_changed_for_another_session_or_an_unbound_id_is_ignored():
+    listener, conn, _ = make({"dictate": "CTRL+space"}, bind_triggers={"dictate": "F13"})
+    try:
+        listener.start()
+        started(listener)
+        conn.emit_changed({"dictate": "F14"}, session=OTHER_SESSION)
+        conn.emit_changed({"somebody-elses": "F15"})
+        conn.emit("Activated")                    # queued last: read after both
+        assert wait_for(lambda: listener.held() == frozenset({"dictate"}))
+        assert listener.effective_triggers() == {"dictate": "F13"}
+    finally:
+        listener.stop()
+
+
+def test_refresh_triggers_asks_the_portal_again():
+    """A ShortcutsChanged sent while we were starting is one nobody heard, so a
+    reload (and opening the settings window) asks outright."""
+    listener, conn, _ = make({"dictate": "CTRL+space"}, bind_triggers={"dictate": ""})
+    try:
+        listener.start()
+        started(listener)
+        assert listener.effective_triggers() == {"dictate": ""}
+        asked = len(conn.bodies("ListShortcuts"))
+
+        conn.known = {"dictate": "F13"}           # assigned in Keyboard Settings
+        assert listener.refresh_triggers() == {"dictate": "F13"}
+        assert len(conn.bodies("ListShortcuts")) == asked + 1
+        assert listener.shortcut_state() == STATE_BOUND
+    finally:
+        listener.stop()
+
+
+def test_refresh_triggers_keeps_what_it_has_when_the_portal_cannot_say():
+    """Same rule as the binding: "we could not ask" is not "no key assigned",
+    and an answer that omits an id says nothing about it either."""
+    listener, conn, _ = make({"dictate": "CTRL+space"}, known={"dictate": "F13"})
+    try:
+        listener.start()
+        started(listener)
+        assert listener.effective_triggers() == {"dictate": "F13"}
+
+        conn.list_error = True
+        assert listener.refresh_triggers() == {"dictate": "F13"}
+        conn.list_error, conn.known = False, {}   # a session-scoped empty listing
+        assert listener.refresh_triggers() == {"dictate": "F13"}
+        assert listener.shortcut_state() == STATE_BOUND
+    finally:
+        listener.stop()
+
+
+def test_refresh_triggers_before_start_answers_without_touching_the_bus():
+    listener, conn, _ = make()
+    assert listener.refresh_triggers() == {}
+    assert conn.calls == []
 
 
 def test_a_failing_callback_does_not_kill_the_listener():

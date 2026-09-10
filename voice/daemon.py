@@ -407,6 +407,10 @@ class Daemon:
         user, in their keyboard settings, can.
         """
         if state == STATE_BOUND:
+            # A key is attached again (the user assigned one, or the desktop told
+            # us so with ShortcutsChanged). The one-shot latch must not outlive
+            # the problem it reported: losing the key a second time is news.
+            self._shortcut_hint_shown = False
             return
         if state == STATE_UNASSIGNED:
             # Once per daemon run: a reload rebuilds the listener, and a repeated
@@ -426,7 +430,10 @@ class Daemon:
         """The portal listener's effective triggers, for `status` and `doctor`.
 
         Empty on evdev, which has no such thing, and on any listener a test
-        substituted - the two accessors are portal-only.
+        substituted - the two accessors are portal-only. Read from the listener
+        at every call, never cached here: the desktop owns the key and can move
+        it at any moment, and a copy taken at build time is how `voice status`
+        came to report "no key assigned" for the rest of the run.
         """
         if self.hotkey_backend != "portal":
             return {}
@@ -435,6 +442,32 @@ class Daemon:
         if state is None or triggers is None:
             return {}
         return {"shortcut_state": state(), "shortcut_triggers": triggers()}
+
+    def effective_triggers(self) -> dict[str, str]:
+        """The trigger the desktop currently holds per shortcut id ("" = none).
+
+        The settings window shows it beside the `hotkeys.portal_*` fields, which
+        are a first-run preference and on GNOME are never applied at all - so
+        the only truthful thing to show there is what the desktop actually has.
+        Empty on evdev and on a listener that cannot be asked.
+        """
+        return dict(self._shortcut_status().get("shortcut_triggers") or {})
+
+    def _refresh_shortcut_triggers(self) -> None:
+        """Ask the desktop again what it holds.
+
+        `ShortcutsChanged` keeps the listener current where the portal sends it;
+        this covers a signal emitted while the daemon was still starting, and a
+        backend that never sends one. Failure is not fatal: the listener keeps
+        the triggers it already has.
+        """
+        refresh = getattr(self.listener, "refresh_triggers", None)
+        if refresh is None:                    # evdev, or a test's fake listener
+            return
+        try:
+            refresh()
+        except Exception:
+            log.exception("could not re-read the desktop's shortcut assignment")
 
     def _profile_snapshot(self) -> tuple[str, dict] | None:
         """The active (name, profile) pair, or None if stt.active is unresolvable."""
@@ -563,6 +596,7 @@ class Daemon:
         self.tracker.set_specs(hotkey_specs(self.config))
         self._notifier.set_enabled(bool(self.config.get("general.notifications", True)))
         self._rebind_hotkeys_if_needed()      # before the injector: it holds the listener
+        self._refresh_shortcut_triggers()     # and after it: the new listener is the one to ask
         current = self._profile_snapshot()
         if current != self._active_profile:
             self._active_profile = current

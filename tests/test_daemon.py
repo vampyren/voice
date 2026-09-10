@@ -637,6 +637,130 @@ def test_status_carries_the_effective_portal_trigger_per_shortcut(isolated_xdg, 
         d.shutdown()
 
 
+def test_reload_re_reads_the_desktops_shortcut_assignment(isolated_xdg, qapp, monkeypatch):
+    """The desktop owns the key, so ours goes stale the moment the user visits
+    Keyboard Settings. `voice reload` asks the listener again rather than
+    reporting what was true when the daemon started."""
+    listed = {"dictate": ""}
+
+    class Refreshing(FakeListener):
+        def __init__(self, on_event, shortcuts, **kwargs):
+            super().__init__()
+            self.refreshed = 0
+
+        def shortcut_state(self):
+            return STATE_BOUND if all(listed.values()) else STATE_UNASSIGNED
+
+        def effective_triggers(self):
+            return dict(listed)
+
+        def refresh_triggers(self):
+            self.refreshed += 1
+            listed.update({"dictate": "F13"})       # what Keyboard Settings now holds
+            return dict(listed)
+
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    monkeypatch.setattr("voice.daemon.PortalListener", Refreshing)
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", "portal")
+    cfg.save()
+    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    try:
+        assert d.handle({"cmd": "status"})["shortcut_state"] == STATE_UNASSIGNED
+        d.apply_config()
+        assert d.listener.refreshed == 1
+        st = d.handle({"cmd": "status"})
+        assert st["shortcut_triggers"] == {"dictate": "F13"}
+        assert st["shortcut_state"] == STATE_BOUND
+    finally:
+        d.shutdown()
+
+
+def test_reload_is_unbothered_by_a_listener_that_cannot_be_asked(isolated_xdg, qapp, monkeypatch):
+    """The evdev listener has no such thing, and neither has a test's fake."""
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray(),
+               notifier=QuietNotifier())
+    d.build()
+    try:
+        d.apply_config()
+        assert d.effective_triggers() == {}
+    finally:
+        d.shutdown()
+
+
+def test_the_daemon_exposes_the_effective_triggers_to_the_settings_window(isolated_xdg, qapp, monkeypatch):
+    """Defect 1's Hotkeys tab shows the desktop's key beside each field, and it
+    reads it from here rather than opening a portal session of its own."""
+    d = _reporting_portal_daemon(monkeypatch, QuietNotifier(), state=STATE_UNASSIGNED,
+                                 triggers={"dictate": "", "recall": "F14"})
+    try:
+        assert d.effective_triggers() == {"dictate": "", "recall": "F14"}
+    finally:
+        d.shutdown()
+
+
+def test_a_shortcut_assigned_again_may_warn_again_if_it_is_lost(isolated_xdg, qapp, monkeypatch):
+    """The one-shot latch must not outlive the problem it reported: once the
+    desktop hands the key back, a later loss is news again."""
+    notified = []
+    notifier = type("N", (), {
+        "notify": lambda self, title, body, urgency="normal": notified.append(title),
+        "set_enabled": lambda self, enabled: None})()
+    captured = {}
+    d = _reporting_portal_daemon(monkeypatch, notifier, state=STATE_UNASSIGNED,
+                                 triggers={"dictate": ""}, captured=captured)
+    try:
+        captured["on_ready"](STATE_UNASSIGNED)
+        assert len(notified) == 1
+        captured["on_ready"](STATE_BOUND)              # assigned in Keyboard Settings
+        assert len(notified) == 1                      # a working binding says nothing
+        captured["on_ready"](STATE_UNASSIGNED)         # and lost again later
+        assert len(notified) == 2
+    finally:
+        d.shutdown()
+
+
+def test_status_follows_a_shortcut_the_desktop_reassigned(isolated_xdg, qapp, monkeypatch):
+    """End to end, with the real listener on the fake portal bus: the desktop
+    rebinds our shortcut, and the daemon reports the new key without a restart.
+
+    The fake bus lives with the listener's own tests; `tests/` is on sys.path
+    for every test module, so it is imported rather than copied.
+    """
+    from hotkey.test_portal_listener import FakeConn, wait_for
+
+    from voice.hotkey.portal_listener import PortalListener
+
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    conn = FakeConn(bind_triggers={"dictate": ""})     # registered with no key attached
+    monkeypatch.setattr("voice.daemon.PortalListener",
+                        lambda on_event, shortcuts, **kw: PortalListener(
+                            on_event, shortcuts, bus_factory=lambda bus="SESSION": conn, **kw))
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", "portal")
+    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    d.listener.start()                                 # what run() does
+    try:
+        assert wait_for(lambda: d.listener.devices_ok() is not None)
+        assert d.handle({"cmd": "status"})["shortcut_state"] == STATE_UNASSIGNED
+
+        conn.emit_changed({"dictate": "F13"})          # the user assigned it in Settings
+        assert wait_for(lambda: d.handle({"cmd": "status"})["shortcut_triggers"]
+                        == {"dictate": "F13"})
+        st = d.handle({"cmd": "status"})
+        assert st["shortcut_state"] == STATE_BOUND
+        assert st["keyboard"] is True
+        assert d.effective_triggers() == {"dictate": "F13"}
+    finally:
+        d.shutdown()
+
+
 def test_status_says_nothing_about_shortcuts_on_the_evdev_backend(isolated_xdg, qapp, monkeypatch):
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
         "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())

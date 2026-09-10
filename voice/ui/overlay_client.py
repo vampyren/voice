@@ -59,9 +59,12 @@ _PROBE_SCRIPT = (
 
 PROBE_TIMEOUT_S = 10
 
-#: Set to 1 to run the pill without gtk4-layer-shell, accepting that it takes
-#: keyboard focus when it appears (see `plain_window_allowed`).
-ALLOW_PLAIN_ENV = "VOICE_OVERLAY_ALLOW_PLAIN_WINDOW"
+#: The helper's exit code for "--require-layer-shell was given and there is no
+#: layer-shell here". Nothing about that is retryable.
+NO_LAYER_SHELL_EXIT = 2
+
+#: What `voice status` shows for an overlay that gave up for that reason.
+NO_LAYER_SHELL_STATUS = "disabled: no layer-shell"
 
 
 def repo_root() -> Path:
@@ -121,7 +124,7 @@ def helper_command() -> list[str] | None:
 
 
 def default_launcher(position: str = "bottom", lang: str = "en", verbose: bool = False,
-                     popen: Callable = subprocess.Popen):
+                     allow_fallback: bool = False, popen: Callable = subprocess.Popen):
     """Spawn the helper, or return None when this machine cannot run it.
 
     The current environment is passed through unchanged (WAYLAND_DISPLAY,
@@ -133,17 +136,6 @@ def default_launcher(position: str = "bottom", lang: str = "en", verbose: bool =
     if probe.command is None:
         log.warning("recording overlay disabled: %s", probe.reason)
         return None
-    strict = not plain_window_allowed()
-    if strict and not probe.layer_shell:
-        # GTK 4 dropped the accept-focus / focus-on-map hints, so a plain
-        # toplevel *is* focused when it maps - and the paste chord would then
-        # go to the pill instead of the user's window. No pill beats no
-        # dictation. Set the env var above to see it anyway.
-        log.warning("recording overlay disabled: gtk4-layer-shell is missing, and a plain "
-                    "window would take keyboard focus and swallow the paste. Install it "
-                    "(Arch: gtk4-layer-shell, Debian/Ubuntu: gir1.2-gtk4layershell-1.0) "
-                    "or set %s=1 to accept that.", ALLOW_PLAIN_ENV)
-        return None
     env = dict(os.environ)
     root = str(repo_root())
     env["PYTHONPATH"] = os.pathsep.join([root] + [p for p in [env.get("PYTHONPATH")] if p])
@@ -151,8 +143,11 @@ def default_launcher(position: str = "bottom", lang: str = "en", verbose: bool =
     cmd += ["--position", position if position in ("bottom", "top") else "bottom"]
     if lang:
         cmd += ["--lang", lang]
-    if strict:
-        cmd.append("--require-layer-shell")     # in case the helper sees less than we did
+    if not allow_fallback:
+        # GTK 4 dropped the accept-focus / focus-on-map hints, so a fallback
+        # toplevel *is* focused when it maps - and the paste chord would then go
+        # to the pill instead of the user's window. The helper exits 2 instead.
+        cmd.append("--require-layer-shell")
     if verbose:
         cmd.append("--verbose")                 # the helper then logs every state it shows
     log.info("recording overlay: %s", " ".join(cmd))
@@ -183,11 +178,23 @@ class OverlayClient:
         self._idle.set()
         self._dead = False
         self._stopped = False
+        self._status = "not started" if self.enabled else "off"
         self._restarts = 0
         self._pending_level: dict | None = None
         self._last_level: float | None = None
 
     # -- lifecycle ----------------------------------------------------------
+    def status(self) -> str:
+        """One line for `voice status`, polling the helper as a side effect.
+
+        Polling here is the point: nothing else notices that the helper exited
+        (and, on a first exit, restarts it) until the next message goes out.
+        """
+        with self._lock:
+            if self.enabled and not self._stopped and self._proc is not None:
+                self._alive()
+            return self._status
+
     def start(self) -> None:
         """Spawn the helper. Safe to call twice; never raises."""
         with self._lock:
@@ -205,6 +212,7 @@ class OverlayClient:
             self._restarts = 0
             self._pending_level = None
             if self.enabled:
+                self._status = "not started"
                 self._spawn()
 
     def stop(self) -> None:
@@ -212,6 +220,8 @@ class OverlayClient:
         with self._lock:
             self._stopped = True                  # no new messages from here on
             self._pending_level = None
+            if not self._dead:
+                self._status = "stopped"
         self.flush(DRAIN_S)                       # let the writer drain first: it
         with self._lock:                          # needs self._proc to write at all
             proc, self._proc = self._proc, None
@@ -255,9 +265,11 @@ class OverlayClient:
             # it blew up above. Either way there is nothing to retry.
             self.enabled = False
             self._dead = True
+            self._status = "disabled: no helper"
             return False
         self._proc = proc
         self._dead = False
+        self._status = "running"
         if self._writer is None or not self._writer.is_alive():
             self._writer = threading.Thread(target=self._pump, name="overlay-writer", daemon=True)
             self._writer.start()
@@ -315,8 +327,17 @@ class OverlayClient:
         if self._proc.poll() is None:
             return True
         code = self._proc.returncode
+        if code == NO_LAYER_SHELL_EXIT:
+            # The helper refused to show a window that would take the focus.
+            # Restarting it would only reproduce that, so the pill stays off.
+            self.enabled = False
+            self._die(NO_LAYER_SHELL_STATUS,
+                      "overlay disabled: no layer-shell; install gtk4-layer-shell or set "
+                      "ui.overlay_allow_fallback = true")
+            return False
         if self._restarts >= 1:
-            self._die(f"helper exited again ({code}); overlay stays off")
+            self._die(f"disabled: helper exited ({code})",
+                      f"recording overlay: helper exited again ({code}); it stays off")
             return False
         self._restarts += 1
         log.warning("recording overlay helper exited (%s); restarting it once", code)
@@ -325,12 +346,14 @@ class OverlayClient:
         self._last_level = None
         return self._spawn()
 
-    def _die(self, reason: str) -> None:
+    def _die(self, status: str, message: str) -> None:
+        """Give up on the helper, saying so exactly once."""
         with self._lock:
             if self._dead:
                 return
             self._dead = True
-        log.warning("recording overlay: %s", reason)
+            self._status = status
+        log.warning("%s", message)
 
     # -- writer thread ------------------------------------------------------
     def _pump(self) -> None:
@@ -357,16 +380,12 @@ class OverlayClient:
             stdin.write(line)
             stdin.flush()
         except Exception as exc:
-            self._die(f"cannot write to the helper ({exc})")
+            self._die("disabled: helper not writable",
+                      f"recording overlay: cannot write to the helper ({exc})")
 
     def flush(self, timeout: float = 1.0) -> bool:
         """Wait for queued messages to reach the helper. For stop() and tests."""
         return self._idle.wait(timeout)
-
-
-def plain_window_allowed() -> bool:
-    """Whether the user has accepted a pill that takes focus (see the env var)."""
-    return os.environ.get(ALLOW_PLAIN_ENV, "").strip().lower() in ("1", "true", "yes")
 
 
 def _is_level(message: dict) -> bool:

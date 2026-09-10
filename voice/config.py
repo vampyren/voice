@@ -41,6 +41,8 @@ max_seconds = 120
 [ui]
 overlay = true             # the recording pill: waveform, timer, language badge
 overlay_position = "bottom"  # "bottom" | "top"
+overlay_allow_fallback = false   # show the pill without gtk4-layer-shell, accepting
+                                 # that it takes keyboard focus when it appears
 
 [stt]
 active = "local"           # name of a [stt.profiles.*] table

@@ -34,6 +34,7 @@ def _print_status(reply: dict) -> None:
     print(f"backend:  {reply.get('backend')}")
     print(f"language: {reply.get('language')}")
     print(f"hotkeys:  {reply.get('hotkey_backend', 'unknown')}")
+    print(f"overlay:  {reply.get('overlay', 'unknown')}")
     keyboard = reply.get("keyboard")
     kb_text = "ok" if keyboard else ("unknown" if keyboard is None else "NO ACCESS")
     print(f"keyboard: {kb_text}")

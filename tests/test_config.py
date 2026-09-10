@@ -260,6 +260,7 @@ def test_defaults_carry_the_language_cycle_and_the_overlay(isolated_xdg):
     assert cfg.languages() == ["en", "sv"]
     assert cfg.get("ui.overlay") is True
     assert cfg.get("ui.overlay_position") == "bottom"
+    assert cfg.get("ui.overlay_allow_fallback") is False
     assert cfg.get("hotkeys.language_toggle") == ""
     assert cfg.portal_trigger("language_toggle") == ""
     assert cfg.errors() == []

@@ -110,3 +110,15 @@ def test_status_prints_the_active_language(isolated_xdg, capsys):
         assert "language: sv" in capsys.readouterr().out
     finally:
         srv.stop()
+
+
+def test_status_prints_what_the_overlay_is_doing(isolated_xdg, capsys):
+    srv = ipc.Server(lambda r: {"ok": True, "state": "idle", "profile": "local", "backend": "fake",
+                                "last_error": None, "keyboard": True,
+                                "overlay": "disabled: no layer-shell"})
+    srv.start()
+    try:
+        assert main(["status"]) == 0
+        assert "overlay:  disabled: no layer-shell" in capsys.readouterr().out
+    finally:
+        srv.stop()

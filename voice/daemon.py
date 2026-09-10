@@ -229,8 +229,9 @@ class Daemon:
         position = str(self.config.get("ui.overlay_position", "bottom") or "bottom")
         language = str(self.config.get("general.language", "en") or "en")
         verbose = log.isEnabledFor(logging.DEBUG)
+        allow_fallback = bool(self.config.get("ui.overlay_allow_fallback", False))
         return OverlayClient(enabled, launcher=lambda: default_launcher(
-            position=position, lang=language, verbose=verbose))
+            position=position, lang=language, verbose=verbose, allow_fallback=allow_fallback))
 
     def _on_level(self, level: float) -> None:
         """Audio reader thread. Must not block: the client queues and returns."""
@@ -490,7 +491,8 @@ class Daemon:
                     "backend": d.sv.transcriber.describe(), "last_error": d.last_error,
                     "version": __version__, "keyboard": self.listener.devices_ok(),
                     "hotkey_backend": self.hotkey_backend,
-                    "language": self.config.get("general.language")}
+                    "language": self.config.get("general.language"),
+                    "overlay": self.overlay.status() if self.overlay else "off"}
         if cmd == "profile":
             name = request.get("name", "")
             if name not in (self.config.get("stt.profiles", {}) or {}):

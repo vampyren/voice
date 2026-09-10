@@ -100,14 +100,20 @@ something fails. It is never clickable and never takes focus.
 It runs as a separate helper process (`voice.ui.overlay`, GTK 4 through PyGObject), so a
 crash there cannot affect dictation - the daemon logs it, restarts it once, and carries
 on without it. Switch it off with `ui.overlay = false`, or move it with
-`ui.overlay_position = "top"`.
+`ui.overlay_position = "top"`. `voice status` shows what it is doing.
 
 **gtk4-layer-shell is required in practice.** GTK 4 removed the "do not focus me" window
 hints, so without that library the pill is an ordinary window that takes keyboard focus
-when it appears - and the paste would land in the pill instead of your editor. When the
-library is missing the daemon leaves the pill off and says so once in the log and in
-`voice doctor`. If you want it anyway, start the daemon with
-`VOICE_OVERLAY_ALLOW_PLAIN_WINDOW=1`.
+when it appears — and the paste would then land in the pill instead of your editor. The
+helper therefore refuses to show it: it exits, and the daemon logs
+
+```
+overlay disabled: no layer-shell; install gtk4-layer-shell or set ui.overlay_allow_fallback = true
+```
+
+once and carries on without a pill. `voice doctor` and `voice status` report the same
+thing (`overlay: disabled: no layer-shell`). Set `ui.overlay_allow_fallback = true` if
+you want the pill anyway and accept that it takes focus.
 
 ### Language
 
@@ -165,6 +171,8 @@ max_seconds = 120
 [ui]
 overlay = true             # the recording pill: waveform, timer, language badge
 overlay_position = "bottom"  # "bottom" | "top"
+overlay_allow_fallback = false   # show the pill without gtk4-layer-shell, accepting
+                                 # that it takes keyboard focus when it appears
 
 [stt]
 active = "local"           # name of a [stt.profiles.*] table

@@ -726,3 +726,30 @@ def test_the_language_toggle_is_bound_in_both_listeners(isolated_xdg):
     cfg.set("hotkeys.portal_language_toggle", "CTRL+ALT+l")
     assert hotkey_specs(cfg)["language_toggle"] == parse_keyspec("KEY_F15")
     assert portal_shortcuts(cfg)["language_toggle"] == "CTRL+ALT+l"
+
+
+def test_status_reports_what_the_pill_is_doing(isolated_xdg, qapp, monkeypatch, helper_processes):
+    d = _overlay_daemon(Config.load(), monkeypatch, helper_processes)
+    assert d.handle({"cmd": "status"})["overlay"] == "running"
+    helper_processes.made[0].exit(2)                      # the helper refused to steal focus
+    assert d.handle({"cmd": "status"})["overlay"] == "disabled: no layer-shell"
+    assert len(helper_processes.made) == 1                # and was not restarted
+    d.shutdown()
+
+
+def test_the_fallback_window_flag_reaches_the_launcher(isolated_xdg, qapp, monkeypatch,
+                                                       helper_processes):
+    seen = []
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    monkeypatch.setattr("voice.daemon.default_launcher",
+                        lambda **kw: seen.append(kw) or helper_processes())
+    cfg = Config.load()
+    cfg.set("ui.overlay_allow_fallback", True)
+    cfg.set("ui.overlay_position", "top")
+    cfg.set("general.language", "sv")
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray())
+    d.build()
+    d.overlay.start()
+    assert seen == [{"position": "top", "lang": "sv", "verbose": False, "allow_fallback": True}]
+    d.shutdown()

@@ -3,8 +3,8 @@ import subprocess
 
 import pytest
 
-from voice.ui.overlay_client import (FRAME_S, OverlayClient, default_launcher,
-                                     helper_command, probe_helper)
+from voice.ui.overlay_client import (FRAME_S, NO_LAYER_SHELL_EXIT, OverlayClient,
+                                     default_launcher, helper_command, probe_helper)
 
 
 def _client(launcher, clock=None, enabled=True):
@@ -237,33 +237,60 @@ def test_the_real_probe_finds_gtk4_on_this_machine():
     assert "gtk4" in got.features
 
 
-# -- focus: a plain window would swallow the paste -----------------------------
-def test_without_layer_shell_the_helper_is_not_launched_at_all(monkeypatch, caplog):
+# -- focus: a fallback window would swallow the paste --------------------------
+def test_the_helper_is_told_to_refuse_a_focus_stealing_window(monkeypatch):
     """GTK 4 dropped the accept-focus hints, so only a layer-shell surface can
-    refuse focus; a plain pill takes it and the paste lands in the pill."""
+    refuse focus; by default the helper must exit rather than steal it."""
     monkeypatch.setattr("voice.ui.overlay_client._probe", lambda python: ("gtk4",))
-    monkeypatch.delenv("VOICE_OVERLAY_ALLOW_PLAIN_WINDOW", raising=False)
-    spawned = []
-    with caplog.at_level("WARNING", logger="voice.ui.overlay_client"):
-        assert default_launcher(popen=lambda cmd, **kw: spawned.append(cmd)) is None
-    assert spawned == []
-    assert "gtk4-layer-shell" in caplog.text
-
-
-def test_layer_shell_present_launches_and_still_demands_it(monkeypatch):
-    monkeypatch.setattr("voice.ui.overlay_client._probe",
-                        lambda python: ("gtk4", "layer-shell"))
     seen = {}
     default_launcher(popen=lambda cmd, **kw: seen.update(cmd=cmd))
     assert "--require-layer-shell" in seen["cmd"]
 
 
-def test_the_plain_window_fallback_can_be_allowed_explicitly(monkeypatch):
+def test_the_fallback_window_can_be_allowed_by_config(monkeypatch):
     monkeypatch.setattr("voice.ui.overlay_client._probe", lambda python: ("gtk4",))
-    monkeypatch.setenv("VOICE_OVERLAY_ALLOW_PLAIN_WINDOW", "1")
     seen = {}
-    default_launcher(popen=lambda cmd, **kw: seen.update(cmd=cmd))
+    default_launcher(allow_fallback=True, popen=lambda cmd, **kw: seen.update(cmd=cmd))
     assert "--require-layer-shell" not in seen["cmd"]
+
+
+def test_a_helper_that_refuses_to_steal_focus_disables_the_overlay(helper_processes, caplog):
+    """Exit 2 is the helper saying "no layer-shell here": there is nothing to
+    retry, so it must not be restarted and status must say why."""
+    client = _client(helper_processes)
+    client.start()
+    helper_processes.made[0].exit(NO_LAYER_SHELL_EXIT)
+    with caplog.at_level("WARNING", logger="voice.ui.overlay_client"):
+        client.send({"state": "recording"})
+        client.send({"level": 0.3})
+    assert len(helper_processes.made) == 1                 # never restarted
+    assert client.status() == "disabled: no layer-shell"
+    assert client.enabled is False
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 1
+    assert "ui.overlay_allow_fallback" in messages[0] and "gtk4-layer-shell" in messages[0]
+    client.stop()
+
+
+def test_status_follows_the_helper(helper_processes):
+    client = _client(helper_processes)
+    assert client.status() == "not started"
+    client.start()
+    assert client.status() == "running"
+    helper_processes.made[0].exit(1)
+    assert client.status() == "running"                    # restarted once, silently
+    helper_processes.made[1].exit(1)
+    assert client.status() == "disabled: helper exited (1)"
+    client.stop()
+    assert client.status() == "disabled: helper exited (1)"   # the diagnosis survives
+    assert OverlayClient(False).status() == "off"
+
+
+def test_a_healthy_client_reports_stopped_after_shutdown(helper_processes):
+    client = _client(helper_processes)
+    client.start()
+    client.stop()
+    assert client.status() == "stopped"
 
 
 def test_the_helper_is_verbose_when_the_daemon_is(monkeypatch):

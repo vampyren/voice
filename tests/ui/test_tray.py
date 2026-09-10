@@ -1,5 +1,8 @@
 import itertools
 
+import pytest
+from PySide6.QtGui import QColor
+
 from voice.ui.icons import icon_for, pixmap_for
 from voice.ui.tray import Tray
 
@@ -43,3 +46,91 @@ def test_tray_language_submenu_is_a_radio_list_of_codes(qapp):
     tray.set_languages(["en", "sv"], "en")            # rebuilt, not appended to
     assert [a.text() for a in tray.language_menu.actions()] == ["EN", "SV"]
     assert [a.isChecked() for a in tray.language_menu.actions()] == [True, False]
+
+
+#: The sizes a panel actually asks a tray icon for.
+PANEL_SIZES = (16, 22, 24, 32, 48)
+STATES = ("idle", "recording", "transcribing", "injecting", "error")
+
+
+def content_box(image, alpha=8):
+    """(x0, y0, x1, y1) of the drawn pixels, or None if nothing was drawn."""
+    xs, ys = [], []
+    for y in range(image.height()):
+        for x in range(image.width()):
+            if image.pixelColor(x, y).alpha() > alpha:
+                xs.append(x)
+                ys.append(y)
+    return (min(xs), min(ys), max(xs), max(ys)) if xs else None
+
+
+@pytest.mark.parametrize("state", STATES)
+@pytest.mark.parametrize("size", PANEL_SIZES)
+def test_the_tray_icon_fills_its_square(qapp, state, size):
+    """The owner's "it's tiny compared to other icons in the menu".
+
+    A panel scales the whole square to its icon slot, so margin inside the
+    pixmap is margin the glyph never gets back. Stock icons leave a hair of
+    padding, not a quarter of the square.
+    """
+    box = content_box(pixmap_for(state, size).toImage())
+    assert box is not None, f"{state} drew nothing at {size} px"
+    x0, y0, x1, y1 = box
+    width, height = x1 - x0 + 1, y1 - y0 + 1
+    assert width >= 0.8 * size, f"{state} at {size}px is {width}px wide, not {0.8 * size}"
+    assert height >= 0.8 * size, f"{state} at {size}px is {height}px tall, not {0.8 * size}"
+
+
+@pytest.mark.parametrize("size", PANEL_SIZES)
+def test_the_transcribing_ring_is_a_closed_circle_inside_the_square(qapp, size):
+    """Filling the square must not push the ring off the edge of it.
+
+    A ring clipped by the pixmap reads as an arc, and at 16 px an arc and a
+    circle are the difference between "working" and "broken".
+    """
+    image = pixmap_for("transcribing", size).toImage()
+    box = content_box(image)
+    assert box is not None
+    x0, y0, x1, y1 = box
+    assert (x0, y0) >= (0, 0) and (x1, y1) <= (size - 1, size - 1)
+    middle, ring = size // 2, QColor("#f5a524")
+
+    def ring_near(x, y):
+        return any(image.pixelColor(px, py).alpha() > 8
+                   and abs(image.pixelColor(px, py).red() - ring.red()) < 40
+                   and abs(image.pixelColor(px, py).blue() - ring.blue()) < 40
+                   for px, py in _around(x, y, size))
+
+    assert ring_near(middle, y0), "no ring at the top"
+    assert ring_near(middle, y1), "no ring at the bottom"
+    assert ring_near(x0, middle), "no ring on the left"
+    assert ring_near(x1, middle), "no ring on the right"
+
+
+def _around(x, y, size, reach=2):
+    for dx in range(-reach, reach + 1):
+        for dy in range(-reach, reach + 1):
+            if 0 <= x + dx < size and 0 <= y + dy < size:
+                yield x + dx, y + dy
+
+
+def test_the_microphone_is_still_a_microphone_at_sixteen_pixels(qapp):
+    """Capsule, cradle, stem and base all have to survive the smallest size.
+
+    Measured in rows: the capsule is a solid block near the top, the cradle
+    is two separate arms lower down, and the base is a wide bar at the bottom.
+    """
+    image = pixmap_for("idle", 16).toImage()
+    box = content_box(image)
+    assert box is not None
+    x0, y0, x1, y1 = box
+
+    def runs(y):
+        """How many separate horizontal runs of drawn pixels are in row `y`."""
+        drawn = [image.pixelColor(x, y).alpha() > 8 for x in range(16)]
+        return sum(1 for i, on in enumerate(drawn) if on and not (i and drawn[i - 1]))
+
+    assert runs(y0 + 1) == 1, "the capsule is not a solid block near the top"
+    assert runs((y0 + y1) // 2 + 2) == 2, "the cradle's two arms have merged"
+    assert runs(y1) == 1, "the base is not one bar"
+    assert sum(image.pixelColor(x, y1).alpha() > 8 for x in range(16)) >= 5, "the base is a stub"

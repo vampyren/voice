@@ -67,6 +67,8 @@ class Recorder:
         self._chunks: list[bytes] = []
         self._reader: threading.Thread | None = None
         self._cancelled = False
+        self._stopping = False
+        self._eof_before_stop = False
         self.error: str | None = None
 
     @property
@@ -78,6 +80,8 @@ class Recorder:
             return
         self._chunks = []
         self._cancelled = False
+        self._stopping = False
+        self._eof_before_stop = False
         self.error = None
         try:
             self._proc = self._popen(pw_record_command(device), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -91,6 +95,10 @@ class Recorder:
         while True:
             chunk = proc.stdout.read(4096)
             if not chunk:
+                # EOF on a process we still consider live, with no stop requested:
+                # pw-record died on its own (source unplugged, PipeWire restart).
+                if proc is self._proc and not self._stopping:
+                    self._eof_before_stop = True
                 break
             if not self._cancelled:
                 self._chunks.append(chunk)
@@ -104,17 +112,24 @@ class Recorder:
         proc = self._proc
         if proc is None:
             return np.zeros(0, dtype=np.int16)
+        self._stopping = True          # set before terminate: the pump reads it at EOF
         proc.terminate()
         try:
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             proc.kill()
+            try:
+                proc.wait(timeout=2)   # without this returncode stays None after a kill
+            except subprocess.TimeoutExpired:
+                log.warning("pw-record did not exit after kill")
         if self._reader:
             self._reader.join(timeout=2)
         rc = proc.returncode
-        if rc and not self._chunks and not self._cancelled:
+        died_early = self._eof_before_stop and rc not in (0, None)
+        if not self._cancelled and (died_early or (rc and not self._chunks)):
             tail = proc.stderr.read().decode(errors="replace")[-400:]
-            self.error = tail.strip() or f"pw-record exited with {rc}"
+            self.error = tail.strip() or (
+                "pw-record exited early" if died_early else f"pw-record exited with {rc}")
             log.warning("pw-record failed: %s", self.error)
         elif rc not in (0, None, -15):
             log.debug("pw-record exited with %s after capturing audio; ignoring", rc)

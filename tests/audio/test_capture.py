@@ -1,6 +1,7 @@
 import io
 import json
 import subprocess
+import threading
 
 import numpy as np
 import pytest
@@ -14,27 +15,76 @@ def test_command_shape():
     assert pw_record_command("alsa_input.usb-OBSBOT")[-3:] == ["--target", "alsa_input.usb-OBSBOT", "-"]
 
 
+class _Stdout:
+    """pw-record's stdout: yields `data`, then stays open until the process ends.
+
+    `eof_early` models the process dying mid-capture instead - the pipe closes
+    while the recorder still believes it is recording.
+    """
+
+    def __init__(self, data: bytes, ended: threading.Event, eof_early: bool):
+        self._buf = io.BytesIO(data)
+        self._ended, self._eof_early = ended, eof_early
+
+    def read(self, n=-1):
+        chunk = self._buf.read(n)
+        if chunk:
+            return chunk
+        if not self._eof_early:
+            self._ended.wait(5)
+        return b""
+
+
 class FakeProc:
-    def __init__(self, data: bytes, rc=0, stderr=b""):
-        self.stdout = io.BytesIO(data)
+    def __init__(self, data: bytes, rc=0, stderr=b"", eof_early=False):
+        self._ended = threading.Event()
+        self.stdout = _Stdout(data, self._ended, eof_early)
         self.stderr = io.BytesIO(stderr)
         self.returncode = None
         self._rc = rc
         self.terminated = False
+        if eof_early:
+            self._ended.set()
 
     def terminate(self):
         self.terminated = True
         self.returncode = self._rc
+        self._ended.set()
 
     def wait(self, timeout=None):
         self.returncode = self._rc
+        self._ended.set()
         return self._rc
 
     def kill(self):
         self.returncode = -9
+        self._ended.set()
 
     def poll(self):
         return self.returncode
+
+
+class StubbornProc(FakeProc):
+    """Ignores terminate(); like a real Popen, only wait() publishes a returncode."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.killed = False
+        self.waits_after_kill = 0
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        if not self.killed:
+            raise subprocess.TimeoutExpired("pw-record", timeout or 0)
+        self.waits_after_kill += 1
+        self.returncode = -9
+        return -9
+
+    def kill(self):
+        self.killed = True
+        self._ended.set()          # SIGKILL closes the pipe; returncode stays unset
 
 
 def test_recorder_collects_pcm_until_stop():
@@ -111,6 +161,52 @@ def test_list_sources_parses_pw_dump():
 def test_list_sources_tolerates_failure():
     run = lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="no pipewire")
     assert list_sources(run=run) == []
+
+
+def _await_reader(rec):
+    """Block until the reader thread has finished observing the stream."""
+    rec._reader.join(2)
+    assert not rec._reader.is_alive()
+
+
+def test_recorder_reports_a_process_that_dies_mid_capture():
+    # pw-record exiting on its own (source unplugged, server restart) used to be
+    # silent whenever any audio had already been captured.
+    pcm = np.arange(1600, dtype=np.int16)
+    proc = FakeProc(pcm.tobytes(), rc=1, stderr=b"pw-record: node disappeared\n", eof_early=True)
+    rec = Recorder(popen=lambda *a, **k: proc)
+    rec.start(None)
+    _await_reader(rec)
+    out = rec.stop()
+    assert "node disappeared" in (rec.error or "")
+    assert np.array_equal(out, pcm)          # whatever was captured is still returned
+
+
+def test_early_exit_without_stderr_still_reports_an_error():
+    proc = FakeProc(b"\x01\x00" * 100, rc=1, eof_early=True)
+    rec = Recorder(popen=lambda *a, **k: proc)
+    rec.start(None)
+    _await_reader(rec)
+    rec.stop()
+    assert rec.error == "pw-record exited early"
+
+
+def test_early_exit_is_not_reported_after_cancel():
+    proc = FakeProc(b"\x01\x00" * 100, rc=1, eof_early=True)
+    rec = Recorder(popen=lambda *a, **k: proc)
+    rec.start(None)
+    _await_reader(rec)
+    rec.cancel()
+    assert rec.error is None
+
+
+def test_kill_is_followed_by_wait_so_the_returncode_is_known():
+    proc = StubbornProc(b"\x01\x00" * 100, rc=0)
+    rec = Recorder(popen=lambda *a, **k: proc)
+    rec.start(None)
+    rec.stop()
+    assert proc.killed and proc.waits_after_kill == 1
+    assert proc.returncode == -9             # unset until stop() waits on the kill
 
 
 @pytest.mark.boundary

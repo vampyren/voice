@@ -269,3 +269,46 @@ def test_broken_profile_fails_as_a_transcription_error_and_keeps_the_audio(isola
     assert d.dictation.last_error and "ghost" in d.dictation.last_error
     assert d.history.take_audio() is not None      # kept, so a retry is still possible
     d.shutdown()
+
+
+def _must_not_build(*a, **kw):
+    raise AssertionError("the daemon must not start with an unreadable config")
+
+
+def test_main_reports_a_broken_config_and_exits_2(isolated_xdg, monkeypatch, capsys):
+    from voice import paths
+    from voice.daemon import main
+
+    paths.config_file().write_text("this = [unclosed")
+    notified = []
+    monkeypatch.setattr("voice.daemon.Notifier", lambda *a, **kw: type("N", (), {
+        "notify": lambda self, title, body, urgency="normal": notified.append((title, body, urgency)),
+    })())
+    monkeypatch.setattr("voice.daemon.Daemon", _must_not_build)
+
+    assert main() == 2
+    assert "config.toml" in capsys.readouterr().err
+    assert notified and notified[-1][2] == "critical" and "config.toml" in notified[-1][1]
+
+
+def test_apply_config_keeps_previous_settings_when_the_file_is_broken(isolated_xdg, qapp, monkeypatch):
+    from voice import paths
+
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    notified = []
+    notifier = type("N", (), {
+        "notify": lambda self, title, body, urgency="normal": notified.append((title, urgency)),
+        "set_enabled": lambda self, enabled: None})()
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=notifier)
+    d.build()
+
+    paths.config_file().write_text("broken = [")
+    d.apply_config()          # a reload of unparseable TOML must not abort mid-apply
+
+    dictate = next(iter(parse_keyspec("KEY_F13").codes))
+    assert d.tracker.feed(dictate, 1) == [("dictate", "press")]   # old binding still live
+    assert d.config.get("hotkeys.dictate") == "KEY_F13"
+    assert any("keeping previous settings" in title for title, _ in notified)
+    assert notified[-1][1] == "critical"
+    d.shutdown()

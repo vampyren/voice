@@ -192,7 +192,14 @@ class Daemon:
 
     def apply_config(self) -> None:
         """Re-reads config. Runs on the Qt thread only (see _Bridge.apply_config)."""
-        self.config.reload()
+        try:
+            self.config.reload()
+        except ValueError as exc:
+            # Unparseable TOML: the CLI has already printed "ok", so the only way
+            # the user learns nothing was applied is this notification.
+            log.warning("config reload failed, keeping previous settings: %s", exc)
+            self._notifier.notify("Config error, keeping previous settings", str(exc), "critical")
+            return
         self.tracker.set_specs(hotkey_specs(self.config))
         self._notifier.set_enabled(bool(self.config.get("general.notifications", True)))
         current = self._profile_snapshot()
@@ -265,7 +272,14 @@ class Daemon:
 
 
 def main() -> int:
-    config = Config.load()
+    try:
+        config = Config.load()
+    except ValueError as exc:
+        # Started from a .desktop entry there is no terminal to read a traceback in,
+        # so say it once on stderr and once on the desktop, then give up cleanly.
+        print(f"{APP_NAME}: {exc}", file=sys.stderr)
+        Notifier().notify("Config error", str(exc), "critical")
+        return 2
     errs = config.errors()
     if errs:
         log.warning("config problems: %s", "; ".join(errs))

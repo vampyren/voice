@@ -13,8 +13,8 @@ from voice.audio.pcm import from_bytes
 #: speech hugging the bottom of the scale (a normal voice sits near -26 dBFS,
 #: i.e. 0.05 full scale, which maps to 0.22); the gain lifts the usual speaking
 #: range of 0.06..0.4 full-scale RMS onto 0.31..0.79 of the bar height, so the
-#: waveform moves visibly without pinning to the ceiling. Anything from about
-#: -2 dBFS upwards clips to 1.0, which only a very loud chunk reaches.
+#: waveform moves visibly without pinning to the ceiling. It clips to 1.0 at
+#: 0.64 full-scale RMS (-3.9 dBFS), which only a very loud chunk reaches.
 GAIN = 1.25
 
 FULL_SCALE = 32768.0

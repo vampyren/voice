@@ -113,8 +113,11 @@ class Recorder:
             self._report_level(chunk)
 
     def _report_level(self, chunk: bytes) -> None:
-        # Display only: a broken overlay pipe or a buggy callback must never
-        # cost us audio, so every failure is logged and swallowed here.
+        # Display only: a callback that *raises* is logged and swallowed so it
+        # cannot cost us audio. A callback that *blocks* still stalls this
+        # reader thread and pw-record behind it, which is why the constructor
+        # requires a non-blocking one (the daemon writes to the overlay pipe
+        # without waiting for the helper).
         if self._on_level is None:
             return
         try:

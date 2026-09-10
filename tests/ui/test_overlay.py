@@ -148,3 +148,22 @@ def test_a_dictation_session_read_line_by_line(model):
         apply_message(model, parse_line(json.dumps(message)))
         seen.append(model.state)
     assert seen == ["recording"] * 4 + ["transcribing", "done", "hidden"]
+
+
+# -- review findings ------------------------------------------------------
+
+@pytest.mark.parametrize("value", [None, 42, ["sv"], {"code": "sv"}, True])
+def test_a_language_that_is_not_a_string_is_refused(model, caplog, value):
+    with caplog.at_level("WARNING"):
+        assert apply_message(model, {"language": value}) is False
+    assert model.badge_text == "EN"
+    assert "language" in caplog.text
+
+
+def test_the_helper_can_insist_on_layer_shell():
+    from voice.ui.overlay import layer_shell_exit_code
+    assert layer_shell_exit_code(shell=None, require=False) is None
+    assert layer_shell_exit_code(shell=object(), require=True) is None
+    assert layer_shell_exit_code(shell=None, require=True) == 2
+    assert build_parser().parse_args([]).require_layer_shell is False
+    assert build_parser().parse_args(["--require-layer-shell"]).require_layer_shell is True

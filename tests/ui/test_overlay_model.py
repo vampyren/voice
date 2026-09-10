@@ -397,3 +397,31 @@ def test_reduced_motion_stills_the_animations_and_lowers_the_waveform(clock):
     fill = m.sweep
     m.tick(clock.advance(1.3))
     assert m.sweep == fill, "the fill line must not sweep"
+
+
+# -- review findings ------------------------------------------------------
+
+def test_a_notice_restores_the_error_it_interrupted_intact(model, clock):
+    # The message and the remaining 2 s of the error must both survive the notice.
+    model.set_state("error", text="pw-record: no such target")
+    model.tick(clock.advance(0.5))
+    model.set_state("notice", text="EN → SV", now=clock.t)
+    model.tick(clock.advance(NOTICE_TTL + 0.01))
+    assert model.state == "error"
+    assert model.text == "pw-record: no such target"
+    model.tick(clock.advance(ERROR_HOLD - 0.6))     # 1.4 s of the 1.5 s left
+    assert model.state == "error", "the message was still owed its time"
+    model.tick(clock.advance(0.2))
+    assert model.state == "hidden", "the error's own 2 s must not restart"
+
+
+def test_an_interrupted_state_resumes_with_the_time_it_had_left(model, clock):
+    model.set_state("done")
+    model.tick(clock.advance(0.2))                  # 1.0 s of the done hold left
+    model.set_state("notice", now=clock.t)
+    model.tick(clock.advance(NOTICE_TTL + 0.01))
+    assert model.state == "done"
+    model.tick(clock.advance(DONE_HOLD - 0.3))
+    assert model.state == "done", "the hold resumed rather than restarting"
+    model.tick(clock.advance(0.2))
+    assert model.state == "hidden"

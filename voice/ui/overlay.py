@@ -15,6 +15,14 @@ Running it: the daemon spawns `voice-overlay`, or, where PyGObject is not in
 the project's virtualenv (the usual case - it is a system package), the
 equivalent `python3 -m voice.ui.overlay` on the system interpreter with
 PYTHONPATH pointing at the repository.
+
+Focus, and why it matters to the daemon: only a layer-shell surface can refuse
+keyboard focus. GTK 4 removed `set_accept_focus`/`set_focus_on_map`, and a
+plain toplevel *is* focused by the compositor when it maps (measured on GNOME:
+`is_active()` is True a second after `present()`), which would send the paste
+chord to the pill instead of the user's window. Without gtk4-layer-shell the
+helper logs a warning; pass `--require-layer-shell` to make it exit 2 instead,
+so the daemon can decide to run without a pill rather than break dictation.
 """
 from __future__ import annotations
 
@@ -60,11 +68,12 @@ def apply_message(model: OverlayModel, message: dict) -> bool:
     """
     applied = False
     if "language" in message:
-        try:
-            model.set_language(str(message["language"]))
+        code = message["language"]
+        if isinstance(code, str) and code.strip():
+            model.set_language(code)
             applied = True
-        except (TypeError, ValueError) as exc:
-            log.warning("overlay: bad language %r (%s)", message["language"], exc)
+        else:
+            log.warning("overlay: ignoring bad language %r", code)
     if "level" in message:
         try:
             model.push_level(float(message["level"]))
@@ -91,6 +100,13 @@ def reduced_motion(gtk_setting: bool | None = None) -> bool:
     return gtk_setting is False
 
 
+def layer_shell_exit_code(shell, require: bool) -> int | None:
+    """Exit code when layer-shell is demanded but missing, else None."""
+    if require and shell is None:
+        return 2
+    return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="voice-overlay", description=__doc__)
     parser.add_argument("--lang", default="en", help="language code for the badge")
@@ -98,6 +114,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--position", choices=("bottom", "top"), default="bottom")
     parser.add_argument("--margin", type=int, default=48,
                         help="distance from the anchored screen edge (layer-shell only)")
+    parser.add_argument("--require-layer-shell", action="store_true",
+                        help="exit 2 instead of falling back to a focus-stealing "
+                             "plain window when gtk4-layer-shell is missing")
     parser.add_argument("--verbose", action="store_true")
     return parser
 
@@ -236,8 +255,13 @@ def _load_gtk():
         gi.require_version("Gtk4LayerShell", "1.0")
         from gi.repository import Gtk4LayerShell as layer_shell
     except (ImportError, ValueError):
-        log.info("overlay: gtk4-layer-shell not available, using a plain window "
-                 "(the compositor decides where it goes)")
+        log.warning(
+            "overlay: gtk4-layer-shell is not available. Falling back to a plain "
+            "window: the compositor places it, and it WILL take keyboard focus "
+            "when it appears - GTK 4 dropped the accept-focus and focus-on-map "
+            "hints, so only a layer-shell surface can refuse focus. Install "
+            "gtk4-layer-shell, or start the helper with --require-layer-shell to "
+            "have it exit instead.")
     return Gtk, Gdk, GLib, layer_shell
 
 
@@ -250,6 +274,11 @@ def main(argv: list[str] | None = None) -> int:
     except (ImportError, ValueError) as exc:
         log.error("overlay: PyGObject with GTK 4 is required (%s)", exc)
         return 1
+    refused = layer_shell_exit_code(layer_shell, args.require_layer_shell)
+    if refused is not None:
+        log.error("overlay: --require-layer-shell was given but gtk4-layer-shell "
+                  "is not installed; not showing a focus-stealing window")
+        return refused
     return _Pill(args, gtk, gdk, glib, layer_shell).run()
 
 

@@ -151,12 +151,19 @@ def test_drawing_accepts_an_explicit_size(tmp_path):
 
 
 @pytest.mark.parametrize("state", ["recording", "transcribing", "done", "notice", "error"])
-def test_a_degenerate_size_draws_nothing_instead_of_crashing(tmp_path, state):
-    # A 3 px tall pill has no room for anything; it must not divide by zero.
+def test_a_surface_too_small_for_a_capsule_draws_nothing(tmp_path, state):
     path = render_png(_model(state, text="x", age=0.4), tmp_path / f"tiny-{state}.png",
                       width=40, height=3)
     assert _png_size(path) == (40, 3)
     assert max(p[3] for p in Image(path).pixels()) == 0
+
+
+def test_a_zero_scale_surface_does_not_divide_by_zero(tmp_path):
+    """At height 0 the checkmark's path length is 0; it used to raise there."""
+    from voice.ui.overlay_draw import draw
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 40, 1)
+    for state in ("recording", "transcribing", "done", "notice", "error"):
+        draw(cairo.Context(surface), 40, 0, _model(state, text="x", age=0.4))
 
 
 def test_the_bars_are_the_designs_thin_bars_with_3_px_gaps(tmp_path):
@@ -383,3 +390,30 @@ def test_a_long_error_message_stays_inside_the_pill(tmp_path):
     img = Image(render_png(_model("error", text="x" * 300, age=0.2), tmp_path / "long.png"))
     edge = [img(x, y) for y in range(img.height) for x in (0, 1, img.width - 2, img.width - 1)]
     assert all(max(p[:3]) < 90 for p in edge), "text spilled over the pill edge"
+
+
+# -- review findings ------------------------------------------------------
+
+def test_the_chip_has_room_for_whichever_code_it_is_showing(tmp_path):
+    """During a notice the chip shows the *old* code first: it must fit."""
+    model = _model("notice", lang="zh-hant", to="en", age=0.05)
+    assert model.prev_lang == "zh-hant"
+    img = Image(render_png(model, tmp_path / "swap.png"))
+    right = [img(x, y) for y in range(img.height)
+             for x in range(img.width - 3, img.width)]
+    assert all(max(p[:3]) < 90 for p in right), "the leaving code overran the pill"
+
+
+def test_a_notice_without_an_arrow_still_rises_in(tmp_path):
+    """Text the daemon sends without an arrow gets the same rise as the rest."""
+    def top_row(age):
+        img = Image(render_png(_model("notice", text="Model reloaded", age=age),
+                               tmp_path / f"n-{age}.png"))
+        # inside the well band only: rows 0 and 43 carry the pill's own border
+        lit = [y for y in range(8, img.height - 8) for x in range(36, 36 + 132)
+               if max(img(x, y)[:3]) > 55]
+        assert lit, f"nothing drawn at age {age}"
+        return min(lit)
+
+    rising, settled = top_row(0.03), top_row(0.4)      # ~2.8 px below its home
+    assert rising - settled >= 2, f"text sat at {rising} then {settled}: no rise"

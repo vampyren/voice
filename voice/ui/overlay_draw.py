@@ -128,9 +128,17 @@ def _counter_width(ctx: cairo.Context, model: OverlayModel, s: float) -> float:
     return max(COUNTER_MIN * s, text_width(ctx, model.elapsed_text, COUNTER_SIZE * s, COUNTER_TRACK))
 
 
+def _badge_codes(model: OverlayModel) -> tuple[str, ...]:
+    """Codes the chip can show right now - during a notice it shows both."""
+    if model.state == "notice":
+        return (model.prev_lang.upper(), model.badge_text)
+    return (model.badge_text,)
+
+
 def _badge_width(ctx: cairo.Context, model: OverlayModel, s: float) -> float:
-    return text_width(ctx, model.badge_text, BADGE_SIZE * s, BADGE_TRACK) \
-        + 2 * BADGE_PAD_X * s + 2 * s
+    widest = max(text_width(ctx, code, BADGE_SIZE * s, BADGE_TRACK)
+                 for code in _badge_codes(model))
+    return widest + 2 * BADGE_PAD_X * s + 2 * s
 
 
 def natural_width(model: OverlayModel, height: float = PILL_H) -> int:
@@ -284,8 +292,9 @@ def _notice_well(ctx, model: OverlayModel, x: float, cy: float, s: float) -> Non
     text = model.text or f"{model.prev_lang.upper()} → {model.lang.upper()}"
     parts = [p.strip() for p in text.replace("->", "→").split("→")]
     if len(parts) != 2:
-        _centred_text(ctx, x + WELL_W * s / 2, cy, text, NOTICE_SIZE * s,
-                      NOTICE_TRACK, DIM, model.notice_rise)
+        rise = model.notice_rise
+        _centred_text(ctx, x + WELL_W * s / 2, cy + RISE_PX * s * (1 - rise), text,
+                      NOTICE_SIZE * s, NOTICE_TRACK, DIM, rise)
         return
     size, gap = NOTICE_SIZE * s, NOTICE_GAP * s
     pieces = [(parts[0], DIMMER), ("→", DIM), (parts[1], TEXT)]
@@ -348,7 +357,9 @@ def _badge(ctx, model: OverlayModel, x: float, cy: float, s: float, width: float
     _rounded_rect(ctx, x + s / 2, top + s / 2, width - s, height - s, BADGE_RADIUS * s)
     ctx.stroke()
     ctx.set_source_rgba(*colour, alpha)
-    _show_text(ctx, x + BADGE_PAD_X * s + s, top + height / 2 + _cap_height(ctx, size) / 2,
+    # the chip is sized for the wider of the two codes, so centre whichever shows
+    inset = (width - text_width(ctx, text, size, BADGE_TRACK)) / 2
+    _show_text(ctx, x + inset, top + height / 2 + _cap_height(ctx, size) / 2,
                text, size, BADGE_TRACK)
 
 

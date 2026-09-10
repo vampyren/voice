@@ -128,8 +128,13 @@ class OverlayModel:
         self._envelope = [self._amp(i) for i in range(bars)]
         self.state = "hidden"
         self.text: str | None = None
-        self._return_state = "hidden"
         self._now = clock()
+        #: What a notice interrupted: its state, its text, and how long it had
+        #: already been showing. A hold counts *visible* time, so the covered
+        #: state resumes with the time it had left rather than losing it (an
+        #: error and a notice both last 2 s: on wall-clock time an interrupted
+        #: error could never come back) or starting over.
+        self._return: tuple[str, str | None, float] = ("hidden", None, 0.0)
         self._state_since = self._now
         self._last_tick = self._now
         self._last_push = self._now
@@ -178,7 +183,7 @@ class OverlayModel:
             raise ValueError(f"unknown overlay state: {state!r}")
         now = self._clock() if now is None else now
         if state == "notice" and self.state != "notice":
-            self._return_state = self.state
+            self._return = (self.state, self.text, self.state_age)
             text = text or f"{self.prev_lang.upper()} → {self.lang.upper()}"
         self._enter(state, text, now, reset_counter=True)
 
@@ -212,7 +217,9 @@ class OverlayModel:
             factor = self.decay ** (fading / FRAME)
             self._history = [h * factor for h in self._history]
         if self.state == "notice" and self.state_age >= NOTICE_TTL:
-            self._enter(self._return_state, None, now, reset_counter=False)
+            state, text, age = self._return
+            self._enter(state, text, now, reset_counter=False)
+            self._state_since = now - age   # resume, do not restart, its hold
             return
         hold = {"done": DONE_HOLD, "error": ERROR_HOLD}.get(self.state)
         if hold is not None and self.state_age >= hold:
@@ -228,7 +235,7 @@ class OverlayModel:
     def _counting(self) -> bool:
         """Capture is still running - a notice on top of it does not pause it."""
         return self.state == "recording" or (
-            self.state == "notice" and self._return_state == "recording")
+            self.state == "notice" and self._return[0] == "recording")
 
     @property
     def state_age(self) -> float:

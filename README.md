@@ -98,10 +98,16 @@ language = "en"            # "en", "sv", or "auto"
 notifications = true
 
 [hotkeys]
+backend = "auto"           # "auto" | "evdev" (kernel devices) | "portal" (desktop shortcuts)
 dictate = "KEY_F13"        # any evdev key, or a combination like "KEY_LEFTMETA+KEY_SPACE"
 dictate_mode = "hold"      # "hold" (push-to-talk) or "toggle"
 recall = ""                # re-insert the last dictation
 cancel = "KEY_ESC"         # discard the current recording
+# Portal backend triggers (XDG shortcut syntax). Compositors reject bare
+# modifiers, so these need a combination. Empty = not bound.
+portal_dictate = "CTRL+space"
+portal_recall = ""
+portal_cancel = ""
 
 [audio]
 device = ""                # PipeWire source node name; "" = default source
@@ -154,6 +160,28 @@ active_window_command = ""   # command printing the focused window class; "" = u
 restore_clipboard = true
 ```
 
+**Hotkey backend.** `hotkeys.backend` decides how the hotkey is seen:
+
+- `evdev` reads the kernel input devices directly. It sees any key, including a bare
+  modifier such as `KEY_RIGHTCTRL`, but needs read access to `/dev/input` (the udev rule
+  or the `input` group) and a local seat.
+- `portal` asks the desktop to bind a global shortcut through
+  `org.freedesktop.portal.GlobalShortcuts` (KDE Plasma, GNOME 48+). No device
+  permissions, and it works in a remote-desktop session, because the compositor sees the
+  keystroke before anything else does. The trigger comes from `hotkeys.portal_dictate`,
+  **Ctrl+Space** by default; `portal_recall` and `portal_cancel` are bound too when set.
+  Compositors refuse a bare modifier as a global shortcut, so these must be
+  combinations — a lone `CTRL` will not bind. Your desktop may also let you rebind the
+  shortcut in its own settings, which wins over the config file.
+- `auto` (the default) picks `evdev` when at least one keyboard is readable *and* the
+  session has a local seat, and `portal` otherwise. `voice doctor` prints the choice and
+  the reason (`hotkey backend: portal (no local seat)`), and so does `voice status`.
+
+The portal backend needs the desktop entry `install.sh` writes
+(`~/.local/share/applications/io.github.vampyren.voice.desktop`): the portal resolves the
+app id through it, and refuses the shortcut session with "An app id is required" without
+it. Changing a portal trigger takes effect on the next daemon start, not on `voice reload`.
+
 **Hotkeys.** Use the settings window's "Capture key" button — press the physical key and
 it fills in the exact evdev name it received. Combinations are typed by hand, e.g.
 `KEY_LEFTMETA+KEY_SPACE`. If a Keychron spare key (the circle/triangle/square keys)
@@ -184,6 +212,9 @@ are restored after the paste.
 - **keyboard access** — at least one input device is readable without root. Re-run
   `./install.sh` (installs the udev rule) or add yourself to the `input` group and
   log out/in. A device already open before the rule existed may need re-plugging.
+- **hotkey backend** — informational: which listener the daemon would use here and why
+  (`evdev`, or `portal (no local seat)`). Never fails the run; see
+  [Configuration](#configuration).
 - **pw-record** — PipeWire's recording tool is on PATH.
 - **wl-clipboard** — `wl-copy`/`wl-paste` are installed.
 - **portal** — the `RemoteDesktop` portal is reachable (`xdg-desktop-portal-kde` on KDE,
@@ -214,11 +245,15 @@ Two more common issues doctor doesn't cover directly:
   (`sudo usermod -aG input $USER`, then log out and in; `sudo setfacl -m u:$USER:rw
   /dev/input/event*` works immediately for the current boot). Second, keystrokes in a
   remote session arrive through the remote-desktop server, not the kernel input devices,
-  so the push-to-talk key is never seen, and the portal paste keystroke is not delivered
-  to the focused window either. Workaround: drive dictation from the command line
-  (`voice toggle`, or `voice start` with a short `audio.max_seconds`), set
-  `inject.restore_clipboard = false`, and paste with Ctrl+V yourself. A portal-based
-  hotkey that works in remote sessions is on the roadmap.
+  so the push-to-talk key is never seen. **The portal hotkey backend is the answer here,
+  and `hotkeys.backend = "auto"` already switches to it**: no local seat means the daemon
+  binds Ctrl+Space (`hotkeys.portal_dictate`) through the desktop instead of reading
+  `/dev/input`, so no `input` group membership is needed either. Run `./install.sh` first
+  — the portal needs the desktop entry it installs to resolve this app's id. What remains
+  is the paste: the portal keystroke is not delivered to the focused window in some remote
+  sessions, so if Ctrl+V never arrives, set `inject.restore_clipboard = false` and paste
+  yourself, or drive dictation from the command line (`voice toggle`, or `voice start`
+  with a short `audio.max_seconds`).
 
 ## Uninstall
 
@@ -247,9 +282,9 @@ STT, inject, tray, notifications, history/recall, CLI, doctor, install script, R
 - **Phase 3 — Text-to-speech**: `kokoro`, `chatterbox` and `openai_speech` backends,
   per-voice profiles (including a Swedish Chatterbox fine-tune), and a "read selection
   aloud" hotkey.
-- **Phase 4 — Nice-to-have**: a floating on-screen pill via layer-shell on KWin, the
-  GlobalShortcuts portal as a permission-free hotkey alternative, and direct typing via
-  libei text events once KWin/Mutter ship it.
+- **Phase 4 — Nice-to-have**: a floating on-screen pill via layer-shell on KWin, and
+  direct typing via libei text events once KWin/Mutter ship it. (The GlobalShortcuts
+  portal hotkey backend landed early, in phase 1 — see `hotkeys.backend`.)
 
 ## External components
 

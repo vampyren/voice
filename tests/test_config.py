@@ -193,3 +193,14 @@ def test_errors_wants_a_portal_trigger_when_the_portal_backend_is_forced(isolate
     assert any("hotkeys.portal_dictate" in e for e in cfg.errors())
     cfg.set("hotkeys.backend", "evdev")
     assert [e for e in cfg.errors() if "portal_dictate" in e] == []
+
+
+def test_readme_shows_the_current_defaults():
+    """The README prints config.toml verbatim; drift there misinforms every new user."""
+    import re
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+    block = re.search(r"```toml\n(# voice configuration.*?)```", readme, re.S)
+    assert block, "the README no longer contains the default config block"
+    assert block.group(1) == DEFAULT_CONFIG

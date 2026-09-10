@@ -15,7 +15,15 @@ desktop and yet have no key attached.
 setting: sending it again for a shortcut id the portal already knows makes GNOME
 50 drop the key the user assigned (its stored entry comes back with no
 `shortcuts` member at all) while still answering BindShortcuts with success. So
-ListShortcuts decides, per id, whether we may express a preference at all.
+ListShortcuts decides, per id, whether we may express a preference at all - and
+an answer that cannot distinguish "never seen" from "seen and assigned" counts
+as a no. Measured against GNOME 50 (Registry.Register, CreateSession,
+ListShortcuts, nothing bound): the reply is `{'shortcuts': ('a(sa{sv})', [])}`
+while dconf holds three assigned shortcuts for the same app id, because the
+call is scoped to the session and the session is necessarily new. An empty
+listing is therefore no evidence at all, and on such a desktop we never express
+a preference - the user assigns the key in their keyboard settings, and
+`shortcut_state()` says so until they do.
 """
 from __future__ import annotations
 
@@ -247,7 +255,7 @@ class PortalListener:
         if code != 0:
             raise PortalError(f"portal CreateSession denied (response {code})")
         self._session = results["session_handle"][1]
-        known = self._list_shortcuts()
+        known = self._list_shortcuts() or None
         code, results = call_with_response(
             self._conn, SHORTCUTS, "BindShortcuts", "oa(sa{sv})sa{sv}",
             (self._session, self._bindings(known), "", {}))
@@ -292,9 +300,10 @@ class PortalListener:
     def _bindings(self, known: dict[str, str] | None) -> list[tuple[str, dict]]:
         """One entry per configured id; `preferred_trigger` only where it is safe.
 
-        `known is None` (the portal could not be asked) counts every id as known:
-        the cost of not asking for a trigger is one trip to Keyboard Settings,
-        the cost of asking wrongly is the user's binding.
+        `known is None` - the portal could not be asked, or answered with an
+        empty session listing that says nothing about what it holds - counts
+        every id as known: the cost of not asking for a trigger is one trip to
+        Keyboard Settings, the cost of asking wrongly is the user's binding.
         """
         out = []
         for sid, trigger in self._shortcuts.items():

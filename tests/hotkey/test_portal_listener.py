@@ -22,6 +22,10 @@ OTHER_SESSION = "/org/freedesktop/portal/desktop/session/1_99/other"
 WITH_REGISTRY = ('<node><interface name="org.freedesktop.host.portal.Registry">'
                  '<method name="Register"/></interface></node>')
 WITHOUT_REGISTRY = '<node><interface name="org.freedesktop.portal.GlobalShortcuts"/></node>'
+#: What the fake portal answers with for an id it was given no preference for
+#: and does not already hold: the key the user picked in the desktop's dialog.
+#: `bind_triggers={"dictate": ""}` is how a test asks for the opposite.
+DIALOG_CHOICE = "<Control>space"
 
 
 def started(listener, timeout=2.0):
@@ -107,7 +111,8 @@ class FakeConn:
             return self._shortcut_array(self.bind_triggers)
         requested = self.bodies("BindShortcuts")[-1][1]
         return self._shortcut_array({
-            sid: (opts["preferred_trigger"][1] if "preferred_trigger" in opts else self.known.get(sid, ""))
+            sid: (opts["preferred_trigger"][1] if "preferred_trigger" in opts
+                  else self.known.get(sid) or DIALOG_CHOICE)
             for sid, opts in requested})
 
     # -- connection ------------------------------------------------------
@@ -167,7 +172,10 @@ def make(shortcuts=None, on_event=None, on_ready=None, **kwargs):
 
 # -- binding -------------------------------------------------------------------
 def test_bind_shortcuts_sends_every_configured_id_with_its_trigger():
-    listener, conn, _ = make({"dictate": "CTRL+space", "cancel": "CTRL+ALT+c"})
+    # A non-empty listing that names neither id: the portal genuinely has not
+    # seen these two, so a first-run preference is safe to express.
+    listener, conn, _ = make({"dictate": "CTRL+space", "cancel": "CTRL+ALT+c"},
+                             known={"somebody-elses": "F9"})
     try:
         listener.start()
         started(listener)
@@ -201,6 +209,23 @@ def test_a_shortcut_the_portal_already_knows_keeps_its_trigger():
         assert opts["cancel"]["preferred_trigger"] == ("s", "CTRL+ALT+c")   # never seen before
         assert listener.effective_triggers() == {"dictate": "F13", "cancel": "CTRL+ALT+c"}
         assert listener.shortcut_state() == STATE_BOUND
+    finally:
+        listener.stop()
+
+
+def test_an_empty_session_listing_is_not_evidence_of_a_first_run():
+    """Measured on GNOME 50 with three shortcuts assigned in dconf: a freshly
+    created session lists `[]`, because ListShortcuts is scoped to the session
+    and the session must exist before it can be asked. Reading that as "never
+    seen" is exactly the clobber this change is about."""
+    listener, conn, _ = make({"dictate": "CTRL+space"}, known={})
+    try:
+        listener.start()
+        started(listener)
+        assert conn.bodies("ListShortcuts")                    # it was asked
+        opts = dict(conn.bodies("BindShortcuts")[0][1])
+        assert "preferred_trigger" not in opts["dictate"]
+        assert listener.effective_triggers() == {"dictate": DIALOG_CHOICE}
     finally:
         listener.stop()
 

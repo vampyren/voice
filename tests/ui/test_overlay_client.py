@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from voice.ui.overlay_client import (FRAME_S, NO_LAYER_SHELL_EXIT, OverlayClient,
+from voice.ui.overlay_client import (FRAME_S, NO_LAYER_SHELL_EXIT, QUEUE_MAX, OverlayClient,
                                      default_launcher, helper_command, probe_helper)
 
 
@@ -482,3 +482,58 @@ def test_the_interpreter_probe_runs_once_per_process(monkeypatch):
     default_launcher(popen=lambda cmd, **kw: "proc")
     default_launcher(popen=lambda cmd, **kw: "proc")
     assert probed == ["/usr/bin/python3"]
+
+
+# -- one death must cost exactly one restart -----------------------------------
+def test_a_write_in_flight_when_the_helper_dies_costs_no_second_restart(helper_processes):
+    """`_alive()` spends the restart budget and queues the respawn behind a write
+    that is already parked on the dead helper's pipe. That write then fails, and
+    it must not be read as a *second* death - one exit, one restart."""
+    client = _client(helper_processes)
+    client.start()
+    proc = helper_processes.made[0]
+    slow = _SlowStdin()
+    proc.stdin = slow
+    client.send({"state": "recording"})
+    assert slow.entered.wait(2.0)                   # the writer is parked in write()
+
+    proc.exit(1)                                    # the helper dies under it
+    slow.close()                                    # so the parked write will raise
+    client.send({"state": "transcribing"})          # notices the exit, queues a respawn
+    slow.release.set()                              # and now the stale write fails
+
+    assert client.flush(2.0)
+    assert len(helper_processes.made) == 2, "one exit must buy exactly one restart"
+    assert client.status() == "running"
+
+    client.send({"state": "done"})                  # later messages reach the new helper
+    assert client.flush(2.0)
+    assert {"state": "done"} in helper_processes.made[1].lines()
+    client.stop()
+
+
+def test_a_respawn_that_cannot_be_queued_can_still_be_retried(helper_processes):
+    """When the queue is full the respawn sentinel does not fit, so no restart
+    happened - and the budget must not have been spent on it either."""
+    client = _client(helper_processes)
+    client.start()
+    proc = helper_processes.made[0]
+    slow = _SlowStdin()
+    proc.stdin = slow
+    client.send({"state": "recording"})
+    assert slow.entered.wait(2.0)
+    for i in range(QUEUE_MAX + 4):                  # no room left for the sentinel
+        client.send({"state": f"filler-{i}"})
+
+    proc.exit(1)
+    client.send({"state": "late"})                  # sees the death, cannot queue it
+    assert len(helper_processes.made) == 1
+
+    slow.release.set()                              # the writer drains the backlog
+    assert client.flush(2.0)
+    client.send({"state": "again"})                 # the restart is still affordable
+    assert client.flush(2.0)
+    assert len(helper_processes.made) == 2, "the failed queueing burnt the restart"
+    assert {"state": "again"} in helper_processes.made[1].lines()
+    assert client.status() == "running"
+    client.stop()

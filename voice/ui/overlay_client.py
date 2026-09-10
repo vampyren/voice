@@ -427,14 +427,17 @@ class OverlayClient:
             self._die(f"disabled: helper exited ({code})",
                       f"recording overlay: helper exited again ({code}); it stays off")
             return False
-        self._restarts += 1
-        log.warning("recording overlay helper exited (%s); restarting it once", code)
         if spawn_here:
+            self._restarts += 1
+            log.warning("recording overlay helper exited (%s); restarting it once", code)
             proc, self._proc = self._proc, None
             self._last_level = None
             self._close(proc)
             return self._spawn()
-        return self._queue_respawn()
+        if not self._queue_respawn():
+            return False                    # nothing was spent; the next send retries
+        log.warning("recording overlay helper exited (%s); restarting it once", code)
+        return True
 
     def _queue_respawn(self) -> bool:
         """Caller holds the lock. Ask the writer thread to bring the helper back.
@@ -446,9 +449,12 @@ class OverlayClient:
         if self._respawn_queued:
             return True
         if not self._put(_RESPAWN):
+            # The budget is deliberately untouched: no replacement was asked for,
+            # so the next send() gets to ask again once the queue has room.
             log.debug("overlay queue full; not restarting the helper yet")
             return False
         self._respawn_queued = True
+        self._restarts += 1
         return True
 
     def _respawn(self) -> None:
@@ -518,11 +524,20 @@ class OverlayClient:
                 return
             if self._dead or self._stopped:
                 return
+            if self._respawn_queued:
+                # _alive() already saw this helper go and asked for its
+                # replacement; this failed write is that same death reaching us
+                # a second time, and it must not cost a second restart.
+                log.debug("overlay write to a helper already being replaced failed (%s)", exc)
+                return
             if self._restarts >= 1:
                 self._die("disabled: helper not writable",
                           f"recording overlay: cannot write to the helper ({exc}); it stays off")
                 return
             self._restarts += 1
+            # Claimed before the lock is dropped, so a send() racing the respawn
+            # below sees a replacement coming instead of counting the death again.
+            self._respawn_queued = True
         log.warning("recording overlay: the helper stopped reading (%s); restarting it once", exc)
         self._respawn()
 

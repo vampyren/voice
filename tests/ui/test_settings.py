@@ -384,3 +384,43 @@ def test_rebuilding_the_table_leaves_no_stray_combo_behind(qapp):
     assert len(table.viewport().findChildren(QComboBox)) == table.rowCount() == 2
     dlg.reload_from_disk()
     assert len(table.viewport().findChildren(QComboBox)) == table.rowCount() == 2
+
+
+def test_saving_keeps_a_mapping_for_a_language_the_table_cannot_show(qapp):
+    """The table only has rows for general.languages; a map may name others
+    (`de`, or `auto`, which the Language combo offers), and Save must not eat
+    them just because there was no row for them."""
+    _with_map({"en": "local", "de": "openai", "auto": "groq"})
+    cfg, dlg, _ = make(qapp)
+    dlg.hotkey_edit.setText("KEY_RIGHTCTRL")
+    dlg.save_button.click()
+    again = Config.load()
+    assert again.get("general.language_profiles") == {"en": "local", "de": "openai",
+                                                     "auto": "groq"}
+    assert dlg.error_label.text() == ""
+
+
+def test_setting_a_row_back_to_keep_current_clears_that_mapping(qapp):
+    _with_map({"en": "local", "sv": "openai"})
+    cfg, dlg, _ = make(qapp)
+    combo = dlg.language_profile_combos["sv"]
+    combo.setCurrentIndex(combo.findData(""))
+    dlg.save_button.click()
+    assert Config.load().get("general.language_profiles") == {"en": "local"}
+
+
+def test_a_profile_another_language_chose_does_not_follow_the_language_picked_here(qapp):
+    """The toggle hotkey switched to Swedish *and* its model while this dialog sat
+    open. Choosing English here must not leave the Swedish model transcribing it."""
+    _with_map({"sv": "openai"}, general__language="auto")
+    cfg, dlg, _ = make(qapp)                       # opened on auto, profile local
+    external = Config.load()
+    external.set("general.language", "sv")
+    external.set("stt.active", "openai")           # what the daemon writes for sv
+    external.save()
+
+    dlg.language_combo.setCurrentIndex(dlg.language_combo.findData("en"))
+    dlg.save_button.click()
+    again = Config.load()
+    assert again.get("general.language") == "en"
+    assert again.get("stt.active") == "local"      # not the profile sv chose

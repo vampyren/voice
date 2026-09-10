@@ -370,11 +370,25 @@ class SettingsDialog(QDialog):
         active = on_disk.get("stt.active")
         if not active or active == self._cfg.get("stt.active"):
             return
+        if self._chosen_for_another_language(on_disk, active):
+            return
         # Only if this document actually defines it; otherwise the write would
         # produce a config errors() rejects and the save would be blocked.
         if active in (self._cfg.get("stt.profiles", {}) or {}):
             self._cfg.set("stt.active", active)
             self.active_label.setText(f"Active profile: {active}")
+
+    def _chosen_for_another_language(self, on_disk: Config, active: str) -> bool:
+        """Whether `active` is the profile the *file's* language selected, while
+        this dialog is about to write a different language.
+
+        Carrying it over then pairs the Swedish model with English: the switch
+        that wrote the two was a pair, and only half of it would survive here.
+        """
+        on_disk_language = str(on_disk.get("general.language", "") or "").strip().lower()
+        if on_disk.profile_for_language(on_disk_language) != active:
+            return False
+        return str(self._cfg.get("general.language", "") or "").strip().lower() != on_disk_language
 
     def _carry_over_language(self, on_disk: Config) -> None:
         language = on_disk.get("general.language")
@@ -389,9 +403,22 @@ class SettingsDialog(QDialog):
         self._language_changed = False         # that was us, not the user
 
     def _chosen_language_profiles(self) -> dict[str, str]:
-        """The table as a map, with the "(keep current)" rows left out."""
-        return {code.strip().lower(): combo.currentData()
-                for code, combo in self.language_profile_combos.items() if combo.currentData()}
+        """The map as this dialog would save it: what the file says, with the rows
+        the table actually shows overlaid.
+
+        The table has a row per general.languages entry only, so a mapping for a
+        language it cannot show - `de`, or `auto`, which the Language combo does
+        offer - is carried through untouched instead of being dropped by a save
+        that had nothing to do with it.
+        """
+        mapping = dict(self._cfg.language_profiles())
+        for code, combo in self.language_profile_combos.items():
+            chosen = combo.currentData()
+            if chosen:
+                mapping[code.strip().lower()] = chosen
+            else:
+                mapping.pop(code.strip().lower(), None)     # "(keep current)"
+        return mapping
 
     def _save_language_profiles(self) -> None:
         """Write the map, then apply it when the language was picked here.

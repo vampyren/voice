@@ -17,6 +17,7 @@ DEFAULT_CONFIG = '''# voice configuration. Edited by the settings window; hand e
 
 [general]
 language = "en"            # "en", "sv", or "auto"
+languages = ["en", "sv"]   # cycle order for the language toggle
 notifications = true
 
 [hotkeys]
@@ -25,15 +26,21 @@ dictate = "KEY_F13"        # any evdev key, or a combination like "KEY_LEFTMETA+
 dictate_mode = "hold"      # "hold" (push-to-talk) or "toggle"
 recall = ""                # re-insert the last dictation
 cancel = "KEY_ESC"         # discard the current recording
+language_toggle = ""       # cycle through general.languages
 # Portal backend triggers (XDG shortcut syntax). Compositors reject bare
 # modifiers, so these need a combination. Empty = not bound.
 portal_dictate = "CTRL+space"
 portal_recall = ""
 portal_cancel = ""
+portal_language_toggle = ""
 
 [audio]
 device = ""                # PipeWire source node name; "" = default source
 max_seconds = 120
+
+[ui]
+overlay = true             # the recording pill: waveform, timer, language badge
+overlay_position = "bottom"  # "bottom" | "top"
 
 [stt]
 active = "local"           # name of a [stt.profiles.*] table
@@ -84,7 +91,8 @@ restore_clipboard = true
 
 #: Shipped portal triggers, also the fallback for a config.toml written before
 #: the portal backend existed - such a file has no hotkeys.portal_* keys at all.
-DEFAULT_PORTAL_TRIGGERS = {"dictate": "CTRL+space", "recall": "", "cancel": ""}
+DEFAULT_PORTAL_TRIGGERS = {"dictate": "CTRL+space", "recall": "", "cancel": "",
+                           "language_toggle": ""}
 
 _VALID_MODES = {"hold", "toggle"}
 _VALID_HOTKEY_BACKENDS = {"auto", "evdev", "portal"}
@@ -166,6 +174,20 @@ class Config:
                 raise ValueError(f"stt.active refers to unknown profile '{name}'")
             return name, profile
 
+    def languages(self) -> list[str]:
+        """The cycle order for the language toggle.
+
+        A config written before the toggle existed has no list at all; the one
+        language it does name is then the whole cycle, so a toggle bound in a
+        newer build simply does nothing instead of jumping to a language the
+        user never chose.
+        """
+        value = self.get("general.languages")
+        if isinstance(value, list) and value:
+            return [str(v).strip() for v in value if str(v).strip()]
+        current = str(self.get("general.language", "en") or "en").strip()
+        return [current] if current else []
+
     def portal_trigger(self, name: str) -> str:
         """The effective XDG trigger for a portal shortcut id.
 
@@ -211,6 +233,14 @@ class Config:
         for name, prof in profiles.items():
             if prof.get("backend") not in _VALID_BACKENDS:
                 errs.append(f"stt.profiles.{name}.backend must be one of {sorted(_VALID_BACKENDS)}")
+        errs += _language_errors("general.language", self.get("general.language"))
+        languages = self.get("general.languages")
+        if languages is not None:
+            if not isinstance(languages, list) or not languages:
+                errs.append(f"general.languages must be a non-empty list of language codes, got {languages!r}")
+            else:
+                for entry in languages:
+                    errs += _language_errors("general.languages", entry)
         if not isinstance(self.get("audio.max_seconds"), int) or self.get("audio.max_seconds") <= 0:
             errs.append("audio.max_seconds must be a positive integer")
         for key in ("inject.paste_chord", "inject.terminal_chord"):
@@ -222,6 +252,14 @@ class Config:
             except ValueError as exc:
                 errs.append(f"{key}: {exc}")
         return errs
+
+
+def _language_errors(key: str, value: Any) -> list[str]:
+    """A language is "auto" or a two-letter code; anything else is a typo."""
+    text = value if isinstance(value, str) else None
+    if text is not None and (text.lower() == "auto" or (len(text) == 2 and text.isalpha())):
+        return []
+    return [f"{key} must be \"auto\" or a two-letter code, got {value!r}"]
 
 
 def _plain(node: Any) -> Any:

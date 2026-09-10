@@ -252,3 +252,44 @@ def test_errors_wants_a_dictate_trigger_whenever_the_portal_can_be_chosen(isolat
         assert any("hotkeys.portal_dictate" in e for e in cfg.errors()), backend
     cfg.set("hotkeys.backend", "evdev")
     assert [e for e in cfg.errors() if "portal_dictate" in e] == []
+
+
+def test_defaults_carry_the_language_cycle_and_the_overlay(isolated_xdg):
+    cfg = Config.load()
+    assert cfg.get("general.languages") == ["en", "sv"]
+    assert cfg.languages() == ["en", "sv"]
+    assert cfg.get("ui.overlay") is True
+    assert cfg.get("ui.overlay_position") == "bottom"
+    assert cfg.get("hotkeys.language_toggle") == ""
+    assert cfg.portal_trigger("language_toggle") == ""
+    assert cfg.errors() == []
+
+
+@pytest.mark.parametrize("language,languages,expected", [
+    ("en", ["en", "sv"], None),
+    ("auto", ["auto", "sv"], None),
+    ("EN", ["en"], None),                                  # case is not the point
+    ("english", ["en"], "general.language"),
+    ("e", ["en"], "general.language"),
+    ("", ["en"], "general.language"),
+    ("en", [], "general.languages"),
+    ("en", "sv", "general.languages"),                     # not a list
+    ("en", ["en", "svenska"], "general.languages"),
+    ("en", ["en", 7], "general.languages"),
+])
+def test_language_settings_are_validated(isolated_xdg, language, languages, expected):
+    cfg = Config.load()
+    cfg.set("general.language", language)
+    cfg.set("general.languages", languages)
+    errs = [e for e in cfg.errors() if "language" in e]
+    if expected is None:
+        assert errs == []
+    else:
+        assert any(e.startswith(expected) for e in errs), errs
+
+
+def test_languages_falls_back_for_a_config_written_before_the_toggle(isolated_xdg):
+    paths.config_file().write_text('[general]\nlanguage = "sv"\n')
+    cfg = Config.load()
+    assert cfg.languages() == ["sv"]           # the one language it knows about
+    assert [e for e in cfg.errors() if "languages" in e] == []

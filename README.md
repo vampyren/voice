@@ -95,6 +95,7 @@ survive settings-window saves. The defaults:
 
 [general]
 language = "en"            # "en", "sv", or "auto"
+languages = ["en", "sv"]   # cycle order for the language toggle
 notifications = true
 
 [hotkeys]
@@ -103,15 +104,21 @@ dictate = "KEY_F13"        # any evdev key, or a combination like "KEY_LEFTMETA+
 dictate_mode = "hold"      # "hold" (push-to-talk) or "toggle"
 recall = ""                # re-insert the last dictation
 cancel = "KEY_ESC"         # discard the current recording
+language_toggle = ""       # cycle through general.languages
 # Portal backend triggers (XDG shortcut syntax). Compositors reject bare
 # modifiers, so these need a combination. Empty = not bound.
 portal_dictate = "CTRL+space"
 portal_recall = ""
 portal_cancel = ""
+portal_language_toggle = ""
 
 [audio]
 device = ""                # PipeWire source node name; "" = default source
 max_seconds = 120
+
+[ui]
+overlay = true             # the recording pill: waveform, timer, language badge
+overlay_position = "bottom"  # "bottom" | "top"
 
 [stt]
 active = "local"           # name of a [stt.profiles.*] table

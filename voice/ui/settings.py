@@ -1,6 +1,9 @@
 """Settings dialog: edits config.toml through Config so comments survive."""
 from __future__ import annotations
 
+import logging
+import shutil
+import subprocess
 from typing import Callable
 
 from PySide6.QtCore import Qt, Signal
@@ -11,6 +14,9 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QFormLayout, QHBoxLayout, QLa
 from voice.audio.capture import Source
 from voice.config import INJECT_MODES, Config, is_language_code
 from voice.hotkey.keyspec import parse_keyspec
+from voice.hotkey.portal_listener import DIALOG_MESSAGE, NO_TRIGGER
+
+log = logging.getLogger(__name__)
 
 PROFILE_TEMPLATES: dict[str, dict] = {
     "openai": {"backend": "openai_compatible", "base_url": "https://api.openai.com/v1", "model": "gpt-transcribe", "api_key": "", "prompt": ""},
@@ -31,25 +37,85 @@ KEEP_CURRENT = "(keep current)"
 #: The portal shortcuts, in the order they are shown, with their labels.
 PORTAL_TRIGGERS = [("dictate", "Dictate"), ("recall", "Recall last"),
                    ("cancel", "Cancel recording"), ("language_toggle", "Switch language")]
+#: The desktop's own shortcut editor, tried in PATH order: GNOME has no portal
+#: reconfigure dialog, so its Keyboard panel is the next best thing.
+SHORTCUT_SETTINGS_COMMANDS = (("gnome-control-center", "keyboard"),
+                              ("systemsettings", "kcm_keys"))
+#: Where to click when neither is installed, and the button's own subject.
+SHORTCUT_SETTINGS_PATH = "Settings → Keyboard → Keyboard Shortcuts"
+#: How the effective trigger reads beside a field. An id the desktop never
+#: mentioned is one we never asked it to bind (an empty hotkeys.portal_* key).
+EFFECTIVE_PREFIX = "desktop: "
+NOT_REGISTERED = "not registered"
+UNKNOWN_TRIGGER = "waiting for the desktop"
+#: Above the trigger fields: what they are, and what they are not.
+PORTAL_FIRST_RUN_NOTE = (
+    "These are a first-run preference, not a setting. Once your desktop knows a shortcut the "
+    "key belongs to the desktop - it is shown beside each field - and editing here changes "
+    "nothing. On GNOME that is always so: its portal cannot tell us whether it has met a "
+    "shortcut before, so we never ask for a key at all. Set it with the button below.")
 HOTKEY_HINTS = {
     "evdev": "Combinations: type KEY_LEFTMETA+KEY_SPACE. Names are evdev key names.",
     "portal": ("This session binds its shortcuts through the desktop, so there is no key to "
-               "capture here - type the trigger instead, in your desktop's syntax: F14, "
-               "CTRL+space, CTRL+SHIFT+l. A bare modifier will not bind. Saving asks the "
-               "desktop to bind them again, which may show its permission dialog. Your "
-               "desktop's own shortcut settings still win over these. The evdev key fields "
-               "below apply again if you switch hotkeys.backend to evdev."),
+               "capture here - the fields above are the trigger we ask for the first time the "
+               "desktop meets each shortcut, in its own syntax: F14, CTRL+space, CTRL+SHIFT+l. "
+               "A bare modifier will not bind. Saving asks the desktop to bind them again, "
+               "which may show its permission dialog, and never moves a key it already holds. "
+               "The evdev key fields below apply again if you switch hotkeys.backend to evdev."),
 }
+
+
+def shortcut_settings_command(which: Callable[[str], str | None] | None = None) -> list[str] | None:
+    """The desktop's own shortcut editor, or None if neither is installed."""
+    look_up = which or shutil.which          # resolved per call, not at import
+    for command in SHORTCUT_SETTINGS_COMMANDS:
+        if look_up(command[0]):
+            return list(command)
+    return None
+
+
+def effective_trigger_text(triggers: dict[str, str] | None, name: str) -> str:
+    """What the desktop holds for `name`, in words.
+
+    An empty answer is "we have not been told yet", which is not the same as
+    "no key assigned" - the portal has not answered before the first bind.
+    """
+    if not triggers:
+        return UNKNOWN_TRIGGER
+    if name not in triggers:
+        return NOT_REGISTERED
+    return triggers[name] or NO_TRIGGER
+
+
+def _wrapped(text: str) -> QLabel:
+    """A label that wraps: these hold sentences, not words."""
+    label = QLabel(text)
+    label.setWordWrap(True)
+    return label
+
+
+def _spawn(command: list[str]) -> None:
+    """Start the desktop's settings app detached: it outlives this dialog."""
+    subprocess.Popen(command, start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 class SettingsDialog(QDialog):
     saved = Signal()
     _captured = Signal(str)
+    #: The portal answers capture_next from the listener thread; both of these
+    #: hop back onto the Qt thread before a widget is touched.
+    _desktop_answered = Signal(str)
 
     def __init__(self, config: Config, capture_key: Callable[[Callable[[str], None]], None],
-                 sources: Callable[[], list[Source]], parent=None, backend: str = "evdev"):
+                 sources: Callable[[], list[Source]], parent=None, backend: str = "evdev",
+                 triggers: Callable[[], dict[str, str]] | None = None):
         super().__init__(parent)
         self._backend = backend
+        #: Reads back what the desktop actually holds per shortcut id. The
+        #: portal_* fields can only ever ask for a trigger - on GNOME not even
+        #: that - so this is the only truthful thing the tab can show.
+        self._triggers = triggers
         self.setWindowTitle("voice settings")
         self.setMinimumWidth(560)
         # The dialog edits a private Config loaded from the same file: Close simply
@@ -62,6 +128,7 @@ class SettingsDialog(QDialog):
         self._language_changed = False     # True once the user picked a language here
         self._inject_mode_changed = False  # True once the user picked a text insertion mode here
         self._captured.connect(self._on_captured)
+        self._desktop_answered.connect(self._on_desktop_answered)
         tabs = QTabWidget()
         tabs.addTab(self._general_tab(), "General")
         tabs.addTab(self._hotkeys_tab(), "Hotkeys")
@@ -142,14 +209,32 @@ class SettingsDialog(QDialog):
         self.recall_edit = QLineEdit()
         self.cancel_edit = QLineEdit()
         self.portal_edits: dict[str, QLineEdit] = {}
+        #: The trigger the desktop holds, shown beside each field it belongs to.
+        self.portal_effective: dict[str, QLabel] = {}
+        self.portal_note: QLabel | None = None
+        self.shortcuts_button: QPushButton | None = None
+        self.shortcut_note: QLabel | None = None
         if self._backend == "portal":
             # The compositor consumes the chord before we see it, so there is
-            # nothing to capture: these are the triggers we ask it to bind.
+            # nothing to capture: these are the triggers we ask it to bind -
+            # once, and only where the desktop admits it has never seen them.
             self.capture_button.setVisible(False)
+            self.portal_note = _wrapped(PORTAL_FIRST_RUN_NOTE)
+            form.addRow(self.portal_note)
             for name, label in PORTAL_TRIGGERS:
                 edit = QLineEdit()
+                effective = QLabel()
                 self.portal_edits[name] = edit
-                form.addRow(f"{label} shortcut", edit)
+                self.portal_effective[name] = effective
+                pair = QHBoxLayout()          # never `row`: that one holds the dictate key
+                pair.addWidget(edit)
+                pair.addWidget(effective)
+                form.addRow(f"{label} (asked for once)", pair)
+            self.shortcuts_button = QPushButton("Open shortcut settings")
+            self.shortcuts_button.clicked.connect(self._open_shortcut_settings)
+            self.shortcut_note = _wrapped("")
+            form.addRow(self.shortcuts_button)
+            form.addRow(self.shortcut_note)
         self.hotkey_hint = QLabel(HOTKEY_HINTS.get(self._backend, HOTKEY_HINTS["evdev"]))
         self.hotkey_hint.setWordWrap(True)
         form.addRow(self.hotkey_hint)
@@ -229,6 +314,7 @@ class SettingsDialog(QDialog):
         self.cancel_edit.setText(c.get("hotkeys.cancel", ""))
         for name, edit in self.portal_edits.items():
             edit.setText(c.portal_trigger(name))
+        self.refresh_effective_triggers()
         self.device_combo.setCurrentIndex(max(0, self.device_combo.findData(c.get("audio.device", ""))))
         self.max_seconds.setValue(int(c.get("audio.max_seconds", 120)))
         self.profile_list.clear()
@@ -350,6 +436,59 @@ class SettingsDialog(QDialog):
             self._cfg.set("stt.active", self._current_profile)
             self._active_changed = True
             self.active_label.setText(f"Active profile: {self._current_profile}")
+
+    def refresh_effective_triggers(self) -> None:
+        """Show what the desktop holds right now, beside each trigger field.
+
+        Called on every load, so reopening the window (which re-reads the file,
+        and makes the daemon ask the portal again) also re-reads the keys - a
+        label captured when the daemon started is the same lie as a field that
+        cannot move one.
+        """
+        if not self.portal_effective:
+            return
+        triggers: dict[str, str] = {}
+        if self._triggers is not None:
+            try:
+                triggers = dict(self._triggers() or {})
+            except Exception:
+                triggers = {}          # never let a dead accessor block the window
+        for name, label in self.portal_effective.items():
+            label.setText(EFFECTIVE_PREFIX + effective_trigger_text(triggers, name))
+
+    def _open_shortcut_settings(self) -> None:
+        """Take the user to wherever this desktop really keeps the key.
+
+        Portal version 2 (KDE) has a reconfigure dialog and the listener opens
+        it; that is the same call as "Capture key", and it answers with a
+        sentence either way. Anything else - GNOME, an older portal, a bind that
+        never succeeded - falls through to the desktop's settings app.
+        """
+        try:
+            self._capture_key(self._desktop_answered.emit)
+        except Exception as exc:
+            log.debug("the portal could not open its shortcut dialog: %s", exc)
+            self._launch_shortcut_settings()
+
+    def _on_desktop_answered(self, message: str) -> None:
+        if message == DIALOG_MESSAGE:               # the desktop's own dialog is up
+            self.shortcut_note.setText(message)
+            return
+        self._launch_shortcut_settings()
+
+    def _launch_shortcut_settings(self) -> None:
+        command = shortcut_settings_command()
+        if command is None:
+            self.shortcut_note.setText(
+                f"No desktop settings app found here - open {SHORTCUT_SETTINGS_PATH} yourself.")
+            return
+        try:
+            _spawn(command)
+        except Exception as exc:
+            self.shortcut_note.setText(
+                f"Could not start {command[0]}: {exc}. Open {SHORTCUT_SETTINGS_PATH} yourself.")
+            return
+        self.shortcut_note.setText(f"Opened {command[0]}: {SHORTCUT_SETTINGS_PATH}.")
 
     def _start_capture(self) -> None:
         self.capture_button.setText("Press a key…")

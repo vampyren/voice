@@ -726,10 +726,14 @@ class Daemon:
             self.handle({"cmd": action})
 
     def open_settings(self) -> None:
+        # The window shows what the desktop currently holds beside the portal
+        # trigger fields, so it is worth one round trip before it appears.
+        self._refresh_shortcut_triggers()
         try:
             if self._settings is None:
                 self._settings = SettingsDialog(self.config, self.listener.capture_next, list_sources,
-                                                backend=self.hotkey_backend)
+                                                backend=self.hotkey_backend,
+                                                triggers=self.effective_triggers)
                 self._settings.saved.connect(self.apply_config)
             elif not self._settings.isVisible():
                 # The dialog holds its own Config; refresh it so a reopen shows what

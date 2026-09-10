@@ -414,6 +414,43 @@ def test_open_settings_refreshes_the_reused_dialog(isolated_xdg, qapp, monkeypat
     d.shutdown()
 
 
+def test_open_settings_shows_the_key_the_desktop_really_holds(isolated_xdg, qapp, monkeypatch):
+    """The Hotkeys tab's portal fields are a first-run preference that GNOME
+    never applies, so the window has to show the effective trigger beside them -
+    re-read as the window opens, not as the daemon started."""
+    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    held = {"dictate": ""}
+
+    class Refreshing(FakeListener):
+        def __init__(self, on_event, shortcuts, **kwargs):
+            super().__init__()
+
+        def shortcut_state(self):
+            return STATE_BOUND if all(held.values()) else STATE_UNASSIGNED
+
+        def effective_triggers(self):
+            return dict(held)
+
+        def refresh_triggers(self):
+            held.update({"dictate": "F13"})     # assigned since the daemon started
+            return dict(held)
+
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    monkeypatch.setattr("voice.daemon.PortalListener", Refreshing)
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", "portal")
+    cfg.save()
+    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    try:
+        d.open_settings()
+        assert "F13" in d._settings.portal_effective["dictate"].text()
+        d._settings.close()
+    finally:
+        d.shutdown()
+
+
 def test_open_settings_does_not_reset_a_visible_dialog(isolated_xdg, qapp, monkeypatch):
     """A second `voice settings` (or tray click) on an open dialog must raise the
     user's half-finished edits, not throw them away."""

@@ -1,6 +1,10 @@
+import pytest
+
 from voice.audio.capture import Source
 from voice.config import Config
-from voice.ui.settings import PROFILE_TEMPLATES, SettingsDialog
+from voice.hotkey.portal_listener import DIALOG_MESSAGE, NO_CAPTURE_MESSAGE, NO_TRIGGER
+from voice.ui.settings import (NOT_REGISTERED, PROFILE_TEMPLATES, SHORTCUT_SETTINGS_PATH,
+                               UNKNOWN_TRIGGER, SettingsDialog)
 
 
 def make(qapp):
@@ -231,11 +235,11 @@ def test_reload_from_disk_clears_the_language_flag(qapp):
 
 
 # -- the portal backend has no keys to capture ---------------------------------
-def portal_dialog(qapp):
+def portal_dialog(qapp, triggers=None, capture=lambda cb: None):
     cfg = Config.load()
-    dlg = SettingsDialog(cfg, capture_key=lambda cb: None,
+    dlg = SettingsDialog(cfg, capture_key=capture,
                          sources=lambda: [Source("alsa_input.obsbot", "OBSBOT Tiny 3", True)],
-                         backend="portal")
+                         backend="portal", triggers=triggers)
     return cfg, dlg
 
 
@@ -273,6 +277,124 @@ def test_an_empty_portal_dictate_trigger_is_refused(qapp):
     dlg.save_button.click()
     assert "portal_dictate" in dlg.error_label.text()
     assert Config.load().get("hotkeys.portal_dictate") == "CTRL+space"
+
+
+# -- the desktop's key, beside the field that can only ask for one -------------
+def test_the_portal_tab_shows_the_key_the_desktop_actually_holds(qapp):
+    """The fields are a first-run wish and on GNOME are never applied at all, so
+    a tab that shows only them is a tab that lies about what is bound."""
+    cfg, dlg = portal_dialog(qapp, triggers=lambda: {"dictate": "F13", "recall": ""})
+    assert set(dlg.portal_effective) == set(dlg.portal_edits)
+    assert "F13" in dlg.portal_effective["dictate"].text()
+    assert NO_TRIGGER in dlg.portal_effective["recall"].text()      # registered, no key
+    assert NOT_REGISTERED in dlg.portal_effective["cancel"].text()  # never bound at all
+
+
+def test_the_effective_trigger_is_unknown_before_the_desktop_answers(qapp):
+    cfg, dlg = portal_dialog(qapp, triggers=lambda: {})
+    assert UNKNOWN_TRIGGER in dlg.portal_effective["dictate"].text()
+    cfg, plain = portal_dialog(qapp)                                # no accessor at all
+    assert UNKNOWN_TRIGGER in plain.portal_effective["dictate"].text()
+
+
+def test_the_effective_triggers_are_re_read_when_the_window_is_reopened(qapp):
+    """The dialog is built once and reused, so a key assigned between two visits
+    must land on the second one."""
+    held = {"dictate": ""}
+    cfg, dlg = portal_dialog(qapp, triggers=lambda: dict(held))
+    assert NO_TRIGGER in dlg.portal_effective["dictate"].text()
+    held["dictate"] = "F13"
+    dlg.refresh_effective_triggers()
+    assert "F13" in dlg.portal_effective["dictate"].text()
+
+
+def test_the_portal_fields_say_they_are_only_a_first_run_preference(qapp):
+    cfg, dlg = portal_dialog(qapp, triggers=lambda: {"dictate": "F13"})
+    note = dlg.portal_note.text().lower()
+    assert "first-run preference" in note and "desktop" in note
+    assert "gnome" in note                            # where it is never applied at all
+
+
+def test_the_shortcut_settings_button_opens_the_desktops_own_dialog(qapp, monkeypatch):
+    """Portal version 2 (KDE) has a reconfigure dialog; the listener opens it and
+    answers with the sentence to show."""
+    spawned = []
+    monkeypatch.setattr("voice.ui.settings._spawn", spawned.append)
+    cfg, dlg = portal_dialog(qapp, triggers=lambda: {"dictate": "F13"},
+                             capture=lambda cb: cb(DIALOG_MESSAGE))
+    dlg.shortcuts_button.click()
+    qapp.processEvents()
+    assert DIALOG_MESSAGE in dlg.shortcut_note.text()
+    assert spawned == []                              # nothing else was needed
+
+
+def test_the_shortcut_settings_button_falls_back_to_the_desktops_settings_app(qapp, monkeypatch):
+    """GNOME has no reconfigure dialog, so the button opens the panel that does
+    hold the key instead of leaving the user with a sentence."""
+    spawned = []
+    monkeypatch.setattr("voice.ui.settings._spawn", spawned.append)
+    monkeypatch.setattr("voice.ui.settings.shutil.which",
+                        lambda name: "/usr/bin/" + name if name == "gnome-control-center" else None)
+    cfg, dlg = portal_dialog(qapp, triggers=lambda: {"dictate": ""},
+                             capture=lambda cb: cb(NO_CAPTURE_MESSAGE))
+    dlg.shortcuts_button.click()
+    qapp.processEvents()
+    assert spawned == [["gnome-control-center", "keyboard"]]
+    assert "gnome-control-center" in dlg.shortcut_note.text()
+
+
+def test_the_shortcut_settings_button_finds_the_kde_panel_too(qapp, monkeypatch):
+    spawned = []
+    monkeypatch.setattr("voice.ui.settings._spawn", spawned.append)
+    monkeypatch.setattr("voice.ui.settings.shutil.which",
+                        lambda name: "/usr/bin/" + name if name == "systemsettings" else None)
+    cfg, dlg = portal_dialog(qapp, capture=lambda cb: cb(NO_CAPTURE_MESSAGE))
+    dlg.shortcuts_button.click()
+    qapp.processEvents()
+    assert spawned == [["systemsettings", "kcm_keys"]]
+
+
+def test_with_no_settings_app_installed_the_button_says_where_to_click(qapp, monkeypatch):
+    monkeypatch.setattr("voice.ui.settings._spawn",
+                        lambda cmd: pytest.fail("nothing to start"))
+    monkeypatch.setattr("voice.ui.settings.shutil.which", lambda name: None)
+    cfg, dlg = portal_dialog(qapp, capture=lambda cb: cb(NO_CAPTURE_MESSAGE))
+    dlg.shortcuts_button.click()
+    qapp.processEvents()
+    assert SHORTCUT_SETTINGS_PATH in dlg.shortcut_note.text()
+
+
+def test_a_settings_app_that_will_not_start_says_so_instead_of_vanishing(qapp, monkeypatch):
+    def boom(command):
+        raise OSError("no such file")
+
+    monkeypatch.setattr("voice.ui.settings._spawn", boom)
+    monkeypatch.setattr("voice.ui.settings.shutil.which", lambda name: "/usr/bin/" + name)
+    cfg, dlg = portal_dialog(qapp, capture=lambda cb: cb(NO_CAPTURE_MESSAGE))
+    dlg.shortcuts_button.click()
+    qapp.processEvents()
+    assert "no such file" in dlg.shortcut_note.text()
+    assert SHORTCUT_SETTINGS_PATH in dlg.shortcut_note.text()
+
+
+def test_the_portal_tab_still_shows_the_evdev_key_fields(qapp):
+    """They are what applies if hotkeys.backend goes back to evdev, and the hint
+    says so - a screenshot of the tab is what caught them going missing."""
+    cfg, dlg = portal_dialog(qapp, triggers=lambda: {"dictate": "F13"})
+    assert dlg.hotkey_edit.parentWidget() is not None       # actually in the layout
+    assert dlg.hotkey_edit.text() == "KEY_F13"
+    assert dlg.capture_button.parentWidget() is not None
+    assert dlg.capture_button.isHidden() is True            # nothing to capture here
+
+
+def test_the_evdev_tab_keeps_its_capture_button_and_gains_nothing(qapp):
+    """The evdev rendering is untouched by all of this: it has a real key to
+    capture and no desktop holding anything."""
+    cfg, dlg, _ = make(qapp)
+    assert dlg.portal_effective == {}
+    assert dlg.shortcuts_button is None
+    assert dlg.portal_note is None
+    assert dlg.capture_button.isHidden() is False
 
 
 # -- a profile per language -----------------------------------------------------

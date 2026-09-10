@@ -318,12 +318,27 @@ def _error_well(ctx, model: OverlayModel, x: float, cy: float, s: float,
 
 
 def _elide(ctx, text: str, room: float, size: float) -> str:
+    """`text`, cut to fit `room` with an ellipsis - measured once, forwards.
+
+    One pass, stopping at the first character that overruns the well: advances
+    only ever add up, so nothing past that point can be part of the answer.
+    The cost follows the room (~22 characters at 11 px), not the message, which
+    matters because this runs on every frame of the 2 s error hold - cutting one
+    character at a time re-measured the whole prefix each round, ~20k glyph
+    measurements a frame for a 300-character `last_error`. Same output.
+    """
     text = text[:200]                       # no point measuring a runaway message
-    if text_width(ctx, text, size) <= room:
-        return text
-    while text and text_width(ctx, text + "…", size) > room:
-        text = text[:-1]
-    return text + "…"
+    _face(ctx, size)
+    ellipsis = ctx.text_extents("…").x_advance
+    width = 0.0
+    cut = 0                                 # the longest prefix that still fits
+    for i, ch in enumerate(text):
+        if width + ellipsis <= room:
+            cut = i
+        width += ctx.text_extents(ch).x_advance
+        if width > room:
+            return text[:cut] + "…"
+    return text                             # the whole message fits as it is
 
 
 def _counter(ctx, model: OverlayModel, right: float, cy: float, s: float) -> None:

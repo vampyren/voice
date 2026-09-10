@@ -417,3 +417,70 @@ def test_a_notice_without_an_arrow_still_rises_in(tmp_path):
 
     rising, settled = top_row(0.03), top_row(0.4)      # ~2.8 px below its home
     assert rising - settled >= 2, f"text sat at {rising} then {settled}: no rise"
+
+
+# -- eliding the error message (once per frame, at 30 fps) ----------------
+
+def _elide_one_char_at_a_time(ctx, text, room, size):
+    """The original algorithm, kept here as the reference output to match."""
+    text = text[:200]
+    if od.text_width(ctx, text, size) <= room:
+        return text
+    while text and od.text_width(ctx, text + "\u2026", size) > room:
+        text = text[:-1]
+    return text + "\u2026"
+
+
+class CountingContext:
+    """A real context that counts the glyph measurements made through it."""
+
+    def __init__(self, ctx):
+        self._ctx = ctx
+        self.extents = 0
+
+    def text_extents(self, text):
+        self.extents += 1
+        return self._ctx.text_extents(text)
+
+    def __getattr__(self, name):
+        return getattr(self._ctx, name)
+
+
+def _context():
+    return cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
+
+
+@pytest.mark.parametrize("text", [
+    "", "x", "ok", "microphone is busy", "x" * 22, "x" * 23, "x" * 300,
+    "\u00e5\u00e4\u00f6 mikrofonen \u00e4r upptagen just nu, f\u00f6rs\u00f6k igen",
+    "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", "iiiiiiiiiiiiiiiiiiiiiiiiiiiiii",
+])
+def test_elide_renders_exactly_what_the_original_algorithm_did(text):
+    """Faster, and pixel-for-pixel the same string - including the edges: no
+    room at all, room for the ellipsis alone, and room to spare."""
+    ctx = _context()
+    for size in (11.0, 22.0):
+        for room in (0.0, 1.0, 5.0, 40.0, 121.0, 160.0, 4000.0):
+            assert od._elide(ctx, text, room, size) == \
+                _elide_one_char_at_a_time(ctx, text, room, size), (text, room, size)
+
+
+def test_eliding_a_long_message_measures_a_bounded_number_of_glyphs():
+    """The error well holds ~22 characters at 11 px, and `last_error` can be
+    hundreds; truncating one character at a time re-measured the whole prefix
+    each round - ~20k text_extents calls, every frame, 30 times a second for
+    the whole 2 s hold. The cost must follow the room, not the message."""
+    ctx = CountingContext(_context())
+    text = "x" * 300
+    assert od._elide(ctx, text, 150.0, od.ERROR_SIZE).endswith("\u2026")
+    assert ctx.extents < 60, f"{ctx.extents} glyph measurements for a 300-char error"
+
+
+def test_eliding_costs_the_same_whether_the_message_is_long_or_very_long():
+    """No dependence on the part of the message that cannot be shown."""
+    def measured(n):
+        ctx = CountingContext(_context())
+        od._elide(ctx, "x" * n, 150.0, od.ERROR_SIZE)
+        return ctx.extents
+
+    assert measured(300) == measured(60) > 0

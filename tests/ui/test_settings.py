@@ -497,3 +497,65 @@ def test_a_hidden_mapping_whose_profile_is_gone_does_not_block_saving(qapp):
     assert again.get("audio.max_seconds") == 99
     assert again.get("general.language_profiles") == {}    # the dangling entry is dropped
     assert again.errors() == []
+
+
+def test_the_general_tab_loads_the_text_insertion_mode(qapp):
+    cfg, dlg, _ = make(qapp)
+    assert dlg.inject_mode_combo.currentData() == "paste"
+    assert [dlg.inject_mode_combo.itemData(i) for i in range(dlg.inject_mode_combo.count())] \
+        == ["paste", "clipboard"]
+
+
+def test_saving_writes_the_text_insertion_mode(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.inject_mode_combo.setCurrentIndex(dlg.inject_mode_combo.findData("clipboard"))
+    dlg.save_button.click()
+    assert dlg.error_label.text() == ""
+    assert Config.load().get("inject.mode") == "clipboard"
+
+
+def test_save_does_not_revert_an_inject_mode_changed_elsewhere(qapp):
+    """Same snapshot problem as stt.active and general.language."""
+    cfg, dlg, _ = make(qapp)
+    external = Config.load()
+    external.set("inject.mode", "clipboard")
+    external.save()
+
+    dlg.hotkey_edit.setText("KEY_RIGHTCTRL")
+    dlg.save_button.click()
+
+    again = Config.load()
+    assert again.get("inject.mode") == "clipboard"           # not reverted to "paste"
+    assert again.get("hotkeys.dictate") == "KEY_RIGHTCTRL"   # the dialog's own edit landed
+    assert dlg.inject_mode_combo.currentData() == "clipboard"  # and it shows what was saved
+
+
+def test_the_inject_mode_combo_wins_over_the_on_disk_value(qapp):
+    # Picking here has to beat a value written elsewhere afterwards, exactly as
+    # the language combo does. Qt emits nothing when the shown value is picked
+    # again, so the pick has to be a real change - as it is for a user who came
+    # to this dialog to change the mode.
+    cfg, dlg, _ = make(qapp)
+    dlg.inject_mode_combo.setCurrentIndex(dlg.inject_mode_combo.findData("clipboard"))
+
+    external = Config.load()
+    external.set("inject.mode", "paste")
+    external.save()
+
+    dlg.save_button.click()
+    assert Config.load().get("inject.mode") == "clipboard"
+
+
+def test_reload_from_disk_clears_the_inject_mode_flag(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.inject_mode_combo.setCurrentIndex(dlg.inject_mode_combo.findData("clipboard"))
+    dlg.close()
+    dlg.reload_from_disk()
+
+    external = Config.load()
+    external.set("inject.mode", "clipboard")
+    external.save()
+    dlg.inject_mode_combo.setCurrentIndex(dlg.inject_mode_combo.findData("paste"))
+    dlg.reload_from_disk()
+    dlg.save_button.click()
+    assert Config.load().get("inject.mode") == "clipboard"   # the abandoned edit is gone

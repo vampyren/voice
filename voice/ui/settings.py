@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QFormLayout, QHBoxLayout, QLa
                                QTabWidget, QVBoxLayout, QWidget)
 
 from voice.audio.capture import Source
-from voice.config import Config, is_language_code
+from voice.config import INJECT_MODES, Config, is_language_code
 from voice.hotkey.keyspec import parse_keyspec
 
 PROFILE_TEMPLATES: dict[str, dict] = {
@@ -23,6 +23,9 @@ PROFILE_TEMPLATES: dict[str, dict] = {
 _LOCAL_FIELDS = ["model", "device", "compute_type", "beam_size", "prompt"]
 _CLOUD_FIELDS = ["base_url", "model", "api_key", "api_key_env", "prompt"]
 _LANGUAGES = [("English", "en"), ("Swedish", "sv"), ("Auto-detect", "auto")]
+#: inject.mode, in the order the combo shows it; the data is the config value.
+_INJECT_MODE_LABELS = {"paste": "Paste automatically",
+                       "clipboard": "Copy only (press Ctrl+V yourself)"}
 #: The "leave stt.active alone for this language" row of the profile table.
 KEEP_CURRENT = "(keep current)"
 #: The portal shortcuts, in the order they are shown, with their labels.
@@ -57,6 +60,7 @@ class SettingsDialog(QDialog):
         self._current_profile: str | None = None
         self._active_changed = False       # True once "Use this profile" was pressed
         self._language_changed = False     # True once the user picked a language here
+        self._inject_mode_changed = False  # True once the user picked a text insertion mode here
         self._captured.connect(self._on_captured)
         tabs = QTabWidget()
         tabs.addTab(self._general_tab(), "General")
@@ -87,6 +91,7 @@ class SettingsDialog(QDialog):
         self._current_profile = None       # so repopulating cannot commit stale form values
         self._active_changed = False
         self._language_changed = False
+        self._inject_mode_changed = False
         self.profile_form = {}
         self.error_label.setText("")
         self._load()
@@ -103,6 +108,12 @@ class SettingsDialog(QDialog):
         self.language_combo.currentIndexChanged.connect(self._on_language_picked)
         self.notifications_combo = QComboBox()
         self.notifications_combo.addItems(["on", "off"])
+        self.inject_mode_combo = QComboBox()
+        for code in INJECT_MODES:
+            self.inject_mode_combo.addItem(_INJECT_MODE_LABELS[code], code)
+        # Connected after the items exist, and for the same reason as the language
+        # combo: only a change made *here* may overwrite what the file says.
+        self.inject_mode_combo.currentIndexChanged.connect(self._on_inject_mode_picked)
         self.language_profile_table = QTableWidget(0, 2)
         self.language_profile_table.setHorizontalHeaderLabels(["Language", "Profile"])
         self.language_profile_table.horizontalHeader().setStretchLastSection(True)
@@ -112,6 +123,7 @@ class SettingsDialog(QDialog):
         hint.setWordWrap(True)
         form.addRow("Language", self.language_combo)
         form.addRow("Notifications", self.notifications_combo)
+        form.addRow("Text insertion", self.inject_mode_combo)
         form.addRow("Profile per language", self.language_profile_table)
         form.addRow(hint)
         return w
@@ -210,6 +222,7 @@ class SettingsDialog(QDialog):
         c = self._cfg
         self.language_combo.setCurrentIndex(max(0, self.language_combo.findData(c.get("general.language", "en"))))
         self.notifications_combo.setCurrentText("on" if c.get("general.notifications", True) else "off")
+        self.inject_mode_combo.setCurrentIndex(max(0, self.inject_mode_combo.findData(c.get("inject.mode", "paste"))))
         self.hotkey_edit.setText(c.get("hotkeys.dictate", ""))
         self.mode_combo.setCurrentText(c.get("hotkeys.dictate_mode", "hold"))
         self.recall_edit.setText(c.get("hotkeys.recall", ""))
@@ -228,7 +241,8 @@ class SettingsDialog(QDialog):
         for i, rule in enumerate(rules):
             self.set_replacement_row(i, *(list(rule) + ["", "", ""])[:3])
         self._load_language_profiles()
-        self._language_changed = False     # populating the combo is not a user edit
+        self._language_changed = False     # populating the combos is not a user edit
+        self._inject_mode_changed = False
 
     def _load_language_profiles(self, mapping: dict[str, str] | None = None) -> None:
         """One row per general.languages entry, each with the profiles that exist.
@@ -272,6 +286,9 @@ class SettingsDialog(QDialog):
 
     def _on_language_picked(self, index: int) -> None:
         self._language_changed = True
+
+    def _on_inject_mode_picked(self, index: int) -> None:
+        self._inject_mode_changed = True
 
     def set_replacement_row(self, row: int, src: str, dst: str, flags: str = "") -> None:
         for col, val in enumerate((src, dst, flags)):
@@ -364,6 +381,8 @@ class SettingsDialog(QDialog):
             self._carry_over_active_profile(on_disk)
         if not self._language_changed:
             self._carry_over_language(on_disk)
+        if not self._inject_mode_changed:
+            self._carry_over_inject_mode(on_disk)
         return True
 
     def _carry_over_active_profile(self, on_disk: Config) -> None:
@@ -403,6 +422,20 @@ class SettingsDialog(QDialog):
         if index >= 0:
             self.language_combo.setCurrentIndex(index)   # show what was really saved
         self._language_changed = False         # that was us, not the user
+
+    def _carry_over_inject_mode(self, on_disk: Config) -> None:
+        """Same as the language above: inject.mode can be changed from the CLI
+        while this dialog holds its snapshot."""
+        mode = on_disk.get("inject.mode")
+        if not mode or mode == self._cfg.get("inject.mode"):
+            return
+        if mode not in INJECT_MODES:           # never write a value errors() rejects
+            return
+        self._cfg.set("inject.mode", mode)
+        index = self.inject_mode_combo.findData(mode)
+        if index >= 0:
+            self.inject_mode_combo.setCurrentIndex(index)   # show what was really saved
+        self._inject_mode_changed = False      # that was us, not the user
 
     def _chosen_language_profiles(self) -> dict[str, str]:
         """The map as this dialog would save it: what the file says, with the rows
@@ -463,6 +496,7 @@ class SettingsDialog(QDialog):
             c.set(f"hotkeys.portal_{name}", edit.text().strip())
         c.set("general.language", self.language_combo.currentData())
         c.set("general.notifications", self.notifications_combo.currentText() == "on")
+        c.set("inject.mode", self.inject_mode_combo.currentData())
         c.set("hotkeys.dictate_mode", self.mode_combo.currentText())
         c.set("audio.device", self.device_combo.currentData() or "")
         c.set("audio.max_seconds", self.max_seconds.value())
@@ -490,4 +524,5 @@ class SettingsDialog(QDialog):
         # still has to be carried over by the next one.
         self._active_changed = False
         self._language_changed = False
+        self._inject_mode_changed = False
         self.saved.emit()

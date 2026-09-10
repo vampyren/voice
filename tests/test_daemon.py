@@ -694,7 +694,8 @@ def test_language_next_wraps_around_the_configured_cycle(isolated_xdg, qapp, mon
     cfg.set("general.languages", ["en", "sv", "auto"])
     d = _overlay_daemon(cfg, monkeypatch, helper_processes)
     for expected in ("sv", "auto", "en", "sv"):
-        assert d.handle({"cmd": "language", "code": "next"}) == {"ok": True, "language": expected}
+        # "next" is resolved on the Qt thread, so the reply cannot name it yet.
+        assert d.handle({"cmd": "language", "code": "next"}) == {"ok": True, "language": "pending"}
         qapp.processEvents()
         assert d.config.get("general.language") == expected
     d.shutdown()
@@ -764,4 +765,62 @@ def test_the_fallback_window_flag_reaches_the_launcher(isolated_xdg, qapp, monke
     d.build()
     d.overlay.start()
     assert seen == [{"position": "top", "lang": "sv", "verbose": False, "allow_fallback": True}]
+    d.shutdown()
+
+
+def test_switching_to_the_language_already_in_force_does_nothing(isolated_xdg, qapp, monkeypatch,
+                                                                helper_processes):
+    """No save, no reload, and above all no "EN → EN" flashing on the pill."""
+    cfg = Config.load()
+    d = _overlay_daemon(cfg, monkeypatch, helper_processes)
+    saved = []
+    monkeypatch.setattr(cfg, "save", lambda: saved.append(1))
+    applied = len(d.tray.languages)
+
+    assert d.handle({"cmd": "language", "code": "en"}) == {"ok": True, "language": "en"}
+    qapp.processEvents()
+    assert saved == []
+    assert len(d.tray.languages) == applied           # apply_config never ran
+    assert _overlay_lines(d, helper_processes) == []  # no badge, no notice
+    assert d.config.get("general.language") == "en"
+    d.shutdown()
+
+
+def test_a_cycle_of_one_language_makes_the_toggle_a_no_op(isolated_xdg, qapp, monkeypatch,
+                                                          helper_processes):
+    cfg = Config.load()
+    cfg.set("general.languages", ["en"])
+    d = _overlay_daemon(cfg, monkeypatch, helper_processes)
+    assert d._next_language() is None                 # nowhere to go
+
+    d._on_hotkey("language_toggle", "press")
+    qapp.processEvents()
+    assert d.config.get("general.language") == "en"
+    assert _overlay_lines(d, helper_processes) == []
+    d.shutdown()
+
+
+def test_two_toggles_before_the_qt_thread_drains_are_two_steps(isolated_xdg, qapp, monkeypatch,
+                                                               helper_processes):
+    """`next` used to be resolved on the caller's thread, so a double tap
+    resolved twice from the same current language and lost a step."""
+    cfg = Config.load()
+    cfg.set("general.languages", ["en", "sv", "auto"])
+    d = _overlay_daemon(cfg, monkeypatch, helper_processes)
+
+    replies = []
+
+    def worker():
+        replies.append(d.handle({"cmd": "language", "code": "next"}))
+        replies.append(d.handle({"cmd": "language", "code": "next"}))
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join(timeout=2)
+    assert replies == [{"ok": True, "language": "pending"}] * 2
+    assert d.config.get("general.language") == "en"    # nothing applied yet
+
+    qapp.processEvents()
+    assert d.config.get("general.language") == "auto"  # two presses, two steps
+    assert Config.load().get("general.language") == "auto"
     d.shutdown()

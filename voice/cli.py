@@ -6,7 +6,7 @@ import logging
 import sys
 
 from voice import APP_NAME, __version__
-from voice.ipc import IPCError, is_running, send
+from voice.ipc import PENDING_LANGUAGE, IPCError, is_running, send
 
 SIMPLE = ["start", "stop", "toggle", "cancel", "recall", "retry", "status", "settings", "quit", "reload"]
 
@@ -74,8 +74,25 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "status":
         _print_status(reply)
     elif args.cmd == "language":
-        print(f"language: {reply.get('language')}")
+        print(f"language: {_language_after(reply)}")
     return 0
+
+
+def _language_after(reply: dict) -> str:
+    """What the daemon actually switched to.
+
+    `next` is resolved on the daemon's Qt thread - two toggles in a row must be
+    two steps - so its reply names no language and one `status` reads back the
+    result instead.
+    """
+    language = reply.get("language")
+    if language != PENDING_LANGUAGE:
+        return str(language)
+    try:
+        return str(send({"cmd": "status"}).get("language"))
+    except IPCError as exc:
+        # The switch itself already happened; only the read-back failed.
+        return f"switched (could not read it back: {exc})"
 
 
 if __name__ == "__main__":

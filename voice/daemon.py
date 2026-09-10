@@ -21,7 +21,8 @@ from voice.hotkey.portal_listener import PortalListener
 from voice.inject.clipboard import Clipboard
 from voice.inject.fallback import make_key_sender
 from voice.inject.injector import Injector, run_window_command
-from voice.ipc import IPCError, Server, is_running, send
+from voice.ipc import (NEXT_LANGUAGE, PENDING_LANGUAGE, IPCError, Server, is_running,
+                       send)
 from voice.pipeline import Dictation, Services, State
 from voice.stt import make_transcriber
 from voice.stt.base import TranscriptionError
@@ -37,6 +38,8 @@ HOTKEY_BACKENDS = ("evdev", "portal")
 #: Every hotkey the daemon binds, in both listeners. `language_toggle` is
 #: handled here rather than in the pipeline: it changes settings, not state.
 HOTKEY_NAMES = ("dictate", "recall", "cancel", "language_toggle")
+
+
 SEAT_TIMEOUT_S = 2
 
 
@@ -410,8 +413,19 @@ class Daemon:
         self.apply_config()
 
     def _set_language(self, code: str) -> None:
-        """Qt thread: persist the language switch, apply it, then show it."""
+        """Qt thread: persist the language switch, apply it, then show it.
+
+        `code` may be the literal "next": the cycle is resolved *here*, on the
+        thread that owns the config, so two toggles queued before this drains
+        are two steps rather than the same one twice.
+        """
         previous = str(self.config.get("general.language", "en") or "en")
+        code = self._next_language() if code == NEXT_LANGUAGE else code
+        if not code or code == previous:
+            # Nowhere to go (a cycle with one entry, or the language asked for
+            # is already in force). Saving and flashing "EN → EN" is worse than
+            # doing nothing at all.
+            return
         try:
             self.config.set("general.language", code)
             self.config.save()
@@ -426,13 +440,19 @@ class Daemon:
                                "text": f"{previous.upper()} \u2192 {code.upper()}"})
 
     def _next_language(self) -> str | None:
+        """The next language in the cycle, or None when there is nowhere to go.
+
+        A language outside the cycle enters it at the first entry; a cycle that
+        would step onto the language already in force (it has a single entry)
+        is not a cycle, and the toggle does nothing.
+        """
         cycle = self.config.languages()
         if not cycle:
             return None
         current = str(self.config.get("general.language", "en") or "en")
-        if current not in cycle:
-            return cycle[0]
-        return cycle[(cycle.index(current) + 1) % len(cycle)]
+        target = (cycle[0] if current not in cycle
+                  else cycle[(cycle.index(current) + 1) % len(cycle)])
+        return None if target == current else target
 
     # -- events ---------------------------------------------------------------
     def _on_hotkey(self, name: str, kind: str) -> None:
@@ -505,13 +525,17 @@ class Daemon:
             return {"ok": True, "profile": name}
         if cmd == "language":
             code = str(request.get("code", "")).strip().lower()
-            target = self._next_language() if code == "next" else code
-            if not is_language_code(target):
+            if code == NEXT_LANGUAGE:
+                # Deliberately not resolved here: see _set_language. The caller
+                # is told so and reads the result back with `status`.
+                self._bridge.set_language.emit(NEXT_LANGUAGE)
+                return {"ok": True, "language": PENDING_LANGUAGE}
+            if not is_language_code(code):
                 return {"ok": False, "error": f"unknown language {code!r}"}
             # Validated here, written and applied on the Qt thread: same rule as
             # `profile`, because both touch the config file.
-            self._bridge.set_language.emit(target)
-            return {"ok": True, "language": target}
+            self._bridge.set_language.emit(code)
+            return {"ok": True, "language": code}
         if cmd == "reload":
             self._bridge.apply_config.emit()
             return {"ok": True}

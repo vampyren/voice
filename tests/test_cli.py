@@ -122,3 +122,36 @@ def test_status_prints_what_the_overlay_is_doing(isolated_xdg, capsys):
         assert "overlay:  disabled: no layer-shell" in capsys.readouterr().out
     finally:
         srv.stop()
+
+
+def test_a_pending_next_is_read_back_with_one_status_call(isolated_xdg, capsys):
+    """`next` is resolved on the daemon's Qt thread, so its reply cannot name
+    the language; the CLI asks what it landed on rather than printing a token."""
+    seen = []
+
+    def handler(req):
+        seen.append(req["cmd"])
+        if req["cmd"] == "status":
+            return {"ok": True, "language": "auto"}
+        return {"ok": True, "language": "pending"}
+
+    srv = ipc.Server(handler)
+    srv.start()
+    try:
+        assert main(["language", "next"]) == 0
+    finally:
+        srv.stop()
+    assert seen == ["language", "status"]              # exactly one extra round trip
+    assert capsys.readouterr().out.splitlines() == ["language: auto"]
+
+
+def test_a_named_language_needs_no_second_round_trip(isolated_xdg, capsys):
+    seen = []
+    srv = ipc.Server(lambda r: seen.append(r["cmd"]) or {"ok": True, "language": "sv"})
+    srv.start()
+    try:
+        assert main(["language", "sv"]) == 0
+    finally:
+        srv.stop()
+    assert seen == ["language"]
+    assert capsys.readouterr().out.splitlines() == ["language: sv"]

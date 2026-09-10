@@ -21,6 +21,13 @@ CLIENT_READ_TIMEOUT_S = 5.0
 # How long the "is a daemon listening?" probe waits for connect() to complete.
 CONNECT_PROBE_TIMEOUT_S = 1.0
 
+#: `language next` asks for the cycle's next entry. What that is depends on the
+#: language in force when the daemon *applies* it, on its Qt thread, so the
+#: reply carries this instead of a code and the caller reads the result back
+#: with `status`. Lives here because both sides of the socket need the word.
+NEXT_LANGUAGE = "next"
+PENDING_LANGUAGE = "pending"
+
 
 class IPCError(RuntimeError):
     pass

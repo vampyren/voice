@@ -40,14 +40,16 @@ class Clipboard:
 
     def set_text(self, text: str) -> None:
         try:
+            # wl-copy forks a background process that keeps serving the selection and holds
+            # stdout/stderr open; capturing them would block until the clipboard is replaced.
             cp = self._run(["wl-copy", "--type", "text/plain;charset=utf-8"], input=text, text=True,
-                           capture_output=True, timeout=TIMEOUT)
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=TIMEOUT)
         except FileNotFoundError as exc:
             raise ClipboardError("wl-copy not found; install wl-clipboard") from exc
         except subprocess.SubprocessError as exc:
             raise ClipboardError(f"wl-copy failed: {exc}") from exc
         if cp.returncode != 0:
-            raise ClipboardError(f"wl-copy exited {cp.returncode}: {cp.stderr}")
+            raise ClipboardError(f"wl-copy exited {cp.returncode}")
 
     def restore(self, snap: Snapshot) -> bool:
         if snap.text is None:

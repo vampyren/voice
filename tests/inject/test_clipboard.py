@@ -9,9 +9,11 @@ class Runner:
     def __init__(self, responses):
         self.responses = responses      # {argv_prefix: (rc, stdout)}
         self.calls = []
+        self.kwargs = []
 
     def __call__(self, argv, **kw):
         self.calls.append((argv, kw.get("input")))
+        self.kwargs.append(kw)
         for prefix, (rc, out) in self.responses.items():
             if tuple(argv[:len(prefix)]) == prefix:
                 return subprocess.CompletedProcess(argv, rc, stdout=out, stderr="")
@@ -30,12 +32,16 @@ def test_snapshot_is_none_for_image_or_empty():
     assert Clipboard(run=r2).snapshot() == Snapshot(None)
 
 
-def test_set_text_pipes_to_wl_copy():
+def test_set_text_pipes_to_wl_copy_without_capturing_its_output():
+    """wl-copy forks a background server that keeps stdout/stderr open; capturing them hangs."""
     r = Runner({("wl-copy",): (0, "")})
     Clipboard(run=r).set_text("hej å ä ö")
     argv, stdin = r.calls[-1]
     assert argv[0] == "wl-copy" and "--type" in argv
     assert stdin == "hej å ä ö"
+    kw = r.kwargs[-1]
+    assert not kw.get("capture_output")
+    assert kw.get("stdout") is subprocess.DEVNULL and kw.get("stderr") is subprocess.DEVNULL
 
 
 def test_set_text_raises_when_wl_copy_missing():

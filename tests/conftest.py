@@ -23,6 +23,26 @@ def isolated_xdg(tmp_path, monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def no_desktop_notifications(monkeypatch):
+    """Nothing in the suite may pop a real notification on the owner's desktop.
+
+    A Daemon built without an injected notifier used to reach notify-send for
+    real. Every such construction is a test bug, and this says so rather than
+    letting it out of the process.
+    """
+    import subprocess
+
+    real_popen = subprocess.Popen
+
+    def guard(argv, *args, **kwargs):
+        if argv and str(argv[0]) == "notify-send":
+            raise AssertionError(f"a test tried to notify the real desktop: {list(argv)}")
+        return real_popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr("voice.ui.notify.subprocess.Popen", guard)
+
+
+@pytest.fixture(autouse=True)
 def fresh_overlay_probe():
     """The helper probe is answered once per process; tests stub the interpreters."""
     from voice.ui.overlay_client import reset_probe_cache

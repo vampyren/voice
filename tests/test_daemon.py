@@ -31,6 +31,24 @@ class FailingStopListener(FakeListener):
         raise RuntimeError("evdev stop boom")
 
 
+class QuietNotifier:
+    """Records notifications instead of spawning notify-send.
+
+    Every Daemon in this file gets one: the real Notifier reaches the owner's
+    actual desktop, and a suite that pops notifications is a suite nobody can
+    run while working.
+    """
+
+    def __init__(self):
+        self.sent: list[tuple[str, str, str]] = []
+
+    def notify(self, title, body, urgency="normal"):
+        self.sent.append((title, body, urgency))
+
+    def set_enabled(self, enabled):
+        pass
+
+
 class FakeSender:
     name = "fake"
     def send_chord(self, codes): pass
@@ -77,7 +95,7 @@ def test_handle_commands_and_profile_switch(isolated_xdg, qapp, monkeypatch):
         "name": profile["backend"], "describe": lambda self: f"fake {profile['model']}",
         "warmup": lambda self: None, "transcribe": lambda self, *a: None})())
     cfg = Config.load()
-    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender())
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), notifier=QuietNotifier())
     d.build()
     assert d.handle({"cmd": "ping"}) == {"ok": True}
     st = d.handle({"cmd": "status"})
@@ -95,7 +113,7 @@ def test_apply_config_rebinds_hotkeys(isolated_xdg, qapp, monkeypatch):
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
         "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
     cfg = Config.load()
-    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender())
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), notifier=QuietNotifier())
     d.build()
     cfg.set("hotkeys.dictate", "KEY_F20")
     cfg.save()
@@ -111,7 +129,7 @@ def test_profile_command_applies_config_only_on_qt_thread(isolated_xdg, qapp, mo
         "name": p["backend"], "describe": lambda self: p.get("model", ""), "warmup": lambda self: None})())
     cfg = Config.load()
     tray = FakeTray()
-    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=tray)
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=tray, notifier=QuietNotifier())
     d.build()
     tray.calls.clear()
     result = {}
@@ -155,7 +173,7 @@ def test_warmup_only_announces_idle_when_dictation_is_idle(isolated_xdg, qapp, m
         "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
     cfg = Config.load()
     tray = FakeTray()
-    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=tray)
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=tray, notifier=QuietNotifier())
     d.build()
     emitted = []
     d.tray.state_changed.connect(lambda s, det: emitted.append((s, det)))
@@ -174,7 +192,7 @@ def test_shutdown_cancels_recording_and_survives_listener_errors(isolated_xdg, q
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
         "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
     cfg = Config.load()
-    d = Daemon(cfg, listener=FailingStopListener(), sender=FakeSender())
+    d = Daemon(cfg, listener=FailingStopListener(), sender=FakeSender(), notifier=QuietNotifier())
     d.build()
     cancelled = []
     d.dictation.cancel = lambda: cancelled.append(True)
@@ -194,7 +212,7 @@ def test_apply_config_rebuilds_transcriber_only_when_profile_changes(isolated_xd
 
     monkeypatch.setattr("voice.daemon.make_transcriber", fake_make_transcriber)
     cfg = Config.load()
-    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender())
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), notifier=QuietNotifier())
     d.build()
     assert len(calls) == 1
 
@@ -215,7 +233,7 @@ def test_run_is_noop_when_already_running(isolated_xdg, qapp, monkeypatch):
     sent = []
     monkeypatch.setattr("voice.daemon.send", lambda req: sent.append(req) or {"ok": True})
     cfg = Config.load()
-    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender())
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), notifier=QuietNotifier())
 
     def fail_build():
         raise AssertionError("build() must not run when a daemon is already running")
@@ -243,7 +261,7 @@ def test_run_hands_over_when_the_socket_is_taken_after_the_initial_check(isolate
     sent = []
     monkeypatch.setattr("voice.daemon.send", lambda req: sent.append(req) or {"ok": True})
     listener = FakeListener()
-    d = Daemon(Config.load(), listener=listener, sender=FakeSender(), tray=FakeTray())
+    d = Daemon(Config.load(), listener=listener, sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
     try:
         assert d.run() == 0
         assert sent and sent[-1]["cmd"] == "settings"
@@ -351,7 +369,7 @@ def test_warmup_does_not_occupy_the_dictation_worker(isolated_xdg, qapp, monkeyp
             return InjectResult("fake", "ctrl+v", True)
 
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: SlowTranscriber())
-    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
     d.build()
     injector = RecordingInjector()
     d.dictation.set_injector(injector)
@@ -375,7 +393,7 @@ def test_open_settings_refreshes_the_reused_dialog(isolated_xdg, qapp, monkeypat
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
         "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
     monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
-    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
     d.build()
 
     d.open_settings()
@@ -397,7 +415,7 @@ def test_open_settings_does_not_reset_a_visible_dialog(isolated_xdg, qapp, monke
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
         "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
     monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
-    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
     d.build()
 
     d.open_settings()
@@ -488,7 +506,7 @@ def test_build_wires_the_portal_listener_and_reports_it_in_status(isolated_xdg, 
     cfg = Config.load()
     cfg.set("hotkeys.backend", "portal")
     cfg.set("hotkeys.portal_recall", "CTRL+ALT+r")
-    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray())
+    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
     d.build()
     assert isinstance(d.listener, FakePortalListener)
     assert made["shortcuts"] == {"dictate": "CTRL+space", "recall": "CTRL+ALT+r"}
@@ -506,7 +524,7 @@ def test_build_uses_the_evdev_listener_when_configured(isolated_xdg, qapp, monke
     monkeypatch.setattr("voice.daemon.PortalListener", lambda *a, **k: pytest.fail("must not be built"))
     cfg = Config.load()
     cfg.set("hotkeys.backend", "evdev")
-    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray())
+    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
     d.build()
     assert d.handle({"cmd": "status"})["hotkey_backend"] == "evdev"
     d.shutdown()
@@ -557,7 +575,9 @@ def _overlay_daemon(cfg, monkeypatch, helper_processes, **kwargs):
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
         "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
     monkeypatch.setattr("voice.daemon.default_launcher", lambda **kw: helper_processes())
-    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), **kwargs)
+    kwargs.setdefault("notifier", QuietNotifier())      # never the real notify-send
+    fakes = dict(listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), **kwargs)
+    d = Daemon(cfg, notifier=fakes.pop("notifier"), **fakes)
     d.build()
     d.overlay.start()
     return d
@@ -762,7 +782,7 @@ def test_the_fallback_window_flag_reaches_the_launcher(isolated_xdg, qapp, monke
     cfg.set("ui.overlay_allow_fallback", True)
     cfg.set("ui.overlay_position", "top")
     cfg.set("general.language", "sv")
-    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray())
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
     d.build()
     d.overlay.start()
     assert seen == [{"position": "top", "lang": "sv", "verbose": False, "allow_fallback": True}]
@@ -886,7 +906,7 @@ def test_reload_rebuilds_the_pill_only_when_the_ui_section_changed(
     monkeypatch.setattr("voice.daemon.default_launcher",
                         lambda **kw: seen.append(kw) or helper_processes())
     cfg = Config.load()
-    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray())
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
     d.build()
     d.overlay.start()
     first = d.overlay
@@ -939,7 +959,7 @@ def test_quit_returns_from_run_and_leaves_nothing_holding_the_process(
         "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
     monkeypatch.setattr("voice.daemon.default_launcher", lambda **kw: helper_processes())
     monkeypatch.setattr("voice.daemon.is_running", lambda: False)
-    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
 
     blocked, release = threading.Event(), threading.Event()
 
@@ -970,7 +990,7 @@ def test_a_profile_switch_keeps_edits_made_to_the_file_meanwhile(isolated_xdg, q
     everything - reverting a hand edit, or the settings dialog's own save."""
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
         "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
-    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
     d.build()
 
     external = Config.load()
@@ -1008,7 +1028,7 @@ def test_a_profile_that_vanished_from_the_file_is_not_written(isolated_xdg, qapp
     leave a config the daemon itself rejects."""
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
         "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
-    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
     d.build()
 
     from voice import paths
@@ -1043,7 +1063,7 @@ def _portal_daemon(monkeypatch):
     cfg = Config.load()
     cfg.set("hotkeys.backend", "portal")
     cfg.save()
-    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray())
+    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
     d.build()
     d.listener.start()                                  # what run() does
     return d

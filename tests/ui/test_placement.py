@@ -11,6 +11,8 @@ from voice.ui.placement import (
     anchors,
     clamp_margin,
     normalise_position,
+    pill_origin,
+    placement_at,
     placement_note,
 )
 
@@ -95,3 +97,75 @@ def test_a_placement_that_was_asked_for_is_named_when_it_cannot_be_applied(posit
     assert note is not None
     assert position in note and "ui.overlay_position" in note
     assert f"{mx}" in note and f"{my}" in note
+
+
+# -- the geometry the settings preview drags the pill around in -----------
+
+SCREEN = (1920, 1080)
+PILL = (280, 44)
+
+
+@pytest.mark.parametrize("position,margin_x,margin_y,expected", [
+    ("top-left", 0, 0, (0, 0)),
+    ("top-center", 0, 48, (820, 48)),
+    ("top-right", 16, 16, (1624, 16)),
+    ("middle-left", 24, 0, (24, 518)),
+    ("middle-center", 0, 0, (820, 518)),
+    ("middle-right", 24, 0, (1616, 518)),
+    ("bottom-left", 0, 48, (0, 988)),
+    ("bottom-center", 0, 48, (820, 988)),
+    ("bottom-right", 12, 12, (1628, 1024)),
+])
+def test_a_placement_becomes_the_pills_top_left_corner(position, margin_x, margin_y, expected):
+    assert pill_origin(position, margin_x, margin_y, SCREEN, PILL) == expected
+
+
+def test_a_centred_half_ignores_its_margin_on_screen_too():
+    assert pill_origin("middle-center", 500, 500, SCREEN, PILL) == (820, 518)
+
+
+@pytest.mark.parametrize("point,expected", [
+    ((0, 0), ("top-left", 0, 0)),
+    ((1640, 0), ("top-right", 0, 0)),
+    ((0, 1036), ("bottom-left", 0, 0)),
+    ((1640, 1036), ("bottom-right", 0, 0)),
+    ((820, 518), ("middle-center", 0, 0)),
+    ((820, 988), ("bottom-center", 0, 48)),
+    ((60, 30), ("top-left", 60, 30)),
+    ((1600, 1000), ("bottom-right", 40, 36)),
+])
+def test_a_dropped_pill_becomes_the_anchor_it_is_nearest_and_the_gap_it_left(point, expected):
+    assert placement_at(*point, SCREEN, PILL) == expected
+
+
+@pytest.mark.parametrize("position,margin_x,margin_y", [
+    ("top-left", 60, 30), ("top-right", 12, 0), ("bottom-left", 0, 48),
+    ("bottom-right", 100, 100), ("top-center", 0, 90), ("middle-left", 70, 0),
+])
+def test_dropping_a_pill_where_a_placement_put_it_gives_that_placement_back(
+        position, margin_x, margin_y):
+    """The preview shows a placement and reads one back; the two must agree, or
+    opening the settings window and pressing Save would move the pill."""
+    origin = pill_origin(position, margin_x, margin_y, SCREEN, PILL)
+    assert placement_at(*origin, SCREEN, PILL) == (position, margin_x, margin_y)
+
+
+def test_a_drop_within_the_tolerance_snaps_to_the_anchor():
+    assert placement_at(9, 1030, SCREEN, PILL, snap=24) == ("bottom-left", 0, 0)
+    assert placement_at(812, 510, SCREEN, PILL, snap=24) == ("middle-center", 0, 0)
+
+
+def test_a_drop_outside_the_tolerance_keeps_the_gap_it_was_dropped_with():
+    assert placement_at(90, 900, SCREEN, PILL, snap=24) == ("bottom-left", 90, 136)
+
+
+def test_without_a_tolerance_nothing_is_snapped():
+    """Arrow-key nudges ask for no snapping: a nudge that snapped back would
+    look like a key that does nothing."""
+    assert placement_at(1, 1035, SCREEN, PILL, snap=0) == ("bottom-left", 1, 1)
+
+
+def test_a_pill_dropped_past_the_far_edge_is_still_a_sane_margin():
+    """Nothing in the settings window can drop it there, but a hand-edited
+    config can, and the arithmetic must not hand back a margin errors() rejects."""
+    assert placement_at(-500, 5000, SCREEN, PILL) == ("bottom-left", -500, -MARGIN_LIMIT)

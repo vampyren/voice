@@ -94,3 +94,47 @@ def placement_note(position: str, margin_x: int, margin_y: int) -> str | None:
             f"(margins {margin_x}/{margin_y}) - without gtk4-layer-shell it is an "
             "ordinary window and the compositor decides where it goes, so "
             "ui.overlay_position and ui.overlay_margin_x/y do nothing here")
+
+
+def pill_origin(position: str, margin_x: int, margin_y: int,
+                screen: tuple[int, int], size: tuple[int, int]) -> tuple[int, int]:
+    """The pill's top-left corner on a screen of `screen`, in screen pixels.
+
+    What a compositor honouring these anchors does, done here so the settings
+    window can show it - and so a placement read back out of the preview is the
+    one that was put in.
+    """
+    screen_w, screen_h = screen
+    width, height = size
+    edges = anchors(position, margin_x=margin_x, margin_y=margin_y)
+    y = edges["top"] if "top" in edges else (
+        screen_h - height - edges["bottom"] if "bottom" in edges else (screen_h - height) // 2)
+    x = edges["left"] if "left" in edges else (
+        screen_w - width - edges["right"] if "right" in edges else (screen_w - width) // 2)
+    return x, y
+
+
+def placement_at(x: int, y: int, screen: tuple[int, int], size: tuple[int, int],
+                 snap: int = 0) -> tuple[str, int, int]:
+    """The placement a pill dropped at `x, y` (its top-left) means.
+
+    Each axis takes the anchor it is nearest and the gap it was left with;
+    `snap` is how close - in screen pixels - counts as "on" an anchor, which is
+    what makes a drop near a corner produce that corner rather than a corner
+    plus a margin of four. A nudge asks for `snap=0`: a key that snapped its own
+    one-pixel step away would look like a key that does nothing.
+    """
+    vertical, margin_y = _half(y, screen[1], size[1], ("top", "middle", "bottom"), snap)
+    horizontal, margin_x = _half(x, screen[0], size[0], ("left", "center", "right"), snap)
+    return f"{vertical}-{horizontal}", margin_x, margin_y
+
+
+def _half(value: int, extent: int, size: int, names: tuple[str, str, str],
+          snap: int) -> tuple[str, int]:
+    """One axis of `placement_at`: which of the three halves, and what margin."""
+    near, centre_name, far = names
+    centre = (extent - size) // 2
+    if abs(value - centre) <= snap:
+        return centre_name, 0
+    name, margin = (near, value) if value <= centre else (far, extent - size - value)
+    return name, 0 if abs(margin) <= snap else clamp_margin(int(margin), 0)

@@ -385,3 +385,23 @@ def test_open_settings_refreshes_the_reused_dialog(isolated_xdg, qapp, monkeypat
     assert d.config.get("hotkeys.dictate") == "KEY_F13"
     dialog.close()
     d.shutdown()
+
+
+def test_open_settings_does_not_reset_a_visible_dialog(isolated_xdg, qapp, monkeypatch):
+    """A second `voice settings` (or tray click) on an open dialog must raise the
+    user's half-finished edits, not throw them away."""
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray())
+    d.build()
+
+    d.open_settings()
+    dialog = d._settings
+    assert dialog.isVisible()
+    dialog.hotkey_edit.setText("KEY_RIGHTCTRL")
+
+    d.open_settings()
+    assert dialog.hotkey_edit.text() == "KEY_RIGHTCTRL"
+    dialog.close()
+    d.shutdown()

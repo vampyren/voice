@@ -252,9 +252,11 @@ class Daemon:
             if self._settings is None:
                 self._settings = SettingsDialog(self.config, self.listener.capture_next, list_sources)
                 self._settings.saved.connect(self.apply_config)
-            else:
+            elif not self._settings.isVisible():
                 # The dialog holds its own Config; refresh it so a reopen shows what
-                # is actually in force rather than edits abandoned last time.
+                # is actually in force rather than edits abandoned last time. Only
+                # while it is off screen: a second `voice settings` or tray click on
+                # an open dialog must raise the user's edits, not discard them.
                 self._settings.reload_from_disk()
         except ValueError as exc:
             log.warning("cannot open settings: %s", exc)

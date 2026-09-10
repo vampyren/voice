@@ -425,3 +425,35 @@ def test_an_interrupted_state_resumes_with_the_time_it_had_left(model, clock):
     assert model.state == "done", "the hold resumed rather than restarting"
     model.tick(clock.advance(0.2))
     assert model.state == "hidden"
+
+
+# -- the same state twice -------------------------------------------------
+def test_repeating_a_state_does_not_restart_it(model, clock):
+    """The daemon can say the same thing twice (`done` on the injection and
+    again on the idle that follows). Restarting the hold each time would keep
+    the checkmark on screen indefinitely and replay its pop-in."""
+    model.set_state("done")
+    model.tick(clock.advance(DONE_HOLD * 0.9))
+    age = model.state_age
+    model.set_state("done", now=clock.t)
+    assert model.state_age == age                    # the hold kept running
+    model.tick(clock.advance(DONE_HOLD * 0.2))
+    assert model.state == "hidden"                   # and expired on time
+
+
+def test_repeating_recording_does_not_restart_the_counter(model, clock):
+    model.set_state("recording")
+    model.tick(clock.advance(5.0))
+    assert model.elapsed == pytest.approx(5.0)
+    model.set_state("recording", now=clock.t)
+    model.tick(clock.advance(1.0))
+    assert model.elapsed == pytest.approx(6.0)       # not back to 1.0
+
+
+def test_a_repeated_state_with_new_text_is_still_shown(model, clock):
+    """Same state, different message: the second error is news, not a repeat."""
+    model.set_state("error", text="pw-record died")
+    model.tick(clock.advance(1.0))
+    model.set_state("error", text="no microphone", now=clock.t)
+    assert model.text == "no microphone"
+    assert model.state_age == 0.0                    # its own two seconds

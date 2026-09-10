@@ -577,12 +577,24 @@ def test_a_successful_dictation_drives_the_pill_through_its_states(isolated_xdg,
     d = _overlay_daemon(cfg, monkeypatch, helper_processes)
     d.dictation.on_state(State.RECORDING, "")
     d.dictation.on_state(State.TRANSCRIBING, "")
-    d.dictation.on_state(State.INJECTING, "")
+    d.dictation.on_state(State.INJECTING, "")          # says nothing on its own
     d.dictation.on_state(State.IDLE, "11 chars via portal in 0.9s")
     assert _overlay_lines(d, helper_processes) == [
         {"language": "sv"}, {"state": "recording"}, {"state": "transcribing"},
-        {"state": "done"}, {"state": "done"}]
+        {"state": "done"}]                             # exactly one checkmark
     d.shutdown()
+
+
+def test_the_checkmark_is_sent_once_per_dictation(isolated_xdg, qapp, monkeypatch,
+                                                  helper_processes):
+    """INJECTING and the IDLE that follows it are one insertion, not two: a
+    second `done` used to restart the checkmark's hold every time."""
+    from voice.daemon import overlay_messages
+    from voice.pipeline import State
+
+    assert overlay_messages(State.INJECTING, "", "en") == []
+    assert overlay_messages(State.INJECTING, "recall", "en") == []
+    assert overlay_messages(State.IDLE, "7 chars via portal in 0.4s", "en") == [{"state": "done"}]
 
 
 def test_a_failed_dictation_shows_the_error_and_does_not_hide_it(isolated_xdg, qapp, monkeypatch,

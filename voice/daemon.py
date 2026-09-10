@@ -133,7 +133,9 @@ def overlay_messages(state: State, detail: str, language: str) -> list[dict]:
     if state is State.TRANSCRIBING:
         return [{"state": "transcribing"}]
     if state is State.INJECTING:
-        return [{"state": "done"}]
+        # Nothing: the checkmark belongs to the IDLE that follows a successful
+        # insertion. Saying `done` here too sent it twice per dictation.
+        return []
     if state is State.ERROR:
         return [{"state": "error", "text": detail or "dictation failed"}]
     if state is State.IDLE:

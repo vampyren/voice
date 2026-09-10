@@ -182,9 +182,15 @@ class OverlayModel:
         if state not in STATES:
             raise ValueError(f"unknown overlay state: {state!r}")
         now = self._clock() if now is None else now
-        if state == "notice" and self.state != "notice":
-            self._return = (self.state, self.text, self.state_age)
+        if state == "notice":
+            if self.state != "notice":
+                self._return = (self.state, self.text, self.state_age)
             text = text or f"{self.prev_lang.upper()} → {self.lang.upper()}"
+        if state == self.state and text == self.text:
+            # The same thing said twice is not a new event: re-entering would
+            # replay the pop-in and hand `done` a fresh 1.2 s hold every time.
+            # New text under the same state is news, and does re-enter.
+            return
         self._enter(state, text, now, reset_counter=True)
 
     def _enter(self, state: str, text: str | None, now: float,

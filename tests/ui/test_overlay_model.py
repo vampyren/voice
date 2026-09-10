@@ -457,3 +457,68 @@ def test_a_repeated_state_with_new_text_is_still_shown(model, clock):
     model.set_state("error", text="no microphone", now=clock.t)
     assert model.text == "no microphone"
     assert model.state_age == 0.0                    # its own two seconds
+
+
+# -- automatic gain: real speech is nowhere near full scale -------------------
+#: One second of speech-like broadband RMS from a desk microphone: syllables
+#: peaking around 0.2, gaps down at 0.05. Straight into the well this drew a
+#: wave a few pixels tall - the owner's "the wave is too thin".
+SPEECH = [0.06, 0.11, 0.19, 0.24, 0.21, 0.13, 0.07, 0.05, 0.12, 0.20, 0.25, 0.22]
+
+
+def test_speech_level_audio_fills_the_well(model):
+    for level in SPEECH:
+        model.push_level(level)
+    heights = model.bar_heights
+    centre = heights[model.bars // 2 - 2:model.bars // 2 + 3]
+    assert max(centre) >= 0.6, heights
+
+
+def test_silence_still_rests_at_the_floor(model):
+    """The gain must not turn a quiet room into a wave: only the loudest
+    recent sample defines full scale, and silence is still silence."""
+    model.set_state("recording")
+    for level in SPEECH:
+        model.push_level(level)
+    for _ in range(40):
+        model.push_level(0.0)
+    assert model.bar_heights == pytest.approx([a * BAR_FLOOR for a in AMP])
+
+
+def test_the_gain_reference_decays_so_a_quiet_talker_catches_up(model, clock):
+    """A shout sets the reference; two half-lives later a third of it is loud."""
+    from voice.ui.overlay_model import PEAK_FLOOR, PEAK_HALF_LIFE
+
+    model.set_state("recording")
+    model.push_level(1.0)
+    model.tick(clock.advance(2 * PEAK_HALF_LIFE))
+    reference = PEAK_FLOOR + (1.0 - PEAK_FLOOR) * 0.25
+    model.push_level(reference)
+    assert model.bar_heights[model.bars // 2] == pytest.approx(AMP[model.bars // 2], abs=0.02)
+
+
+def test_a_bar_never_collapses_to_a_hairline_while_recording(model):
+    from voice.ui.overlay_model import BAR_FLOOR as floor
+
+    assert floor >= 0.25
+    model.set_state("recording")
+    model.push_level(0.0)
+    assert min(model.bar_heights) >= min(AMP) * floor - 1e-9
+
+
+def test_room_noise_is_not_amplified_into_a_waveform(model):
+    """The gain must not draw a wave in an empty room: below the noise gate
+    there is nothing, however long the room has been quiet."""
+    model.set_state("recording")
+    for _ in range(40):
+        model.push_level(0.04)             # a quiet room, after rms_level's curve
+    assert model.bar_heights == pytest.approx([a * BAR_FLOOR for a in AMP])
+
+
+def test_a_close_microphone_is_not_clipped_flat(model):
+    """A loud, close mic (0.4-0.8) must still show a wave, not 21 full bars."""
+    for level in (0.42, 0.78, 0.55, 0.31, 0.64, 0.80, 0.38, 0.71):
+        model.push_level(level)
+    heights = model.bar_heights
+    assert max(heights) >= 0.8
+    assert min(heights[8:13]) < 0.75          # the quiet syllables still dip

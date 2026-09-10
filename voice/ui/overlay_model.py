@@ -56,8 +56,24 @@ AMP = (.18, .3, .45, .7, .5, .9, .6, .8, 1., .7, .85,
        .7, 1., .8, .6, .9, .5, .7, .45, .3, .18)
 
 #: A recording bar never sits fully flat: the design animates each bar between
-#: `amp * 0.22` and `amp`, so silence rests at 22% of the envelope.
-BAR_FLOOR = 0.22
+#: `amp * 0.22` and `amp`. Measured against a real pill, 0.22 left the quiet
+#: between words reading as hairlines, so the resting height is 25%.
+BAR_FLOOR = 0.25
+
+#: Automatic gain. Drawn against full scale, ordinary speech gave a wave a few
+#: pixels tall, so each level is measured against a decaying peak of the recent
+#: ones instead: whatever the microphone and the distance, talking fills the
+#: well and the quiet between words still reads as quiet.
+#:
+#: The numbers are in the units `level.rms_level` produces, *not* raw RMS - it
+#: has already applied a square root and a 1.25 gain, so a quiet room lands
+#: near 0.04 and speech between 0.2 (a distant mic) and 0.8 (a close one).
+#: NOISE is what the wave ignores altogether, and the reference never falls
+#: below PEAK_FLOOR, so a silent room cannot amplify its own hiss into a
+#: waveform; between them they put speech at 60-100% of the well.
+PEAK_HALF_LIFE = 2.0                  # seconds to halve the reference
+PEAK_FLOOR = 0.25                     # a quiet talker is still full scale
+NOISE = 0.06                          # below this there is nothing to draw
 
 #: A jump larger than this means the helper was stalled (or the machine slept);
 #: fade to silence rather than raising the decay to an absurd power.
@@ -140,6 +156,9 @@ class OverlayModel:
         self._last_push = self._now
         self._started_at = self._now
         self._elapsed = 0.0
+        #: The loudest recent level, and when it was set: full scale for the bars.
+        self._peak = PEAK_FLOOR
+        self._peak_at = self._now
 
     # -- geometry ---------------------------------------------------------
 
@@ -166,9 +185,18 @@ class OverlayModel:
         hump - that is what makes the shape read as a wave.
         """
         level = min(1.0, max(0.0, float(level)))
-        self._history.insert(0, level)
+        self._history.insert(0, self._gain(level))
         self._history.pop()
         self._last_push = self._now
+
+    def _gain(self, level: float) -> float:
+        """`level` as a fraction of the loudest thing heard lately."""
+        decayed = 0.5 ** (max(0.0, self._now - self._peak_at) / PEAK_HALF_LIFE)
+        reference = PEAK_FLOOR + (self._peak - PEAK_FLOOR) * decayed
+        self._peak = max(level, reference)
+        self._peak_at = self._now
+        span = self._peak - NOISE
+        return _clamp01((level - NOISE) / span) if span > 0 else 0.0
 
     def set_language(self, code: str) -> None:
         """Record a language switch; the badge and any notice read from here."""

@@ -256,14 +256,14 @@ class PortalListener:
             raise PortalError(f"portal CreateSession denied (response {code})")
         self._session = results["session_handle"][1]
         known = self._list_shortcuts() or None
-        code, results = call_with_response(
+        code, bound = call_with_response(
             self._conn, SHORTCUTS, "BindShortcuts", "oa(sa{sv})sa{sv}",
             (self._session, self._bindings(known), "", {}))
         if code != 0:
             self._bound = False
             raise PortalError(f"portal BindShortcuts denied (response {code}); "
                               f"allow '{self._app_id}' to take a global shortcut")
-        triggers = shortcut_triggers(results)
+        triggers = shortcut_triggers(bound)
         if triggers is None:
             # The reply said nothing about triggers, which is not the same as
             # "none assigned". Ask outright rather than guess either way.

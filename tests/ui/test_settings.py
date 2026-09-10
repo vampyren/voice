@@ -188,3 +188,43 @@ def test_a_captured_message_is_shown_instead_of_being_typed_into_the_field(qapp)
     assert dlg.hotkey_edit.text() == "KEY_F13"               # untouched
     assert "portal" in dlg.error_label.text()
     assert dlg.capture_button.text() == "Capture key"
+
+
+def test_save_does_not_revert_a_language_switched_elsewhere(qapp):
+    """Same snapshot problem as stt.active: the toggle hotkey and the tray both
+    change general.language while this dialog is open."""
+    cfg, dlg, _ = make(qapp)
+    external = Config.load()
+    external.set("general.language", "sv")
+    external.save()
+
+    dlg.hotkey_edit.setText("KEY_RIGHTCTRL")
+    dlg.save_button.click()
+
+    again = Config.load()
+    assert again.get("general.language") == "sv"             # not reverted to "en"
+    assert again.get("hotkeys.dictate") == "KEY_RIGHTCTRL"   # the dialog's own edit landed
+
+
+def test_the_language_combo_wins_over_the_on_disk_value(qapp):
+    cfg, dlg, _ = make(qapp)
+    external = Config.load()
+    external.set("general.language", "sv")
+    external.save()
+
+    dlg.language_combo.setCurrentIndex(dlg.language_combo.findData("auto"))
+    dlg.save_button.click()
+    assert Config.load().get("general.language") == "auto"
+
+
+def test_reload_from_disk_clears_the_language_flag(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.language_combo.setCurrentIndex(dlg.language_combo.findData("auto"))
+    dlg.close()
+    dlg.reload_from_disk()
+
+    external = Config.load()
+    external.set("general.language", "sv")
+    external.save()
+    dlg.save_button.click()
+    assert Config.load().get("general.language") == "sv"     # the abandoned edit is gone

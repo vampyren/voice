@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QFormLayout, QHBoxLayout, QLa
                                QTabWidget, QVBoxLayout, QWidget)
 
 from voice.audio.capture import Source
-from voice.config import Config
+from voice.config import Config, is_language_code
 from voice.hotkey.keyspec import parse_keyspec
 
 PROFILE_TEMPLATES: dict[str, dict] = {
@@ -48,6 +48,7 @@ class SettingsDialog(QDialog):
         self._capture_key, self._sources = capture_key, sources
         self._current_profile: str | None = None
         self._active_changed = False       # True once "Use this profile" was pressed
+        self._language_changed = False     # True once the user picked a language here
         self._captured.connect(self._on_captured)
         tabs = QTabWidget()
         tabs.addTab(self._general_tab(), "General")
@@ -77,6 +78,7 @@ class SettingsDialog(QDialog):
         self._cfg = Config.load(self._cfg.path)
         self._current_profile = None       # so repopulating cannot commit stale form values
         self._active_changed = False
+        self._language_changed = False
         self.profile_form = {}
         self.error_label.setText("")
         self._load()
@@ -88,6 +90,9 @@ class SettingsDialog(QDialog):
         self.language_combo = QComboBox()
         for label, code in _LANGUAGES:
             self.language_combo.addItem(label, code)
+        # Only a change made *here* may overwrite the language on disk: the
+        # toggle hotkey and the tray change it while this dialog sits open.
+        self.language_combo.currentIndexChanged.connect(self._on_language_picked)
         self.notifications_combo = QComboBox()
         self.notifications_combo.addItems(["on", "off"])
         form.addRow("Language", self.language_combo)
@@ -194,6 +199,10 @@ class SettingsDialog(QDialog):
         self.replacements_table.setRowCount(len(rules))
         for i, rule in enumerate(rules):
             self.set_replacement_row(i, *(list(rule) + ["", "", ""])[:3])
+        self._language_changed = False     # populating the combo is not a user edit
+
+    def _on_language_picked(self, index: int) -> None:
+        self._language_changed = True
 
     def set_replacement_row(self, row: int, src: str, dst: str, flags: str = "") -> None:
         for col, val in enumerate((src, dst, flags)):
@@ -266,26 +275,46 @@ class SettingsDialog(QDialog):
             self.error_label.setText(name)
         self.capture_button.setText("Capture key")
 
-    def _carry_over_active_profile(self) -> bool:
-        """Keep an stt.active switched from the tray or CLI since this dialog opened.
+    def _carry_over_external_edits(self) -> bool:
+        """Keep settings switched from the tray, a hotkey or the CLI since this
+        dialog opened.
 
         The dialog edits a whole-document snapshot, so writing it back would
-        otherwise revert that switch. Only called when the user did not press
-        "Use this profile" themselves. Returns False if the file cannot be read.
+        otherwise revert them. Each field is carried only when the user did not
+        change it here. Returns False if the file cannot be read.
         """
         try:
-            on_disk = Config.load(self._cfg.path).get("stt.active")
+            on_disk = Config.load(self._cfg.path)
         except ValueError as exc:
             self.error_label.setText(f"{self._cfg.path.name}: {exc}")
             return False
-        if not on_disk or on_disk == self._cfg.get("stt.active"):
-            return True
+        if not self._active_changed:
+            self._carry_over_active_profile(on_disk)
+        if not self._language_changed:
+            self._carry_over_language(on_disk)
+        return True
+
+    def _carry_over_active_profile(self, on_disk: Config) -> None:
+        active = on_disk.get("stt.active")
+        if not active or active == self._cfg.get("stt.active"):
+            return
         # Only if this document actually defines it; otherwise the write would
         # produce a config errors() rejects and the save would be blocked.
-        if on_disk in (self._cfg.get("stt.profiles", {}) or {}):
-            self._cfg.set("stt.active", on_disk)
-            self.active_label.setText(f"Active profile: {on_disk}")
-        return True
+        if active in (self._cfg.get("stt.profiles", {}) or {}):
+            self._cfg.set("stt.active", active)
+            self.active_label.setText(f"Active profile: {active}")
+
+    def _carry_over_language(self, on_disk: Config) -> None:
+        language = on_disk.get("general.language")
+        if not language or language == self._cfg.get("general.language"):
+            return
+        if not is_language_code(language):     # same guard: never write a bad value
+            return
+        self._cfg.set("general.language", language)
+        index = self.language_combo.findData(language)
+        if index >= 0:
+            self.language_combo.setCurrentIndex(index)   # show what was really saved
+        self._language_changed = False         # that was us, not the user
 
     def _save(self) -> None:
         c = self._cfg
@@ -310,7 +339,7 @@ class SettingsDialog(QDialog):
             if src:
                 rules.append([src, dst, flags] if flags else [src, dst])
         c.set("dictionary.replacements", rules)
-        if not self._active_changed and not self._carry_over_active_profile():
+        if not self._carry_over_external_edits():
             return
         errs = c.errors()
         if errs:

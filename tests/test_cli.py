@@ -79,7 +79,7 @@ def test_status_prints_the_active_hotkey_backend(isolated_xdg, capsys):
     srv.start()
     try:
         assert main(["status"]) == 0
-        assert "hotkeys:  portal" in capsys.readouterr().out
+        assert "hotkeys:   portal" in capsys.readouterr().out    # padded to "shortcuts:"
     finally:
         srv.stop()
 
@@ -192,6 +192,33 @@ def test_status_still_reports_keyboard_access_on_the_evdev_backend(isolated_xdg,
     out = capsys.readouterr().out
     assert "keyboard: NO ACCESS" in out
     assert "shortcuts:" not in out
+
+
+def _value_columns(out: str) -> list[int]:
+    """The column each printed value starts in, one entry per status line."""
+    columns = []
+    for line in out.splitlines():
+        label, sep, rest = line.partition(":")
+        assert sep, f"not a status row: {line!r}"
+        columns.append(len(label) + 1 + len(rest) - len(rest.lstrip()))
+    return columns
+
+
+@pytest.mark.parametrize("backend", ["evdev", "portal"])
+def test_status_values_line_up_whichever_rows_are_printed(isolated_xdg, capsys, backend):
+    """Every label was padded to 10 columns, but "shortcuts:" is 10 characters
+    itself, so the portal rendering put its value one column right of the rest."""
+    srv = ipc.Server(lambda r: {"ok": True, "state": "idle", "profile": "local",
+                                "backend": "fake", "language": "en", "keyboard": True,
+                                "overlay": "running", "hotkey_backend": backend,
+                                "last_error": "boom"})
+    srv.start()
+    try:
+        assert main(["status"]) == 0
+    finally:
+        srv.stop()
+    out = capsys.readouterr().out
+    assert len(set(_value_columns(out))) == 1, out
 
 
 def test_status_names_the_language_that_chose_the_profile(isolated_xdg, capsys):

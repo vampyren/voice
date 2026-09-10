@@ -29,15 +29,15 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _print_status(reply: dict) -> None:
-    print(f"state:    {reply.get('state')}")
     for_language = reply.get("profile_language")
     # Only when a language actually chose it: see daemon.profile_for_status.
     chosen_by = f" (for {for_language})" if for_language else ""
-    print(f"profile:  {reply.get('profile')}{chosen_by}")
-    print(f"backend:  {reply.get('backend')}")
-    print(f"language: {reply.get('language')}")
-    print(f"hotkeys:  {reply.get('hotkey_backend', 'unknown')}")
-    print(f"overlay:  {reply.get('overlay', 'unknown')}")
+    rows = [("state", reply.get("state")),
+            ("profile", f"{reply.get('profile')}{chosen_by}"),
+            ("backend", reply.get("backend")),
+            ("language", reply.get("language")),
+            ("hotkeys", reply.get("hotkey_backend", "unknown")),
+            ("overlay", reply.get("overlay", "unknown"))]
     keyboard = reply.get("keyboard")
     if reply.get("hotkey_backend") == "portal":
         # There is no keyboard to have access to on this backend: the desktop
@@ -46,12 +46,16 @@ def _print_status(reply: dict) -> None:
             bound = "waiting for the desktop"
         else:
             bound = "bound" if keyboard else "NOT BOUND (accept the desktop's shortcut dialog)"
-        print(f"shortcuts: {bound}")
+        rows.append(("shortcuts", bound))
     else:
-        kb_text = "ok" if keyboard else ("unknown" if keyboard is None else "NO ACCESS")
-        print(f"keyboard: {kb_text}")
+        rows.append(("keyboard", "ok" if keyboard else ("unknown" if keyboard is None else "NO ACCESS")))
     if reply.get("last_error"):
-        print(f"error:    {reply['last_error']}")
+        rows.append(("error", reply["last_error"]))
+    # Measured, not a constant: "shortcuts" is as wide as the old padding, so a
+    # fixed width put that one value a column right of every other row.
+    width = max(len(label) for label, _ in rows) + 1
+    for label, value in rows:
+        print(f"{label + ':':<{width}} {value}")
 
 
 def main(argv: list[str] | None = None) -> int:

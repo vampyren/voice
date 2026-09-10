@@ -30,7 +30,10 @@ def _parser() -> argparse.ArgumentParser:
 
 def _print_status(reply: dict) -> None:
     print(f"state:    {reply.get('state')}")
-    print(f"profile:  {reply.get('profile')}")
+    for_language = reply.get("profile_language")
+    # Only when a language actually chose it: see daemon.profile_for_status.
+    chosen_by = f" (for {for_language})" if for_language else ""
+    print(f"profile:  {reply.get('profile')}{chosen_by}")
     print(f"backend:  {reply.get('backend')}")
     print(f"language: {reply.get('language')}")
     print(f"hotkeys:  {reply.get('hotkey_backend', 'unknown')}")

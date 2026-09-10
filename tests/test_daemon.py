@@ -64,12 +64,16 @@ class FakeTray(QObject):
         super().__init__()
         self.calls = []
         self.languages = []
+        self.profile_hints = []
 
     def set_profiles(self, names, active):
         self.calls.append((list(names), active))
 
     def set_languages(self, codes, active):
         self.languages.append((list(codes), active))
+
+    def set_profile_hint(self, text):
+        self.profile_hints.append(text)
 
     def show(self):
         pass
@@ -1107,4 +1111,126 @@ def test_a_changed_hotkey_backend_rebuilds_the_listener(isolated_xdg, qapp, monk
     assert d.hotkey_backend == "evdev"
     assert not isinstance(d.listener, FakePortalListener)
     assert d.handle({"cmd": "status"})["hotkey_backend"] == "evdev"
+    d.shutdown()
+
+
+# -- a profile per language -----------------------------------------------------
+def _profile_daemon(cfg, monkeypatch, **kwargs):
+    """A built daemon plus the list of models its transcribers were built from."""
+    built: list[str] = []
+
+    def fake_make_transcriber(profile, secret):
+        built.append(str(profile.get("model")))
+        return type("T", (), {"name": profile["backend"],
+                              "describe": lambda self: f"fake {profile['model']}",
+                              "warmup": lambda self: None,
+                              "transcribe": lambda self, *a: None})()
+
+    monkeypatch.setattr("voice.daemon.make_transcriber", fake_make_transcriber)
+    kwargs.setdefault("notifier", QuietNotifier())
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), **kwargs)
+    d.build()
+    return d, built
+
+
+def _with_language_profiles(mapping: dict) -> Config:
+    cfg = Config.load()
+    cfg.set("general.language_profiles", mapping)
+    cfg.save()
+    return Config.load()
+
+
+def test_switching_language_activates_the_mapped_profile(isolated_xdg, qapp, monkeypatch):
+    """One reload, one save, one apply: the language and its model move together."""
+    cfg = _with_language_profiles({"en": "local", "sv": "openai"})
+    d, built = _profile_daemon(cfg, monkeypatch)
+    assert built == ["large-v3-turbo"]
+
+    d.handle({"cmd": "language", "code": "sv"})
+    qapp.processEvents()
+
+    on_disk = Config.load()
+    assert on_disk.get("general.language") == "sv"
+    assert on_disk.get("stt.active") == "openai"        # switched in the same save
+    assert on_disk.errors() == []
+    assert built == ["large-v3-turbo", "gpt-transcribe"]   # rebuilt exactly once
+    assert d.handle({"cmd": "status"})["profile"] == "openai"
+    d.shutdown()
+
+
+def test_the_language_toggle_hotkey_also_moves_the_profile(isolated_xdg, qapp, monkeypatch):
+    cfg = _with_language_profiles({"en": "local", "sv": "openai"})
+    d, built = _profile_daemon(cfg, monkeypatch)
+    d._on_hotkey("language_toggle", "press")
+    qapp.processEvents()
+    on_disk = Config.load()
+    assert (on_disk.get("general.language"), on_disk.get("stt.active")) == ("sv", "openai")
+    d._on_tray_action("language:en")                    # and back, from the tray
+    qapp.processEvents()
+    on_disk = Config.load()
+    assert (on_disk.get("general.language"), on_disk.get("stt.active")) == ("en", "local")
+    assert built == ["large-v3-turbo", "gpt-transcribe", "large-v3-turbo"]
+    d.shutdown()
+
+
+def test_a_language_that_maps_to_the_active_profile_changes_nothing(isolated_xdg, qapp, monkeypatch):
+    cfg = _with_language_profiles({"en": "local", "sv": "local"})
+    d, built = _profile_daemon(cfg, monkeypatch)
+    d.handle({"cmd": "language", "code": "sv"})
+    qapp.processEvents()
+    assert Config.load().get("stt.active") == "local"
+    assert built == ["large-v3-turbo"]        # nothing to rebuild
+    d.shutdown()
+
+
+def test_a_missing_mapped_profile_notifies_and_keeps_the_current_one(isolated_xdg, qapp, monkeypatch):
+    """The map can name a profile the owner has since deleted; the language still
+    switches, the model does not, and they are told why exactly once."""
+    cfg = _with_language_profiles({"sv": "local-swedish"})     # never defined here
+    notifier = QuietNotifier()
+    d, built = _profile_daemon(cfg, monkeypatch, notifier=notifier)
+
+    d.handle({"cmd": "language", "code": "sv"})
+    qapp.processEvents()
+
+    on_disk = Config.load()
+    assert on_disk.get("general.language") == "sv"      # the language switch stands
+    assert on_disk.get("stt.active") == "local"         # the profile is untouched
+    assert built == ["large-v3-turbo"]                  # so nothing was rebuilt
+    assert len(notifier.sent) == 1
+    title, body, urgency = notifier.sent[0]
+    assert title == "Language profile missing"
+    assert "'local-swedish'" in body and "sv" in body
+    d.shutdown()
+
+
+def test_a_manual_profile_switch_leaves_the_language_alone(isolated_xdg, qapp, monkeypatch):
+    cfg = _with_language_profiles({"en": "local", "sv": "openai"})
+    d, built = _profile_daemon(cfg, monkeypatch)
+    d.handle({"cmd": "profile", "name": "groq"})
+    qapp.processEvents()
+    on_disk = Config.load()
+    assert on_disk.get("stt.active") == "groq"
+    assert on_disk.get("general.language") == "en"      # the map is not applied backwards
+    d.shutdown()
+
+
+def test_status_and_the_tray_say_which_language_chose_the_profile(isolated_xdg, qapp, monkeypatch):
+    cfg = _with_language_profiles({"sv": "openai"})
+    d, _ = _profile_daemon(cfg, monkeypatch)
+    status = d.handle({"cmd": "status"})
+    assert status["profile"] == "local" and status["profile_language"] is None
+    assert d.tray.profile_hints[-1] == "local"
+
+    d.handle({"cmd": "language", "code": "sv"})
+    qapp.processEvents()
+    status = d.handle({"cmd": "status"})
+    assert status["profile"] == "openai" and status["profile_language"] == "sv"
+    assert d.tray.profile_hints[-1] == "openai (for sv)"
+
+    d.handle({"cmd": "profile", "name": "groq"})        # chosen by hand: no "for sv"
+    qapp.processEvents()
+    status = d.handle({"cmd": "status"})
+    assert status["profile"] == "groq" and status["profile_language"] is None
+    assert d.tray.profile_hints[-1] == "groq"
     d.shutdown()

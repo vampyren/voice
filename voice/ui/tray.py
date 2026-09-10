@@ -30,6 +30,8 @@ class Tray(QObject):
         self.menu.addSeparator()
         self._add("settings", "Settings…")
         self._add("quit", "Quit")
+        self._state = ("idle", "ready")
+        self._profile_hint = ""
         self.icon.setContextMenu(self.menu)
         self.icon.activated.connect(self._activated)
         self.state_changed.connect(self.set_state)
@@ -54,8 +56,24 @@ class Tray(QObject):
             self._on_action("settings")
 
     def set_state(self, state: str, detail: str = "") -> None:
+        self._state = (state, detail)
         self.icon.setIcon(icon_for(state))
-        self.icon.setToolTip(f"{APP_NAME} · {state}" + (f" · {detail}" if detail else ""))
+        self.icon.setToolTip(self._tooltip())
+
+    def set_profile_hint(self, text: str) -> None:
+        """The profile the next dictation will use, e.g. "local-swedish (for sv)".
+
+        Kept beside the state so a language switch that also changed the model is
+        visible without opening a menu or running `voice status`.
+        """
+        self._profile_hint = str(text or "")
+        self.icon.setToolTip(self._tooltip())
+
+    def _tooltip(self) -> str:
+        state, detail = self._state
+        parts = [APP_NAME, state]
+        parts += [p for p in (detail, self._profile_hint) if p]
+        return " · ".join(parts)
 
     def set_profiles(self, names: list[str], active: str) -> None:
         self._set_radio(self.profile_menu, self._profile_group, "profile",

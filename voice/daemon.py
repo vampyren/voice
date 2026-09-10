@@ -43,6 +43,25 @@ HOTKEY_NAMES = ("dictate", "recall", "cancel", "language_toggle")
 SEAT_TIMEOUT_S = 2
 
 
+def profile_for_status(config: Config) -> tuple[str, str | None]:
+    """The active profile and the language that selected it.
+
+    The language is None whenever the profile was not the one general.language
+    maps to - chosen by hand with `voice profile`, or no map at all - so the
+    status line only claims a language chose the model when one actually did.
+    """
+    active = str(config.get("stt.active", "") or "")
+    language = str(config.get("general.language", "en") or "en")
+    mapped = config.profile_for_language(language)
+    return active, (language if mapped and mapped == active else None)
+
+
+def profile_hint(config: Config) -> str:
+    """The tray tooltip's profile fragment: "local-swedish (for sv)"."""
+    active, language = profile_for_status(config)
+    return f"{active} (for {language})" if language else active
+
+
 def has_local_seat() -> bool:
     """Whether this login session owns a seat, i.e. a local screen and keyboard.
 
@@ -228,6 +247,7 @@ class Daemon:
         self.dictation.on_state = self._on_dictation_state
         self.tray.set_profiles(list(self.config.get("stt.profiles", {}) or {}), self.config.get("stt.active"))
         self.tray.set_languages(self.config.languages(), self.config.get("general.language"))
+        self.tray.set_profile_hint(profile_hint(self.config))
         self._bridge.open_settings.connect(self.open_settings)
         self._bridge.apply_config.connect(self.apply_config)
         self._bridge.set_profile.connect(self._set_profile)
@@ -500,6 +520,7 @@ class Daemon:
         self.dictation.set_injector(self.injector)
         self.tray.set_profiles(list(self.config.get("stt.profiles", {}) or {}), self.config.get("stt.active"))
         self.tray.set_languages(self.config.languages(), self.config.get("general.language"))
+        self.tray.set_profile_hint(profile_hint(self.config))
         self._rebuild_overlay_if_needed()
         self._sync_overlay_language()
 
@@ -545,6 +566,7 @@ class Daemon:
             return
         try:
             self.config.set("general.language", code)
+            self._apply_language_profile(code)
             self.config.save()
         except Exception as exc:
             log.exception("could not save the language switch")
@@ -554,6 +576,24 @@ class Daemon:
         if self.overlay is not None:
             self.overlay.send({"state": "notice",
                                "text": f"{previous.upper()} \u2192 {code.upper()}"})
+
+    def _apply_language_profile(self, code: str) -> None:
+        """Point stt.active at the profile `code` maps to, in this same document.
+
+        Called between the language write and the save so the pair travels as one
+        write and one apply_config: the transcriber is rebuilt once, not twice.
+        A map naming a profile that is gone must not be written - that config is
+        one the daemon itself rejects - so it is reported and the model stays.
+        """
+        name = self.config.profile_for_language(code)
+        if not name or name == self.config.get("stt.active"):
+            return
+        if name not in (self.config.get("stt.profiles", {}) or {}):
+            log.warning("general.language_profiles.%s names unknown profile %r", code, name)
+            self._notifier.notify("Language profile missing",
+                                  f"'{name}' for {code} is not defined in config.toml", "normal")
+            return
+        self.config.set("stt.active", name)
 
     def _next_language(self) -> str | None:
         """The next language in the cycle, or None when there is nowhere to go.
@@ -625,7 +665,9 @@ class Daemon:
             simple[cmd]()
             return {"ok": True, "state": d.state.value}
         if cmd == "status":
-            return {"ok": True, "state": d.state.value, "profile": self.config.get("stt.active"),
+            profile, for_language = profile_for_status(self.config)
+            return {"ok": True, "state": d.state.value, "profile": profile,
+                    "profile_language": for_language,
                     "backend": d.sv.transcriber.describe(), "last_error": d.last_error,
                     "version": __version__, "keyboard": self.listener.devices_ok(),
                     "hotkey_backend": self.hotkey_backend,

@@ -192,3 +192,26 @@ def test_status_still_reports_keyboard_access_on_the_evdev_backend(isolated_xdg,
     out = capsys.readouterr().out
     assert "keyboard: NO ACCESS" in out
     assert "shortcuts:" not in out
+
+
+def test_status_names_the_language_that_chose_the_profile(isolated_xdg, capsys):
+    srv = ipc.Server(lambda r: {"ok": True, "state": "idle", "profile": "local-swedish",
+                                "profile_language": "sv", "backend": "fake", "last_error": None})
+    srv.start()
+    try:
+        assert main(["status"]) == 0
+        assert "profile:  local-swedish (for sv)" in capsys.readouterr().out
+    finally:
+        srv.stop()
+
+
+def test_status_does_not_invent_a_language_for_a_hand_picked_profile(isolated_xdg, capsys):
+    srv = ipc.Server(lambda r: {"ok": True, "state": "idle", "profile": "groq",
+                                "profile_language": None, "backend": "fake", "last_error": None})
+    srv.start()
+    try:
+        assert main(["status"]) == 0
+        out = capsys.readouterr().out
+        assert "profile:  groq\n" in out and "(for" not in out
+    finally:
+        srv.stop()

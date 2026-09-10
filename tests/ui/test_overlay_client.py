@@ -264,3 +264,14 @@ def test_the_plain_window_fallback_can_be_allowed_explicitly(monkeypatch):
     seen = {}
     default_launcher(popen=lambda cmd, **kw: seen.update(cmd=cmd))
     assert "--require-layer-shell" not in seen["cmd"]
+
+
+def test_the_helper_is_verbose_when_the_daemon_is(monkeypatch):
+    """`voice --verbose daemon` must be able to show what the pill received."""
+    monkeypatch.setattr("voice.ui.overlay_client._probe",
+                        lambda python: ("gtk4", "layer-shell"))
+    seen = {}
+    default_launcher(popen=lambda cmd, **kw: seen.update(cmd=cmd))
+    assert "--verbose" not in seen["cmd"]
+    default_launcher(verbose=True, popen=lambda cmd, **kw: seen.update(cmd=cmd))
+    assert "--verbose" in seen["cmd"]

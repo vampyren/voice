@@ -228,8 +228,9 @@ class Daemon:
         enabled = bool(self.config.get("ui.overlay", True))
         position = str(self.config.get("ui.overlay_position", "bottom") or "bottom")
         language = str(self.config.get("general.language", "en") or "en")
-        return OverlayClient(enabled, launcher=lambda: default_launcher(position=position,
-                                                                        lang=language))
+        verbose = log.isEnabledFor(logging.DEBUG)
+        return OverlayClient(enabled, launcher=lambda: default_launcher(
+            position=position, lang=language, verbose=verbose))
 
     def _on_level(self, level: float) -> None:
         """Audio reader thread. Must not block: the client queues and returns."""

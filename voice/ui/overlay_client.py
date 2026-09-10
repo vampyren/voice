@@ -120,7 +120,7 @@ def helper_command() -> list[str] | None:
     return probe_helper().command
 
 
-def default_launcher(position: str = "bottom", lang: str = "en",
+def default_launcher(position: str = "bottom", lang: str = "en", verbose: bool = False,
                      popen: Callable = subprocess.Popen):
     """Spawn the helper, or return None when this machine cannot run it.
 
@@ -153,6 +153,8 @@ def default_launcher(position: str = "bottom", lang: str = "en",
         cmd += ["--lang", lang]
     if strict:
         cmd.append("--require-layer-shell")     # in case the helper sees less than we did
+    if verbose:
+        cmd.append("--verbose")                 # the helper then logs every state it shows
     log.info("recording overlay: %s", " ".join(cmd))
     # stderr is inherited on purpose: the helper's own log lines (layer-shell
     # present or not, window mapped or not) belong in the daemon's log.

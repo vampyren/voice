@@ -104,7 +104,7 @@ monospace font otherwise.
 It runs as a separate helper process (`voice.ui.overlay`, GTK 4 through PyGObject), so a
 crash there cannot affect dictation - the daemon logs it, restarts it once, and carries
 on without it. Switch it off with `ui.overlay = false`, or move it with
-`ui.overlay_position = "top"`. `voice status` shows what it is doing.
+`ui.overlay_position` (below). `voice status` shows what it is doing.
 
 **gtk4-layer-shell is required in practice.** GTK 4 removed the "do not focus me" window
 hints, so without that library the pill is an ordinary window that takes keyboard focus
@@ -118,6 +118,39 @@ overlay disabled: no layer-shell; install gtk4-layer-shell or set ui.overlay_all
 once and carries on without a pill. `voice doctor` and `voice status` report the same
 thing (`overlay: disabled: no layer-shell`). Set `ui.overlay_allow_fallback = true` if
 you want the pill anyway and accept that it takes focus.
+
+#### Where the pill sits
+
+`ui.overlay_position` names one of nine placements - a vertical half,
+`top`, `middle` or `bottom`, and a horizontal one, `left`, `center` or `right`:
+
+```
+top-left        top-center        top-right
+middle-left     middle-center     middle-right
+bottom-left     bottom-center     bottom-right
+```
+
+`middle` is centred vertically on the screen, so `middle-center` is dead centre.
+The two values this setting used to take still work: `"bottom"` means
+`"bottom-center"` and `"top"` means `"top-center"`.
+
+`ui.overlay_margin_x` and `ui.overlay_margin_y` push the pill in from the sides
+it is anchored to, in pixels - positive moves it inward, negative pushes it out
+past the edge, and the range is -2000 to 2000. A half that is `center` or
+`middle` is centred by the compositor and has no edge to be a distance from, so
+it ignores its margin: with the shipped `bottom-center` only `overlay_margin_y`
+(48 by default) does anything.
+
+Changing any of the three takes effect on `voice reload` and on Save in the
+settings window - the daemon restarts the pill helper - without restarting the
+daemon itself.
+
+**The pill cannot be dragged.** It is deliberately input-transparent - it never
+takes a click, which is also what keeps it from stealing focus mid-dictation -
+and a layer-shell surface has no position to drag, only anchors and margins.
+Placement is the setting instead. Where there is no layer-shell (GNOME, see
+below) not even that applies: the compositor places the window, and the helper
+says so once in the log rather than pretending the setting was honoured.
 
 #### The pill and auto-paste, per desktop
 
@@ -255,7 +288,10 @@ max_seconds = 120
 
 [ui]
 overlay = true             # the recording pill: waveform, timer, language badge
-overlay_position = "bottom"  # "bottom" | "top"
+overlay_position = "bottom-center"   # top|middle|bottom with left|center|right,
+                                     # e.g. "bottom-right"; needs gtk4-layer-shell
+overlay_margin_x = 0       # pixels in from the anchored side; a "center" or
+overlay_margin_y = 48      # "middle" half is centred and ignores its margin
 overlay_allow_fallback = false   # show the pill without gtk4-layer-shell, accepting
                                  # that it takes keyboard focus when it appears
 

@@ -5,6 +5,7 @@ import pytest
 
 from voice import paths
 from voice.config import DEFAULT_CONFIG, Config
+from voice.ui.placement import POSITIONS
 
 
 def test_load_creates_default_file_with_0600(isolated_xdg):
@@ -276,7 +277,9 @@ def test_defaults_carry_the_language_cycle_and_the_overlay(isolated_xdg):
     assert cfg.get("general.languages") == ["en", "sv"]
     assert cfg.languages() == ["en", "sv"]
     assert cfg.get("ui.overlay") is True
-    assert cfg.get("ui.overlay_position") == "bottom"
+    assert cfg.get("ui.overlay_position") == "bottom-center"
+    assert cfg.get("ui.overlay_margin_x") == 0
+    assert cfg.get("ui.overlay_margin_y") == 48
     assert cfg.get("ui.overlay_allow_fallback") is False
     assert cfg.get("hotkeys.language_toggle") == ""
     assert cfg.portal_trigger("language_toggle") == ""
@@ -419,3 +422,70 @@ def test_errors_accepts_both_inject_modes_and_a_file_without_the_key(isolated_xd
     doc = cfg._doc
     del doc["inject"]["mode"]
     assert [e for e in cfg.errors() if "inject.mode" in e] == []
+
+
+# -- where the pill sits ---------------------------------------------------
+
+@pytest.mark.parametrize("position", POSITIONS)
+def test_every_placement_passes_validation(isolated_xdg, position):
+    cfg = Config.load()
+    cfg.set("ui.overlay_position", position)
+    assert [e for e in cfg.errors() if "overlay_position" in e] == []
+
+
+@pytest.mark.parametrize("legacy,expected", [("bottom", "bottom-center"), ("top", "top-center")])
+def test_a_config_written_before_the_nine_placements_still_validates(isolated_xdg, legacy, expected):
+    """"bottom" and "top" are what older files hold; they must not become errors."""
+    cfg = Config.load()
+    cfg.set("ui.overlay_position", legacy)
+    assert [e for e in cfg.errors() if "overlay_position" in e] == []
+    assert cfg.overlay_placement() == (expected, 0, 48)
+
+
+@pytest.mark.parametrize("junk", ["sideways", "bottom-middle", "", 3, True])
+def test_a_placement_that_is_not_one_of_the_nine_is_an_error(isolated_xdg, junk):
+    cfg = Config.load()
+    cfg.set("ui.overlay_position", junk)
+    assert any("ui.overlay_position" in e for e in cfg.errors()), cfg.errors()
+
+
+@pytest.mark.parametrize("key", ["ui.overlay_margin_x", "ui.overlay_margin_y"])
+@pytest.mark.parametrize("junk", ["48", 1.5, True, 2001, -2001, [1]])
+def test_a_margin_must_be_a_whole_number_of_sane_pixels(isolated_xdg, key, junk):
+    cfg = Config.load()
+    cfg.set(key, junk)
+    assert any(key in e for e in cfg.errors()), cfg.errors()
+
+
+@pytest.mark.parametrize("key", ["ui.overlay_margin_x", "ui.overlay_margin_y"])
+@pytest.mark.parametrize("value", [0, 48, -2000, 2000, 137])
+def test_a_margin_inside_the_range_is_accepted(isolated_xdg, key, value):
+    cfg = Config.load()
+    cfg.set(key, value)
+    assert [e for e in cfg.errors() if key in e] == []
+
+
+def test_a_file_with_no_placement_keys_leaves_the_pill_where_it_was(isolated_xdg):
+    """An upgraded install keeps the pill exactly where it was."""
+    paths.config_file().write_text(LEGACY_CONFIG)
+    cfg = Config.load()
+    assert cfg.get("ui.overlay_position") is None
+    assert cfg.overlay_placement() == ("bottom-center", 0, 48)
+    assert [e for e in cfg.errors() if "overlay_" in e] == []
+
+
+def test_the_placement_is_read_back_normalised(isolated_xdg):
+    cfg = Config.load()
+    cfg.set("ui.overlay_position", " TOP-RIGHT ")
+    cfg.set("ui.overlay_margin_x", 24)
+    cfg.set("ui.overlay_margin_y", -12)
+    assert cfg.overlay_placement() == ("top-right", 24, -12)
+
+
+def test_a_broken_placement_still_reads_back_as_something_showable(isolated_xdg):
+    """errors() says no, but the daemon must never be handed a position the
+    helper would refuse to start with."""
+    cfg = Config.load()
+    cfg.set("ui.overlay_position", "sideways")
+    cfg.set("ui.overlay_margin_y", 99999)
+    assert cfg.overlay_placement() == ("bottom-center", 0, 2000)

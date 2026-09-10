@@ -13,6 +13,9 @@ from tomlkit.exceptions import TOMLKitError
 from voice import paths
 from voice.inject.injector import PILL_FOCUS_CHOICES
 from voice.inject.keys import parse_chord
+from voice.ui.placement import (DEFAULT_MARGIN_X, DEFAULT_MARGIN_Y, DEFAULT_POSITION,
+                                LEGACY_POSITIONS, MARGIN_LIMIT, POSITIONS, clamp_margin,
+                                is_margin, normalise_position)
 
 DEFAULT_CONFIG = '''# voice configuration. Edited by the settings window; hand edits are fine too.
 
@@ -51,7 +54,10 @@ max_seconds = 120
 
 [ui]
 overlay = true             # the recording pill: waveform, timer, language badge
-overlay_position = "bottom"  # "bottom" | "top"
+overlay_position = "bottom-center"   # top|middle|bottom with left|center|right,
+                                     # e.g. "bottom-right"; needs gtk4-layer-shell
+overlay_margin_x = 0       # pixels in from the anchored side; a "center" or
+overlay_margin_y = 48      # "middle" half is centred and ignores its margin
 overlay_allow_fallback = false   # show the pill without gtk4-layer-shell, accepting
                                  # that it takes keyboard focus when it appears
 
@@ -232,6 +238,19 @@ class Config:
         """The profile a language selects, or None when it maps to nothing."""
         return self.language_profiles().get(str(code).strip().lower())
 
+    def overlay_placement(self) -> tuple[str, int, int]:
+        """Where the pill goes: (position, margin_x, margin_y), always usable.
+
+        Normalised rather than raw, so every caller - the launcher, the helper,
+        the settings dialog - reads the same placement out of a file that may
+        hold one of the two older values, no keys at all, or (until the owner
+        fixes what `errors()` told them) something that is not a placement.
+        """
+        with self._lock:
+            return (normalise_position(self.get("ui.overlay_position", DEFAULT_POSITION)),
+                    clamp_margin(self.get("ui.overlay_margin_x"), DEFAULT_MARGIN_X),
+                    clamp_margin(self.get("ui.overlay_margin_y"), DEFAULT_MARGIN_Y))
+
     def portal_trigger(self, name: str) -> str:
         """The effective XDG trigger for a portal shortcut id.
 
@@ -301,6 +320,7 @@ class Config:
         if not isinstance(settle, (int, float)) or isinstance(settle, bool) or settle < 0:
             errs.append("inject.pill_settle_ms must be a non-negative number of milliseconds, "
                         f"got {settle!r}")
+        errs += self._placement_errors()
         for key in ("inject.paste_chord", "inject.terminal_chord"):
             chord = self.get(key)
             if chord is None:
@@ -309,6 +329,23 @@ class Config:
                 parse_chord(str(chord))
             except ValueError as exc:
                 errs.append(f"{key}: {exc}")
+        return errs
+
+    def _placement_errors(self) -> list[str]:
+        """Where the pill sits. Absent keys are a config written before the
+        placement existed, and mean the default."""
+        errs: list[str] = []
+        position = self.get("ui.overlay_position")
+        if position is not None and not (
+                isinstance(position, str)
+                and position.strip().lower() in set(POSITIONS) | set(LEGACY_POSITIONS)):
+            errs.append(f"ui.overlay_position must be one of {sorted(POSITIONS)} "
+                        f"(or the older {sorted(LEGACY_POSITIONS)}), got {position!r}")
+        for key in ("ui.overlay_margin_x", "ui.overlay_margin_y"):
+            margin = self.get(key)
+            if margin is not None and not is_margin(margin):
+                errs.append(f"{key} must be a whole number of pixels between "
+                            f"-{MARGIN_LIMIT} and {MARGIN_LIMIT}, got {margin!r}")
         return errs
 
     def _language_profile_errors(self, profiles: dict) -> list[str]:

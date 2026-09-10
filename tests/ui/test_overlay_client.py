@@ -174,6 +174,27 @@ def test_stop_terminates_a_helper_that_ignores_the_closed_stdin(helper_processes
     assert proc.terminated is True
 
 
+def test_close_reaps_a_helper_it_had_to_terminate(helper_processes):
+    """_close() used to signal and walk away: SIGTERM sent and never waited for,
+    so the child stayed a zombie for the rest of the daemon's life."""
+    client = _client(helper_processes)
+    client.start()
+    proc = helper_processes.made[0]
+    waits = []
+
+    def stubborn(timeout=None):
+        waits.append(timeout)
+        if proc.returncode is None:                 # terminate() sets it
+            raise subprocess.TimeoutExpired("voice-overlay", timeout)
+        return proc.returncode
+
+    proc.wait = stubborn
+    client.stop()
+    assert proc.terminated is True
+    assert len(waits) >= 2, "the helper was signalled but never reaped"
+    assert proc.returncode == -15
+
+
 # -- launching the real helper -------------------------------------------------
 def test_helper_command_prefers_the_system_python(monkeypatch, tmp_path):
     monkeypatch.setattr("voice.ui.overlay_client._probe", lambda python: ("gtk4",))
@@ -416,6 +437,53 @@ def test_stop_kills_the_helper_instead_of_blocking_on_its_stdin():
     threading.Thread(target=stop, name="stopper", daemon=True).start()
     assert stopped.wait(1.0), "stop() blocked on the helper's stdin"
     assert proc.terminated is True
+
+
+class _TerminateRefusingHelper:
+    """A helper whose terminate() raises - a PID that is already gone, an EPERM,
+    a Popen that lost its handle. Only kill() can free the parked writer."""
+
+    def __init__(self):
+        self.stdin = _FullPipe()
+        self.returncode = None
+        self.killed = False
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("voice-overlay", timeout)
+        return self.returncode
+
+    def terminate(self):
+        raise OSError("no such process")
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+        self.stdin.break_pipe()             # the child is gone: the write EPIPEs
+
+
+def test_stop_escalates_to_kill_when_terminate_raises():
+    """_unblock() gave up on the first exception instead of escalating, so a
+    terminate() that raises left the helper alive and the writer thread parked
+    on its pipe - stdin never closed, one thread leaked per daemon lifetime."""
+    proc = _TerminateRefusingHelper()
+    client = _client(lambda: proc)
+    client.start()
+    client.send({"state": "recording"})
+    assert proc.stdin.entered.wait(2.0)       # the writer is parked in the pipe
+    writer = client._writer
+
+    stopped = threading.Event()
+    threading.Thread(target=lambda: (client.stop(), stopped.set()),
+                     name="stopper", daemon=True).start()
+    assert stopped.wait(8.0), "stop() never returned"
+    assert proc.killed is True, "a terminate() that raised left the helper running"
+    writer.join(2.0)
+    assert not writer.is_alive(), "the writer was never released"
+    assert proc.stdin.closed is True, "stop() left the helper's stdin open"
 
 
 # -- a helper that stops taking writes -----------------------------------------

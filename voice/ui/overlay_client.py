@@ -308,10 +308,14 @@ class OverlayClient:
             self._idle.set()
 
     def _unblock(self, proc) -> None:
-        """Kill the helper so a writer parked on its full pipe is released."""
+        """Signal the helper until it is gone, and reap it.
+
+        Also what releases a writer parked on the helper's full pipe: losing the
+        read end EPIPEs the write.
+        """
         if proc is None:
             return
-        log.debug("overlay helper is not reading its stdin; terminating it")
+        log.debug("overlay helper has not exited; signalling it")
         for signal_it in (getattr(proc, "terminate", None), getattr(proc, "kill", None)):
             if signal_it is None:
                 continue
@@ -322,8 +326,11 @@ class OverlayClient:
             except subprocess.TimeoutExpired:
                 continue                      # SIGTERM ignored; escalate to kill
             except Exception:
+                # A terminate() that raises (a PID already gone, an EPERM) says
+                # nothing about the child being dead, so escalate rather than
+                # walk away: giving up here leaves the writer parked forever.
                 log.debug("signalling the overlay helper failed", exc_info=True)
-                return
+                continue
 
     def _close(self, proc, close_stdin: bool = True) -> None:
         if proc is None:
@@ -337,10 +344,9 @@ class OverlayClient:
             proc.wait(timeout=STOP_WAIT_S)
         except subprocess.TimeoutExpired:
             log.warning("overlay helper did not exit; terminating it")
-            try:
-                proc.terminate()
-            except Exception:
-                log.debug("terminating the overlay helper failed", exc_info=True)
+            # Signal *and* reap: a bare terminate() leaves a zombie behind for
+            # the daemon's lifetime, and a SIGTERM it ignores leaves it running.
+            self._unblock(proc)
         except Exception:
             log.debug("waiting for the overlay helper failed", exc_info=True)
 

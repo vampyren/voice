@@ -94,19 +94,30 @@ class PortalKeySender:
         return results
 
     def _open(self) -> None:
-        self._conn = self._bus_factory(bus="SESSION")
-        results = self._call("CreateSession", "a{sv}", ({"session_handle_token": ("s", "voice" + secrets.token_hex(4))},))
-        self._session = results["session_handle"][1]
-        self._call("SelectDevices", "oa{sv}", (self._session, select_devices_options(self._tokens.load())))
-        results = self._call("Start", "osa{sv}", (self._session, "", {}))
+        try:
+            self._conn = self._bus_factory(bus="SESSION")
+            results = self._call("CreateSession", "a{sv}", ({"session_handle_token": ("s", "voice" + secrets.token_hex(4))},))
+            self._session = results["session_handle"][1]
+            self._call("SelectDevices", "oa{sv}", (self._session, select_devices_options(self._tokens.load())))
+            results = self._call("Start", "osa{sv}", (self._session, "", {}))
+        except BaseException:
+            # A half-open session (denied dialog, dropped bus) must not be left
+            # behind: send_chord would then skip _open() and notify into nothing.
+            self.close()
+            raise
         token = results.get("restore_token")
         if token:
             self._tokens.save(token[1])
         log.info("portal remote desktop session ready")
 
     def _notify(self, keycode: int, state: int) -> None:
-        self._conn.send_and_get_reply(
+        # jeepney returns error replies rather than raising, so an injection into a
+        # revoked or dead session would otherwise read as success. RuntimeError (not
+        # KeySendError) so send_chord's retry path closes and re-opens the session once.
+        reply = self._conn.send_and_get_reply(
             new_method_call(PORTAL, "NotifyKeyboardKeycode", "oa{sv}iu", (self._session, {}, keycode, state)))
+        if reply.header.message_type.name == "error":
+            raise RuntimeError(f"portal NotifyKeyboardKeycode failed: {reply.body}")
 
     def send_chord(self, keycodes: list[int]) -> None:
         for attempt in (1, 2):

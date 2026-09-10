@@ -86,12 +86,14 @@ def test_status_prints_the_active_hotkey_backend(isolated_xdg, capsys):
 
 def test_language_is_forwarded_and_the_result_printed(isolated_xdg, capsys):
     seen = []
+    current = {"language": "en"}
 
     def handler(req):
         seen.append(req)
-        if req["cmd"] == "status":                 # what `next` reads the result back with
-            return {"ok": True, "language": "en"}
-        return {"ok": True, "language": "sv" if req["code"] == "sv" else "auto"}
+        if req["cmd"] == "status":                 # what both paths read back with
+            return {"ok": True, "language": current["language"]}
+        current["language"] = "sv" if req["code"] == "sv" else "auto"
+        return {"ok": True, "language": current["language"]}
 
     srv = ipc.Server(handler)
     srv.start()
@@ -101,7 +103,8 @@ def test_language_is_forwarded_and_the_result_printed(isolated_xdg, capsys):
     finally:
         srv.stop()
     assert [(r["cmd"], r.get("code")) for r in seen] == [
-        ("language", "sv"), ("status", None), ("language", "next")]
+        ("language", "sv"), ("status", None),      # named: confirmed by a read-back
+        ("status", None), ("language", "next")]    # next: the language it left
     out = capsys.readouterr().out.splitlines()
     assert out == ["language: sv", "language: auto"]
 
@@ -176,16 +179,60 @@ def test_a_pending_next_that_never_moves_prints_what_it_last_read(isolated_xdg, 
     assert capsys.readouterr().out.splitlines() == ["language: en"]
 
 
-def test_a_named_language_needs_no_second_round_trip(isolated_xdg, capsys):
+def test_a_named_language_is_confirmed_before_it_is_reported(isolated_xdg, capsys):
+    """handle() replies ok before the Qt thread has applied anything, so an ok
+    reply is not a switch: the CLI reads the language back like `next` does."""
     seen = []
-    srv = ipc.Server(lambda r: seen.append(r["cmd"]) or {"ok": True, "language": "sv"})
+    answers = iter(["en", "sv"])            # one racing read, then the switch lands
+
+    def handler(req):
+        seen.append(req["cmd"])
+        if req["cmd"] == "status":
+            return {"ok": True, "language": next(answers, "sv")}
+        return {"ok": True, "language": "sv"}
+
+    srv = ipc.Server(handler)
     srv.start()
     try:
         assert main(["language", "sv"]) == 0
     finally:
         srv.stop()
-    assert seen == ["language"]
+    assert seen == ["language", "status", "status"]
     assert capsys.readouterr().out.splitlines() == ["language: sv"]
+
+
+def test_a_named_language_the_daemon_never_applies_fails(isolated_xdg, capsys, monkeypatch):
+    """_set_language bails out silently when the config cannot be reloaded or
+    saved. The CLI printed `language: sv` and exited 0 while the daemon stayed
+    on en; it must say so and exit 1 instead."""
+    monkeypatch.setattr("voice.cli.LANGUAGE_POLL_TIMEOUT_S", 0.0)
+    srv = ipc.Server(lambda r: {"ok": True, "language": "en" if r["cmd"] == "status" else "sv"})
+    srv.start()
+    try:
+        assert main(["language", "sv"]) == 1
+    finally:
+        srv.stop()
+    got = capsys.readouterr()
+    assert got.out == ""
+    assert "sv" in got.err and "en" in got.err
+
+
+def test_a_named_language_that_cannot_be_read_back_is_not_claimed(isolated_xdg, capsys,
+                                                                  monkeypatch):
+    """An unreadable daemon is an unconfirmed switch, not a successful one."""
+    def boom():
+        raise ipc.IPCError("no daemon is running")
+
+    monkeypatch.setattr("voice.cli._current_language", boom)
+    srv = ipc.Server(lambda r: {"ok": True, "language": "sv"})
+    srv.start()
+    try:
+        assert main(["language", "sv"]) == 1
+    finally:
+        srv.stop()
+    got = capsys.readouterr()
+    assert got.out == ""
+    assert "no daemon is running" in got.err
 
 
 @pytest.mark.parametrize("bound,expected", [

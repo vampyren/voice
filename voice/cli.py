@@ -9,7 +9,7 @@ import time
 from voice import APP_NAME, __version__
 from voice.ipc import NEXT_LANGUAGE, PENDING_LANGUAGE, IPCError, is_running, send
 
-#: How long, and how often, `language next` asks the daemon what it landed on.
+#: How long, and how often, `language` asks the daemon what it landed on.
 #: The switch happens on the daemon's Qt thread after the reply, so a single
 #: immediate read can still see the language we asked it to leave.
 LANGUAGE_POLL_TIMEOUT_S = 1.5
@@ -133,8 +133,44 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "status":
         _print_status(reply)
     elif args.cmd == "language":
-        print(f"language: {_language_after(reply, before)}")
+        code = args.code.strip().lower()
+        if code == NEXT_LANGUAGE:
+            print(f"language: {_language_after(reply, before)}")
+        else:
+            return _confirm_language(code, reply)
     return 0
+
+
+def _confirm_language(code: str, reply: dict) -> int:
+    """0 once the daemon really is on the language it accepted, 1 if it is not.
+
+    `handle()` validates the code and replies ok from the IPC thread; the
+    switch itself happens afterwards on the Qt thread, and `_set_language`
+    gives up silently when the config cannot be reloaded or saved. Reporting
+    the reply on its own therefore printed `language: sv` and exited 0 for a
+    daemon that stayed on `en`, so the reply is confirmed by a bounded read-back
+    - the same poll `next` uses, and for the same race.
+    """
+    wanted = str(reply.get("language") or code)
+    deadline = time.monotonic() + LANGUAGE_POLL_TIMEOUT_S
+    while True:
+        try:
+            latest = _current_language()
+        except IPCError as exc:
+            # The switch may or may not have happened; either way we cannot say
+            # that it did, and claiming it is what this is here to stop.
+            print(f"{APP_NAME}: could not confirm the switch to {wanted}: {exc}",
+                  file=sys.stderr)
+            return 1
+        if latest == wanted:
+            print(f"language: {latest}")
+            return 0
+        if time.monotonic() >= deadline:
+            print(f"{APP_NAME}: the daemon is still on "
+                  f"{latest if latest else 'no language it will name'}, not {wanted}; "
+                  "the switch did not take (see the daemon's log)", file=sys.stderr)
+            return 1
+        time.sleep(LANGUAGE_POLL_INTERVAL_S)
 
 
 def _language_after(reply: dict, before: str | None = None) -> str:

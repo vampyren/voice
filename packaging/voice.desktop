@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=voice
+Comment=Wayland-native voice typing
+Exec=voice daemon
+Icon=audio-input-microphone
+Terminal=false
+Categories=Utility;Accessibility;
+StartupNotify=false

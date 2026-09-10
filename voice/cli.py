@@ -39,8 +39,9 @@ def _parser() -> argparse.ArgumentParser:
 
 #: A shortcut the desktop registered and attached no key to. It is not "bound":
 #: nothing we can do makes a press arrive, only the user in their settings.
-UNASSIGNED_SHORTCUT = ("registered, no key assigned \u2014 assign it in your desktop's "
-                       "keyboard settings")
+UNASSIGNED_SHORTCUT = ("registered, no key assigned \u2014 assign it in Settings \u203a "
+                       "Keyboard \u203a Keyboard Shortcuts (GNOME) or System Settings \u203a "
+                       "Shortcuts (KDE)")
 DENIED_SHORTCUT = "NOT BOUND (accept the desktop's shortcut dialog)"
 
 

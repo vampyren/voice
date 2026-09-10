@@ -125,3 +125,45 @@ def test_save_writes_to_disk_and_the_caller_config_sees_it_after_reload(qapp):
     assert cfg.get("hotkeys.dictate") == "KEY_F13"        # still the old live value
     cfg.reload()                                          # what Daemon.apply_config does
     assert cfg.get("hotkeys.dictate") == "KEY_RIGHTCTRL"
+
+
+def test_save_does_not_revert_a_profile_switched_elsewhere(qapp):
+    # The dialog's Config is a whole-document snapshot taken when it opened, so a
+    # profile switched from the tray or CLI meanwhile would be written back stale.
+    cfg, dlg, _ = make(qapp)
+    external = Config.load()
+    external.set("stt.active", "groq")
+    external.save()
+
+    dlg.hotkey_edit.setText("KEY_RIGHTCTRL")
+    dlg.save_button.click()
+
+    again = Config.load()
+    assert again.get("stt.active") == "groq"              # not reverted to the snapshot
+    assert again.get("hotkeys.dictate") == "KEY_RIGHTCTRL"  # the dialog's own edit landed
+
+
+def test_use_this_profile_wins_over_the_on_disk_value(qapp):
+    cfg, dlg, _ = make(qapp)
+    external = Config.load()
+    external.set("stt.active", "groq")
+    external.save()
+
+    dlg.profile_list.setCurrentRow(1)                     # openai
+    dlg.activate_button.click()
+    dlg.save_button.click()
+    assert Config.load().get("stt.active") == "openai"
+
+
+def test_reload_from_disk_clears_the_activation_flag(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.profile_list.setCurrentRow(1)
+    dlg.activate_button.click()
+    dlg.close()
+    dlg.reload_from_disk()
+
+    external = Config.load()
+    external.set("stt.active", "groq")
+    external.save()
+    dlg.save_button.click()
+    assert Config.load().get("stt.active") == "groq"      # the abandoned activation is gone

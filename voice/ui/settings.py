@@ -40,6 +40,7 @@ class SettingsDialog(QDialog):
         self._cfg = Config.load(config.path)
         self._capture_key, self._sources = capture_key, sources
         self._current_profile: str | None = None
+        self._active_changed = False       # True once "Use this profile" was pressed
         self._captured.connect(self._on_captured)
         tabs = QTabWidget()
         tabs.addTab(self._general_tab(), "General")
@@ -68,6 +69,7 @@ class SettingsDialog(QDialog):
         """Re-read the file and repopulate every widget, discarding unsaved edits."""
         self._cfg = Config.load(self._cfg.path)
         self._current_profile = None       # so repopulating cannot commit stale form values
+        self._active_changed = False
         self.profile_form = {}
         self.error_label.setText("")
         self._load()
@@ -239,6 +241,7 @@ class SettingsDialog(QDialog):
     def _activate_profile(self) -> None:
         if self._current_profile:
             self._cfg.set("stt.active", self._current_profile)
+            self._active_changed = True
             self.active_label.setText(f"Active profile: {self._current_profile}")
 
     def _start_capture(self) -> None:
@@ -248,6 +251,27 @@ class SettingsDialog(QDialog):
     def _on_captured(self, name: str) -> None:
         self.hotkey_edit.setText(name)
         self.capture_button.setText("Capture key")
+
+    def _carry_over_active_profile(self) -> bool:
+        """Keep an stt.active switched from the tray or CLI since this dialog opened.
+
+        The dialog edits a whole-document snapshot, so writing it back would
+        otherwise revert that switch. Only called when the user did not press
+        "Use this profile" themselves. Returns False if the file cannot be read.
+        """
+        try:
+            on_disk = Config.load(self._cfg.path).get("stt.active")
+        except ValueError as exc:
+            self.error_label.setText(f"{self._cfg.path.name}: {exc}")
+            return False
+        if not on_disk or on_disk == self._cfg.get("stt.active"):
+            return True
+        # Only if this document actually defines it; otherwise the write would
+        # produce a config errors() rejects and the save would be blocked.
+        if on_disk in (self._cfg.get("stt.profiles", {}) or {}):
+            self._cfg.set("stt.active", on_disk)
+            self.active_label.setText(f"Active profile: {on_disk}")
+        return True
 
     def _save(self) -> None:
         c = self._cfg
@@ -272,6 +296,8 @@ class SettingsDialog(QDialog):
             if src:
                 rules.append([src, dst, flags] if flags else [src, dst])
         c.set("dictionary.replacements", rules)
+        if not self._active_changed and not self._carry_over_active_profile():
+            return
         errs = c.errors()
         if errs:
             self.error_label.setText("; ".join(errs))

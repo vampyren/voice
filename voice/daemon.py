@@ -201,6 +201,8 @@ class Daemon:
         self._server: Server | None = None
         self._settings: SettingsDialog | None = None
         self._active_profile: tuple[str, dict] | None = None
+        #: The language the pill was last told about; see _send_overlay.
+        self._overlay_language = str(config.get("general.language", "en") or "en")
         self._bridge = _Bridge()
 
     # -- construction -------------------------------------------------------
@@ -233,6 +235,9 @@ class Daemon:
         enabled = bool(self.config.get("ui.overlay", True))
         position = str(self.config.get("ui.overlay_position", "bottom") or "bottom")
         language = str(self.config.get("general.language", "en") or "en")
+        # The helper is started with --lang, so that is the badge it already
+        # shows: what we track here is the last language it was *told*.
+        self._overlay_language = language
         verbose = log.isEnabledFor(logging.DEBUG)
         allow_fallback = bool(self.config.get("ui.overlay_allow_fallback", False))
         return OverlayClient(enabled, launcher=lambda: default_launcher(
@@ -253,8 +258,32 @@ class Daemon:
         if self.overlay is None:
             return
         language = str(self.config.get("general.language", "en") or "en")
-        for message in overlay_messages(state, detail, language):
+        self._send_overlay(overlay_messages(state, detail, language), language)
+
+    def _send_overlay(self, messages: list[dict], language: str) -> None:
+        """Send one transition's messages, badge first when it has changed.
+
+        The pill draws the badge from the last language it was told about, and
+        the language can change from anywhere - the toggle, the tray, the
+        settings dialog - between two states. So every state message is
+        preceded by the language whenever it has moved since the last one sent.
+        """
+        for message in messages:
+            if "language" in message:
+                self._overlay_language = str(message["language"])
+            elif "state" in message and language != self._overlay_language:
+                self.overlay.send({"language": language})
+                self._overlay_language = language
             self.overlay.send(message)
+
+    def _sync_overlay_language(self) -> None:
+        """Tell a pill that is already on screen about a language changed elsewhere."""
+        if self.overlay is None:
+            return
+        language = str(self.config.get("general.language", "en") or "en")
+        if language != self._overlay_language:
+            self.overlay.send({"language": language})
+            self._overlay_language = language
 
     def _make_listener(self):
         """The hotkey listener plus the name of the backend it represents.
@@ -400,6 +429,7 @@ class Daemon:
         self.dictation.set_injector(self.injector)
         self.tray.set_profiles(list(self.config.get("stt.profiles", {}) or {}), self.config.get("stt.active"))
         self.tray.set_languages(self.config.languages(), self.config.get("general.language"))
+        self._sync_overlay_language()
 
     def _set_profile(self, name: str) -> None:
         """Qt thread: persist the profile switch, then apply it."""
@@ -433,9 +463,8 @@ class Daemon:
             log.exception("could not save the language switch")
             self._notifier.notify("Could not save settings", str(exc), "critical")
             return
-        self.apply_config()
+        self.apply_config()             # sends the new badge (_sync_overlay_language)
         if self.overlay is not None:
-            self.overlay.send({"language": code})
             self.overlay.send({"state": "notice",
                                "text": f"{previous.upper()} \u2192 {code.upper()}"})
 

@@ -824,3 +824,50 @@ def test_two_toggles_before_the_qt_thread_drains_are_two_steps(isolated_xdg, qap
     assert d.config.get("general.language") == "auto"  # two presses, two steps
     assert Config.load().get("general.language") == "auto"
     d.shutdown()
+
+
+def test_a_language_changed_outside_a_recording_still_reaches_the_pill(
+        isolated_xdg, qapp, monkeypatch, helper_processes):
+    """The settings dialog writes the file and the daemon reloads it. The badge
+    was only ever sent with `recording`, so a retry or a recall drew the old one."""
+    from voice.pipeline import State
+
+    d = _overlay_daemon(Config.load(), monkeypatch, helper_processes)
+    external = Config.load()
+    external.set("general.language", "sv")
+    external.save()
+
+    d.apply_config()                                   # what the dialog's `saved` does
+    d.dictation.on_state(State.TRANSCRIBING, "retry")
+    assert _overlay_lines(d, helper_processes) == [
+        {"language": "sv"}, {"state": "transcribing"}]
+    d.shutdown()
+
+
+def test_the_recall_path_shows_the_current_language_too(isolated_xdg, qapp, monkeypatch,
+                                                        helper_processes):
+    from voice.pipeline import State
+
+    cfg = Config.load()
+    d = _overlay_daemon(cfg, monkeypatch, helper_processes)
+    cfg.set("general.language", "sv")
+    cfg.save()
+    d.apply_config()
+    d.dictation.on_state(State.INJECTING, "recall")
+    d.dictation.on_state(State.IDLE, "9 chars via portal in 0.0s")
+    assert _overlay_lines(d, helper_processes) == [{"language": "sv"}, {"state": "done"}]
+    d.shutdown()
+
+
+def test_the_language_is_not_repeated_while_it_stays_the_same(isolated_xdg, qapp, monkeypatch,
+                                                              helper_processes):
+    """The helper is started with --lang, so a badge it already shows is noise."""
+    from voice.pipeline import State
+
+    d = _overlay_daemon(Config.load(), monkeypatch, helper_processes)
+    d.apply_config()
+    d.dictation.on_state(State.TRANSCRIBING, "retry")
+    d.dictation.on_state(State.IDLE, "4 chars via portal in 0.1s")
+    assert _overlay_lines(d, helper_processes) == [
+        {"state": "transcribing"}, {"state": "done"}]
+    d.shutdown()

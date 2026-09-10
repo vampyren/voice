@@ -34,7 +34,11 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("voice settings")
         self.setMinimumWidth(560)
-        self._cfg, self._capture_key, self._sources = config, capture_key, sources
+        # The dialog edits a private Config loaded from the same file: Close simply
+        # discards it, and the daemon's live Config is never mutated from here.
+        # Save writes to disk and emits `saved`; the daemon reloads from disk.
+        self._cfg = Config.load(config.path)
+        self._capture_key, self._sources = capture_key, sources
         self._current_profile: str | None = None
         self._captured.connect(self._on_captured)
         tabs = QTabWidget()
@@ -58,6 +62,14 @@ class SettingsDialog(QDialog):
         layout.addWidget(tabs)
         layout.addWidget(self.error_label)
         layout.addLayout(buttons)
+        self._load()
+
+    def reload_from_disk(self) -> None:
+        """Re-read the file and repopulate every widget, discarding unsaved edits."""
+        self._cfg = Config.load(self._cfg.path)
+        self._current_profile = None       # so repopulating cannot commit stale form values
+        self.profile_form = {}
+        self.error_label.setText("")
         self._load()
 
     # -- tabs -----------------------------------------------------------------

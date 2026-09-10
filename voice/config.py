@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -79,9 +81,13 @@ _VALID_BACKENDS = {"local", "openai_compatible"}
 
 
 class Config:
+    """A config file. Every accessor is serialised: the Qt thread, the IPC handler
+    and the pipeline worker all reach the same instance."""
+
     def __init__(self, path: Path, doc: tomlkit.TOMLDocument):
         self.path = path
         self._doc = doc
+        self._lock = threading.RLock()
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -96,35 +102,56 @@ class Config:
         return cls(path, doc)
 
     def reload(self) -> None:
-        self._doc = Config.load(self.path)._doc
+        doc = Config.load(self.path)._doc          # parse before taking the lock
+        with self._lock:
+            self._doc = doc
 
     def get(self, dotted: str, default: Any = None) -> Any:
-        node: Any = self._doc
-        for part in dotted.split("."):
-            if not isinstance(node, dict) or part not in node:
-                return default
-            node = node[part]
-        return _plain(node)
+        with self._lock:
+            node: Any = self._doc
+            for part in dotted.split("."):
+                if not isinstance(node, dict) or part not in node:
+                    return default
+                node = node[part]
+            return _plain(node)
 
     def set(self, dotted: str, value: Any) -> None:
-        *parents, leaf = dotted.split(".")
-        node: Any = self._doc
-        for part in parents:
-            if part not in node:
-                node[part] = tomlkit.table()
-            node = node[part]
-        node[leaf] = value
+        with self._lock:
+            *parents, leaf = dotted.split(".")
+            node: Any = self._doc
+            for part in parents:
+                if part not in node:
+                    node[part] = tomlkit.table()
+                node = node[part]
+            node[leaf] = value
 
     def save(self) -> None:
-        self.path.write_text(tomlkit.dumps(self._doc))
-        self.path.chmod(0o600)
+        """Write via a private temp file in the same directory, then os.replace.
+
+        A crash or a full disk part-way through must never leave a truncated
+        config.toml: the next start would refuse to parse it.
+        """
+        with self._lock:
+            data = tomlkit.dumps(self._doc).encode()
+            fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}.", suffix=".tmp")
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(data)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, self.path)
+            except BaseException:
+                Path(tmp).unlink(missing_ok=True)
+                raise
 
     def stt_profile(self) -> tuple[str, dict]:
-        name = self.get("stt.active", "local")
-        profile = self.get(f"stt.profiles.{name}")
-        if not isinstance(profile, dict):
-            raise ValueError(f"stt.active refers to unknown profile '{name}'")
-        return name, profile
+        with self._lock:
+            name = self.get("stt.active", "local")
+            profile = self.get(f"stt.profiles.{name}")
+            if not isinstance(profile, dict):
+                raise ValueError(f"stt.active refers to unknown profile '{name}'")
+            return name, profile
 
     @staticmethod
     def secret(profile: dict) -> str | None:
@@ -134,6 +161,10 @@ class Config:
         return os.environ.get(env) if env else None
 
     def errors(self) -> list[str]:
+        with self._lock:
+            return self._errors()
+
+    def _errors(self) -> list[str]:
         errs: list[str] = []
         mode = self.get("hotkeys.dictate_mode")
         if mode not in _VALID_MODES:

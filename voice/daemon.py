@@ -64,8 +64,15 @@ class _BrokenTranscriber:
 
 
 class _Bridge(QObject):
+    """Hops work from the IPC thread onto the Qt thread.
+
+    Everything reachable from `handle` that mutates state, touches the config file
+    or drives Tray's QMenu/QAction must travel through one of these signals.
+    """
+
     open_settings = Signal()
     apply_config = Signal()
+    set_profile = Signal(str)
     quit = Signal()
 
 
@@ -102,6 +109,7 @@ class Daemon:
         self.tray.set_profiles(list(self.config.get("stt.profiles", {}) or {}), self.config.get("stt.active"))
         self._bridge.open_settings.connect(self.open_settings)
         self._bridge.apply_config.connect(self.apply_config)
+        self._bridge.set_profile.connect(self._set_profile)
         self._bridge.quit.connect(self._quit)
         self._server = Server(self.handle)
 
@@ -218,6 +226,17 @@ class Daemon:
         self.dictation.set_injector(self.injector)
         self.tray.set_profiles(list(self.config.get("stt.profiles", {}) or {}), self.config.get("stt.active"))
 
+    def _set_profile(self, name: str) -> None:
+        """Qt thread: persist the profile switch, then apply it."""
+        try:
+            self.config.set("stt.active", name)
+            self.config.save()
+        except Exception as exc:
+            log.exception("could not save the profile switch")
+            self._notifier.notify("Could not save settings", str(exc), "critical")
+            return
+        self.apply_config()
+
     # -- events ---------------------------------------------------------------
     def _on_hotkey(self, name: str, kind: str) -> None:
         self.dictation.on_hotkey(name, kind)
@@ -229,9 +248,18 @@ class Daemon:
             self.handle({"cmd": action})
 
     def open_settings(self) -> None:
-        if self._settings is None:
-            self._settings = SettingsDialog(self.config, self.listener.capture_next, list_sources)
-            self._settings.saved.connect(self.apply_config)
+        try:
+            if self._settings is None:
+                self._settings = SettingsDialog(self.config, self.listener.capture_next, list_sources)
+                self._settings.saved.connect(self.apply_config)
+            else:
+                # The dialog holds its own Config; refresh it so a reopen shows what
+                # is actually in force rather than edits abandoned last time.
+                self._settings.reload_from_disk()
+        except ValueError as exc:
+            log.warning("cannot open settings: %s", exc)
+            self._notifier.notify("Config error", str(exc), "critical")
+            return
         self._settings.show()
         self._settings.raise_()
         self._settings.activateWindow()
@@ -260,9 +288,9 @@ class Daemon:
             name = request.get("name", "")
             if name not in (self.config.get("stt.profiles", {}) or {}):
                 return {"ok": False, "error": f"unknown profile '{name}'"}
-            self.config.set("stt.active", name)
-            self.config.save()
-            self._bridge.apply_config.emit()
+            # Validated here, but mutated and saved on the Qt thread: writing the
+            # config file from the IPC thread races the settings dialog.
+            self._bridge.set_profile.emit(name)
             return {"ok": True, "profile": name}
         if cmd == "reload":
             self._bridge.apply_config.emit()

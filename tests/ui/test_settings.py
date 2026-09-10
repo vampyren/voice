@@ -81,3 +81,47 @@ def test_add_profile_from_template_and_replacements_roundtrip(qapp):
     again = Config.load()
     assert again.get("stt.profiles.mistral.backend") == "openai_compatible"
     assert again.get("dictionary.replacements") == [["obs bot", "OBSBOT", "icase"]]
+
+
+def test_close_discards_edits_and_never_touches_the_callers_config(qapp):
+    # The dialog edits a private Config loaded from the same file, so the daemon's
+    # live Config keeps serving the settings that are actually in force.
+    cfg, dlg, _ = make(qapp)
+    dlg.hotkey_edit.setText("KEY_RIGHTCTRL")
+    dlg.mode_combo.setCurrentText("toggle")
+    dlg.close()
+    assert cfg.get("hotkeys.dictate") == "KEY_F13"
+    assert cfg.get("hotkeys.dictate_mode") == "hold"
+    assert Config.load().get("hotkeys.dictate") == "KEY_F13"
+
+
+def test_profile_edits_do_not_leak_into_the_callers_config_before_save(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.profile_list.setCurrentRow(1)                     # openai
+    dlg.profile_form["model"].setText("gpt-4o-mini-transcribe")
+    dlg.add_profile_combo.setCurrentText("mistral")
+    dlg.add_profile_button.click()
+    assert cfg.get("stt.profiles.mistral") is None
+    assert cfg.get("stt.profiles.openai.model") == "gpt-transcribe"
+
+
+def test_reload_from_disk_repopulates_the_widgets(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.hotkey_edit.setText("KEY_RIGHTCTRL")
+    dlg.add_profile_combo.setCurrentText("mistral")
+    dlg.add_profile_button.click()
+    dlg.close()
+
+    dlg.reload_from_disk()                                # what reopening does
+    assert dlg.hotkey_edit.text() == "KEY_F13"
+    assert [dlg.profile_list.item(i).text() for i in range(dlg.profile_list.count())] == \
+        ["local", "openai", "groq", "openrouter"]
+
+
+def test_save_writes_to_disk_and_the_caller_config_sees_it_after_reload(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.hotkey_edit.setText("KEY_RIGHTCTRL")
+    dlg.save_button.click()
+    assert cfg.get("hotkeys.dictate") == "KEY_F13"        # still the old live value
+    cfg.reload()                                          # what Daemon.apply_config does
+    assert cfg.get("hotkeys.dictate") == "KEY_RIGHTCTRL"

@@ -101,8 +101,8 @@ def test_apply_config_rebinds_hotkeys(isolated_xdg, qapp, monkeypatch):
 
 
 def test_profile_command_applies_config_only_on_qt_thread(isolated_xdg, qapp, monkeypatch):
-    """`profile`/`reload` must save synchronously but defer apply_config() to the Qt thread
-    (it touches Tray's QMenu/QAction), via _Bridge.apply_config."""
+    """`profile`/`reload` validate on the IPC thread but must defer every mutation -
+    set, save and apply_config - to the Qt thread via _Bridge."""
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
         "name": p["backend"], "describe": lambda self: p.get("model", ""), "warmup": lambda self: None})())
     cfg = Config.load()
@@ -119,10 +119,11 @@ def test_profile_command_applies_config_only_on_qt_thread(isolated_xdg, qapp, mo
     t.start()
     t.join(timeout=2)
     assert result["reply"] == {"ok": True, "profile": "openai"}
-    assert Config.load().get("stt.active") == "openai"    # validated + saved synchronously
-    assert tray.calls == []                                # apply_config not yet run on the Qt thread
+    assert Config.load().get("stt.active") == "local"      # validated only; not yet written
+    assert tray.calls == []                                # nothing applied on the IPC thread
     qapp.processEvents()
-    assert tray.calls and tray.calls[-1][1] == "openai"    # now applied, on this (Qt) thread
+    assert Config.load().get("stt.active") == "openai"     # set + saved on the Qt thread
+    assert tray.calls and tray.calls[-1][1] == "openai"    # and applied there too
     d.shutdown()
 
 
@@ -363,4 +364,24 @@ def test_warmup_does_not_occupy_the_dictation_worker(isolated_xdg, qapp, monkeyp
         assert not release.is_set()
     finally:
         release.set()
+    d.shutdown()
+
+
+def test_open_settings_refreshes_the_reused_dialog(isolated_xdg, qapp, monkeypatch):
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray())
+    d.build()
+
+    d.open_settings()
+    dialog = d._settings
+    dialog.hotkey_edit.setText("KEY_RIGHTCTRL")     # edited, then abandoned
+    dialog.close()
+
+    d.open_settings()
+    assert d._settings is dialog                    # same dialog instance
+    assert dialog.hotkey_edit.text() == "KEY_F13"   # showing what is actually in force
+    assert d.config.get("hotkeys.dictate") == "KEY_F13"
+    dialog.close()
     d.shutdown()

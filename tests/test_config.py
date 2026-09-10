@@ -77,3 +77,59 @@ def test_errors_reports_unparseable_paste_chords(isolated_xdg):
 
 def test_errors_accepts_the_default_chords(isolated_xdg):
     assert [e for e in Config.load().errors() if "chord" in e] == []
+
+
+def test_save_is_atomic_and_leaves_no_temp_file(isolated_xdg):
+    cfg = Config.load()
+    cfg.set("general.language", "sv")
+    cfg.save()
+    assert stat.S_IMODE(cfg.path.stat().st_mode) == 0o600
+    assert sorted(p.name for p in cfg.path.parent.iterdir()) == [cfg.path.name]
+    assert Config.load().get("general.language") == "sv"
+
+
+def test_a_failed_save_leaves_the_previous_file_intact(isolated_xdg, monkeypatch):
+    import voice.config as config_mod
+
+    cfg = Config.load()
+    original = cfg.path.read_text()
+    cfg.set("general.language", "sv")
+
+    def boom(*a, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(config_mod.os, "replace", boom)
+    with pytest.raises(OSError):
+        cfg.save()
+    assert cfg.path.read_text() == original                       # never half-written
+    assert sorted(p.name for p in cfg.path.parent.iterdir()) == [cfg.path.name]
+
+
+def test_config_accessors_are_serialised(isolated_xdg, monkeypatch):
+    # The settings dialog (Qt thread), the IPC handler and the pipeline worker all
+    # reach the same Config; a read must not observe a half-applied write.
+    import threading
+
+    import voice.config as config_mod
+
+    entered, release, read_done = threading.Event(), threading.Event(), threading.Event()
+    cfg = Config.load()
+    real_dumps = config_mod.tomlkit.dumps
+
+    def slow_dumps(doc):
+        entered.set()
+        release.wait(5)
+        return real_dumps(doc)
+
+    monkeypatch.setattr(config_mod.tomlkit, "dumps", slow_dumps)
+    saver = threading.Thread(target=cfg.save, daemon=True)
+    saver.start()
+    assert entered.wait(2)
+
+    reader = threading.Thread(target=lambda: (cfg.get("general.language"), read_done.set()), daemon=True)
+    reader.start()
+    assert not read_done.wait(0.3)      # blocked behind the in-flight save
+    release.set()
+    assert read_done.wait(2)
+    saver.join(2)
+    reader.join(2)

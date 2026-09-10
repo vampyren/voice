@@ -23,6 +23,8 @@ PROFILE_TEMPLATES: dict[str, dict] = {
 _LOCAL_FIELDS = ["model", "device", "compute_type", "beam_size", "prompt"]
 _CLOUD_FIELDS = ["base_url", "model", "api_key", "api_key_env", "prompt"]
 _LANGUAGES = [("English", "en"), ("Swedish", "sv"), ("Auto-detect", "auto")]
+#: The "leave stt.active alone for this language" row of the profile table.
+KEEP_CURRENT = "(keep current)"
 #: The portal shortcuts, in the order they are shown, with their labels.
 PORTAL_TRIGGERS = [("dictate", "Dictate"), ("recall", "Recall last"),
                    ("cancel", "Cancel recording"), ("language_toggle", "Switch language")]
@@ -101,8 +103,17 @@ class SettingsDialog(QDialog):
         self.language_combo.currentIndexChanged.connect(self._on_language_picked)
         self.notifications_combo = QComboBox()
         self.notifications_combo.addItems(["on", "off"])
+        self.language_profile_table = QTableWidget(0, 2)
+        self.language_profile_table.setHorizontalHeaderLabels(["Language", "Profile"])
+        self.language_profile_table.horizontalHeader().setStretchLastSection(True)
+        self.language_profile_table.verticalHeader().setVisible(False)
+        self.language_profile_combos: dict[str, QComboBox] = {}
+        hint = QLabel("Switching to one of these languages also activates its profile.")
+        hint.setWordWrap(True)
         form.addRow("Language", self.language_combo)
         form.addRow("Notifications", self.notifications_combo)
+        form.addRow("Profile per language", self.language_profile_table)
+        form.addRow(hint)
         return w
 
     def _hotkeys_tab(self) -> QWidget:
@@ -216,7 +227,34 @@ class SettingsDialog(QDialog):
         self.replacements_table.setRowCount(len(rules))
         for i, rule in enumerate(rules):
             self.set_replacement_row(i, *(list(rule) + ["", "", ""])[:3])
+        self._load_language_profiles()
         self._language_changed = False     # populating the combo is not a user edit
+
+    def _load_language_profiles(self) -> None:
+        """One row per general.languages entry, each with the profiles that exist."""
+        mapping = self._cfg.language_profiles()
+        profiles = list(self._cfg.get("stt.profiles", {}) or {})
+        codes = self._cfg.languages()
+        table = self.language_profile_table
+        self.language_profile_combos = {}
+        table.setRowCount(len(codes))
+        for row, code in enumerate(codes):
+            item = QTableWidgetItem(code)
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            table.setItem(row, 0, item)
+            combo = QComboBox()
+            combo.addItem(KEEP_CURRENT, "")
+            for name in profiles:
+                combo.addItem(name, name)
+            # A map naming a profile that no longer exists falls back to
+            # "(keep current)" rather than offering something unbuildable.
+            combo.setCurrentIndex(max(0, combo.findData(mapping.get(code.lower(), ""))))
+            table.setCellWidget(row, 1, combo)
+            self.language_profile_combos[code] = combo
+        # Exactly as tall as its rows: a fixed height leaves either dead space
+        # under two languages or a scrollbar under four.
+        rows = sum(table.rowHeight(r) for r in range(table.rowCount()))
+        table.setFixedHeight(table.horizontalHeader().height() + rows + 2 * table.frameWidth())
 
     def _on_language_picked(self, index: int) -> None:
         self._language_changed = True
@@ -333,6 +371,30 @@ class SettingsDialog(QDialog):
             self.language_combo.setCurrentIndex(index)   # show what was really saved
         self._language_changed = False         # that was us, not the user
 
+    def _save_language_profiles(self) -> None:
+        """Write the map, then apply it when the language was picked here.
+
+        The table is only written when it says something, or when the file
+        already had a map: an owner who ignores the feature keeps the commented
+        example the default config ships.
+        """
+        mapping = {code.strip().lower(): combo.currentData()
+                   for code, combo in self.language_profile_combos.items() if combo.currentData()}
+        if mapping or (self._cfg.get("general.language_profiles") or {}):
+            self._cfg.set("general.language_profiles", mapping)
+        if not self._language_changed or self._active_changed:
+            # Nothing to follow (the language came from the file or elsewhere),
+            # or "Use this profile" was pressed and that choice wins.
+            return
+        name = mapping.get(str(self.language_combo.currentData()).strip().lower())
+        if not name or name not in (self._cfg.get("stt.profiles", {}) or {}):
+            return
+        self._cfg.set("stt.active", name)
+        self.active_label.setText(f"Active profile: {name}")
+        # This dialog decided the active profile, so the on-disk value must not
+        # be carried back over it in _carry_over_external_edits.
+        self._active_changed = True
+
     def _save(self) -> None:
         c = self._cfg
         for field, edit in (("hotkeys.dictate", self.hotkey_edit), ("hotkeys.recall", self.recall_edit), ("hotkeys.cancel", self.cancel_edit)):
@@ -358,6 +420,7 @@ class SettingsDialog(QDialog):
             if src:
                 rules.append([src, dst, flags] if flags else [src, dst])
         c.set("dictionary.replacements", rules)
+        self._save_language_profiles()
         if not self._carry_over_external_edits():
             return
         errs = c.errors()

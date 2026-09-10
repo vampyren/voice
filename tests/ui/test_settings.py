@@ -273,3 +273,81 @@ def test_an_empty_portal_dictate_trigger_is_refused(qapp):
     dlg.save_button.click()
     assert "portal_dictate" in dlg.error_label.text()
     assert Config.load().get("hotkeys.portal_dictate") == "CTRL+space"
+
+
+# -- a profile per language -----------------------------------------------------
+def _with_map(mapping: dict, **settings) -> None:
+    external = Config.load()
+    external.set("general.language_profiles", mapping)
+    for key, value in settings.items():
+        external.set(key.replace("__", "."), value)
+    external.save()
+
+
+def test_the_general_tab_lists_one_profile_row_per_language(qapp):
+    cfg, dlg, _ = make(qapp)
+    table = dlg.language_profile_table
+    assert [table.item(r, 0).text() for r in range(table.rowCount())] == ["en", "sv"]
+    combo = dlg.language_profile_combos["sv"]
+    assert [combo.itemText(i) for i in range(combo.count())] == [
+        "(keep current)", "local", "openai", "groq", "openrouter"]
+    assert combo.currentData() == ""            # a shipped config maps nothing
+
+
+def test_the_table_shows_a_map_that_is_already_configured(qapp):
+    _with_map({"sv": "openai"})
+    cfg, dlg, _ = make(qapp)
+    assert dlg.language_profile_combos["sv"].currentData() == "openai"
+    assert dlg.language_profile_combos["en"].currentData() == ""
+
+
+def test_saving_writes_the_map_and_omits_the_kept_rows(qapp):
+    cfg, dlg, _ = make(qapp)
+    combo = dlg.language_profile_combos["sv"]
+    combo.setCurrentIndex(combo.findData("openai"))
+    dlg.save_button.click()
+    again = Config.load()
+    assert again.get("general.language_profiles") == {"sv": "openai"}
+    assert again.errors() == []
+
+
+def test_saving_an_empty_map_keeps_the_commented_example(qapp):
+    """Nobody who ignores this feature should lose the hint that explains it."""
+    cfg, dlg, _ = make(qapp)
+    dlg.save_button.click()
+    again = Config.load()
+    assert again.get("general.language_profiles") == {}
+    assert '# sv = "local-swedish"' in again.path.read_text()
+
+
+def test_picking_a_language_here_activates_its_mapped_profile(qapp):
+    _with_map({"sv": "openai"})
+    cfg, dlg, _ = make(qapp)
+    dlg.language_combo.setCurrentIndex(dlg.language_combo.findData("sv"))
+    dlg.save_button.click()
+    again = Config.load()
+    assert again.get("general.language") == "sv"
+    assert again.get("stt.active") == "openai"
+    assert dlg.active_label.text() == "Active profile: openai"
+
+
+def test_a_language_nobody_touched_here_does_not_move_the_profile(qapp):
+    """Save must not re-apply the map to a language this dialog did not change:
+    the owner may have picked another profile by hand since."""
+    _with_map({"sv": "openai"}, general__language="sv", stt__active="groq")
+    cfg, dlg, _ = make(qapp)
+    dlg.hotkey_edit.setText("KEY_RIGHTCTRL")
+    dlg.save_button.click()
+    assert Config.load().get("stt.active") == "groq"
+
+
+def test_use_this_profile_wins_over_the_map(qapp):
+    _with_map({"sv": "openai"})
+    cfg, dlg, _ = make(qapp)
+    dlg.profile_list.setCurrentRow(2)                  # groq
+    dlg.activate_button.click()
+    dlg.language_combo.setCurrentIndex(dlg.language_combo.findData("sv"))
+    dlg.save_button.click()
+    again = Config.load()
+    assert again.get("general.language") == "sv"
+    assert again.get("stt.active") == "groq"           # the explicit choice stands

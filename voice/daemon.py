@@ -30,6 +30,8 @@ from voice.stt.base import TranscriptionError
 from voice.ui.notify import Notifier
 from voice.ui.overlay_client import (OverlayClient, cached_probe, default_launcher,
                                      pill_takes_focus)
+from voice.ui.placement import (LEGACY_POSITIONS, POSITIONS, is_margin,
+                                 normalise_position)
 from voice.ui.settings import SettingsDialog
 from voice.ui.tray import Tray
 
@@ -155,6 +157,31 @@ CLIPBOARD_METHODS = ("clipboard", "clipboard-only", "clipboard-pill")
 #: What the pill says instead. Short: it is drawn inside the 132 px well.
 DONE_COPIED = "Copied · Ctrl+V"
 
+#: How long the settings window's placement preview stays on screen. The
+#: owner's own number: "show the position on the desktop for say 5 sec".
+PREVIEW_SECONDS = 5.0
+#: Something for the preview's waveform to show, so it reads as the real pill
+#: rather than a flat capsule. One burst: the helper's model decays it.
+PREVIEW_LEVELS = (0.2, 0.55, 0.35, 0.8, 0.45, 0.7, 0.3)
+
+
+def _single_shot(seconds: float, done: Callable[[], None]):
+    """A Qt timer that calls `done` once, on the Qt thread. Cancellable.
+
+    Built here rather than with QTimer.singleShot so the preview can be ended
+    early - a real dictation must not be interrupted five seconds later by a
+    timer belonging to a pill that is no longer on screen.
+    """
+    from PySide6.QtCore import QTimer
+
+    timer = QTimer()
+    timer.setSingleShot(True)
+    timer.timeout.connect(done)
+    timer.start(int(seconds * 1000))
+    # The QTimer itself is kept by the closure: dropped, it is garbage collected
+    # and never fires. `cancel` is the one thing the daemon asks of it.
+    return type("_SingleShot", (), {"cancel": lambda self: timer.stop()})()
+
 
 def overlay_messages(state: State, detail: str, language: str) -> list[dict]:
     """The pill protocol for one pipeline transition, in order.
@@ -230,12 +257,16 @@ class _Bridge(QObject):
     triggers_refreshed = Signal()
     sources_listed = Signal(object)
     layer_shell_probed = Signal(object)
+    preview_pill = Signal(str, int, int)
 
 
 class Daemon:
     def __init__(self, config: Config, *, listener=None, recorder=None, clipboard=None, sender=None,
-                 notifier=None, tray=None):
+                 notifier=None, tray=None, preview_timer=None):
         self.config = config
+        #: What ends a pill preview after PREVIEW_SECONDS. A Qt single shot in
+        #: the daemon; tests hand in a clock they can fire themselves.
+        self._preview_timer_factory = preview_timer or _single_shot
         self._listener_override = listener
         # The pill is built in build(); the recorder is not, so it forwards
         # levels through this daemon rather than holding the client itself.
@@ -270,6 +301,9 @@ class Daemon:
         #: Set by rebind_hotkeys(): the desktop's own shortcut store moved under
         #: us, which no config snapshot can see. Cleared by the rebind it asks for.
         self._force_rebind = False
+        #: The countdown that ends the pill preview, while one is on screen.
+        #: Not None is exactly "a preview is showing"; see _preview_pill.
+        self._preview: object | None = None
         self._bridge = _Bridge()
 
     # -- construction -------------------------------------------------------
@@ -299,6 +333,7 @@ class Daemon:
         self._bridge.triggers_refreshed.connect(self._on_triggers_refreshed)
         self._bridge.sources_listed.connect(self._on_sources_listed)
         self._bridge.layer_shell_probed.connect(self._on_layer_shell_probed)
+        self._bridge.preview_pill.connect(self._preview_pill)
         self._server = Server(self.handle)
 
     def _make_injector(self) -> Injector:
@@ -344,6 +379,63 @@ class Daemon:
             position=position, margin_x=margin_x, margin_y=margin_y,
             lang=self._overlay_language, verbose=verbose, allow_fallback=allow_fallback))
 
+    def _preview_pill(self, position: str, margin_x: int, margin_y: int) -> None:
+        """Qt thread: show the real pill at `position` for a few seconds.
+
+        The helper is told its placement on its command line - a layer surface
+        has anchors, and they are set when the surface is created - so showing
+        a placement means running a helper at it. The live one is stopped, a
+        preview one takes its place, and `_end_pill_preview` puts the first
+        back. Nothing here touches the pipeline: no recording is started, no
+        history entry is written, and the dictation state machine never hears
+        about it. It is a picture of a pill, not a dictation.
+        """
+        self._end_pill_preview()               # a second nudge replaces the first
+        if self.overlay is not None:
+            self.overlay.stop()
+        language = str(self.config.get("general.language", "en") or "en")
+        self.overlay = self._make_preview_overlay(position, margin_x, margin_y, language)
+        self.overlay.start()
+        self.overlay.send({"language": language})
+        self.overlay.send({"state": "recording"})
+        for level in PREVIEW_LEVELS:
+            self.overlay.send({"level": level})
+        self._preview = self._preview_timer_factory(PREVIEW_SECONDS, self._end_pill_preview)
+
+    def _make_preview_overlay(self, position: str, margin_x: int, margin_y: int,
+                              language: str) -> OverlayClient:
+        """A helper at one placement, for the preview only.
+
+        Deliberately not `_make_overlay`: that one reads the config and records
+        what it started the helper with, and a preview must leave both alone -
+        the placement being tried has not been saved, and may never be.
+        """
+        verbose = log.isEnabledFor(logging.DEBUG)
+        allow_fallback = bool(self.config.get("ui.overlay_allow_fallback", False))
+        self._overlay_language = language
+        return OverlayClient(True, launcher=lambda: default_launcher(
+            position=position, margin_x=margin_x, margin_y=margin_y, lang=language,
+            verbose=verbose, allow_fallback=allow_fallback))
+
+    def _end_pill_preview(self) -> None:
+        """Take the preview off the screen and give the real pill its helper back.
+
+        Safe to call when no preview is showing, which is what makes it usable
+        as both the timer's callback and the "a real dictation started" guard.
+        """
+        timer, self._preview = self._preview, None
+        if timer is None:
+            return
+        cancel = getattr(timer, "cancel", None)
+        if cancel is not None:
+            cancel()                           # a dictation ended it early
+        if self.overlay is not None:
+            self.overlay.send({"state": "hidden"})
+            self.overlay.flush(OVERLAY_HIDE_FLUSH_S)
+            self.overlay.stop()
+        self.overlay = self._make_overlay()
+        self.overlay.start()
+
     def _overlay_snapshot(self) -> tuple:
         """Everything _make_overlay bakes into the helper's command line.
 
@@ -372,6 +464,11 @@ class Daemon:
         The tray comes first and by signal, as before; the pill is decoration
         and its client swallows every failure, so neither can delay the other.
         """
+        # A preview showing while a real recording starts would be taken for the
+        # recording itself - and it is a helper at the wrong placement, on a
+        # client the pipeline's messages are not meant for.
+        if self._preview is not None and state is not State.IDLE:
+            self._end_pill_preview()
         self.tray.state_changed.emit(state.value, detail)
         if self.overlay is None:
             return
@@ -924,7 +1021,8 @@ class Daemon:
                                                 lambda cb: self.listener.capture_next(cb),
                                                 lambda: list(self._source_cache),
                                                 backend=self.hotkey_backend,
-                                                triggers=self.effective_triggers)
+                                                triggers=self.effective_triggers,
+                                                preview_pill=self._ask_for_preview)
                 self._settings.saved.connect(self.apply_config)
                 # Emitted before `saved`, so the rebind it asks for happens in
                 # the same apply_config as the rest of the save.
@@ -947,10 +1045,47 @@ class Daemon:
         # correct it in place a moment later. See _refresh_settings_inputs.
         self._refresh_settings_inputs()
 
+    def _ask_for_preview(self, position: str, margin_x: int, margin_y: int) -> dict:
+        """What the settings window calls when the pill is dropped or nudged.
+
+        Straight through `handle`, exactly as the tray does: one path into the
+        preview, validated in one place, whether it is asked for from the window
+        or over the socket.
+        """
+        return self.handle({"cmd": "preview_pill", "position": position,
+                            "margin_x": int(margin_x), "margin_y": int(margin_y)})
+
     def _quit(self) -> None:
         app = QApplication.instance()
         if app:
             app.quit()
+
+    def _handle_preview_pill(self, request: dict) -> dict:
+        """`preview_pill`: show the real pill at a placement for a few seconds.
+
+        Validated here, on whichever thread asked, and applied on the Qt thread
+        - the same rule as `profile` and `language`, because it starts and stops
+        helper processes. Refused rather than queued when there is no pill to
+        show or a dictation is using it: a preview must never be mistaken for
+        the recording, and must never take the recording's pill off screen.
+        """
+        position = request.get("position")
+        if not isinstance(position, str) or position.strip().lower() not in (
+                set(POSITIONS) | set(LEGACY_POSITIONS)):
+            return {"ok": False, "error": f"unknown pill placement {position!r}"}
+        margins = []
+        for key in ("margin_x", "margin_y"):
+            value = request.get(key)
+            if not is_margin(value):
+                return {"ok": False, "error": f"{key} must be a whole number of pixels, "
+                                              f"got {value!r}"}
+            margins.append(int(value))
+        if not self.config.get("ui.overlay", True) or self.overlay is None:
+            return {"ok": False, "error": "the recording pill is off (ui.overlay = false)"}
+        if self.dictation.state is not State.IDLE:
+            return {"ok": False, "error": "not while a dictation is running"}
+        self._bridge.preview_pill.emit(normalise_position(position), margins[0], margins[1])
+        return {"ok": True, "seconds": PREVIEW_SECONDS}
 
     # -- ipc ----------------------------------------------------------------
     def handle(self, request: dict) -> dict:
@@ -994,6 +1129,8 @@ class Daemon:
             # `profile`, because both touch the config file.
             self._bridge.set_language.emit(code)
             return {"ok": True, "language": code}
+        if cmd == "preview_pill":
+            return self._handle_preview_pill(request)
         if cmd == "reload":
             self._bridge.apply_config.emit()
             return {"ok": True}

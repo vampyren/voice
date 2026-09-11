@@ -152,6 +152,14 @@ nine anchors takes that anchor exactly; the ghosts that appear while dragging
 are where those anchors sit. Arrow keys nudge it a pixel at a time and
 Shift+arrow ten, and the placement is spelled out in words beside the preview.
 
+**And it shows you.** A moment after you drop the pill (or stop nudging it), the
+daemon puts the *real* pill on your desktop at that placement for five seconds,
+with a waveform and the language badge, then takes it away. It is only a
+picture: nothing is recorded, no history entry is written, and starting a real
+dictation ends it immediately. It needs a desktop that can place the pill at
+all — see the note under the placer — and the daemon refuses it, saying why,
+while a dictation is in flight or when `ui.overlay = false`.
+
 **The pill on screen cannot itself be dragged.** It is deliberately
 input-transparent - it never takes a click, which is also what keeps it from
 stealing focus mid-dictation - and a layer-shell surface has no position to

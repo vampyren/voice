@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from typing import Callable, Iterable
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
                                QTabWidget, QVBoxLayout, QWidget)
@@ -81,6 +81,11 @@ HOTKEY_HELP = {
         "On KDE the desktop's own dialog owns the key: use \"Open shortcut settings\". "
         "The evdev key fields below apply again if you switch hotkeys.backend to evdev."),
 }
+#: How long after the last drag or nudge the pill is shown on the desktop. Long
+#: enough that a run of arrow keys is one preview, short enough to feel immediate.
+PREVIEW_DELAY_MS = 600
+#: What the window says while the real pill is on screen at the new placement.
+PREVIEW_SHOWING = "Showing the pill there on your desktop…"
 #: The one-liner beside each backend's fields; the rest is behind the "?".
 HOTKEY_HINTS = {
     "evdev": "Type an evdev key name, or press \"Capture key\".",
@@ -137,9 +142,14 @@ class SettingsDialog(QDialog):
     def __init__(self, config: Config, capture_key: Callable[[Callable[[str], None]], None],
                  sources: Callable[[], list[Source]], parent=None, backend: str = "evdev",
                  triggers: Callable[[], dict[str, str]] | None = None,
-                 shortcut_store: Callable[[], object | None] = desktop_shortcut_store):
+                 shortcut_store: Callable[[], object | None] = desktop_shortcut_store,
+                 preview_pill: Callable[[str, int, int], dict] | None = None):
         super().__init__(parent)
         self._backend = backend
+        #: Asks the daemon to show the real pill at a placement for a few
+        #: seconds. None when nothing can show one (no daemon behind us), and
+        #: then the placer simply records the placement as it always did.
+        self._preview_pill = preview_pill
         #: Where this desktop keeps its global shortcuts, or None where it keeps
         #: them somewhere we must not touch (KDE, which has its own dialog).
         self._shortcut_store = shortcut_store
@@ -199,6 +209,8 @@ class SettingsDialog(QDialog):
         self._language_changed = False
         self._inject_mode_changed = False
         self._pill_placement_changed = False
+        self.preview_timer.stop()          # an abandoned gesture shows nothing
+        self.preview_note.setText("")
         self.profile_form = {}
         self._device_choice = None
         self.error_label.setText("")
@@ -234,9 +246,19 @@ class SettingsDialog(QDialog):
         # still recorded and still applies on a desktop that can honour it.
         self.placement_warning = _wrapped(NO_LAYER_SHELL_NOTE)
         self.placement_warning.setVisible(False)
+        #: What the preview is doing, or why it is not. Never the red label:
+        #: a preview that cannot run is not a settings error.
+        self.preview_note = _wrapped("")
+        #: One preview per gesture: a drag emits once, but arrow keys emit per
+        #: keystroke, and a helper restarted per keystroke flickers across the
+        #: screen. Every move restarts this; the pause after the last one shows.
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.timeout.connect(self._request_pill_preview)
         beside = QVBoxLayout()
         beside.addWidget(self.pill_placement_label)
         beside.addWidget(self.placement_warning)
+        beside.addWidget(self.preview_note)
         beside.addStretch()
         placement = QHBoxLayout()
         placement.addWidget(self.pill_placer)
@@ -500,6 +522,27 @@ class SettingsDialog(QDialog):
         """The owner dragged or nudged the pill in the preview."""
         self._pill_placement_changed = True
         self.pill_placement_label.setText(placement_summary(*self.pill_placer.placement()))
+        if self._preview_pill is not None:
+            self.preview_timer.start(PREVIEW_DELAY_MS)
+
+    def _request_pill_preview(self) -> None:
+        """Ask the daemon to put the real pill where the placer says, briefly.
+
+        Nothing here is a settings error: a daemon that refuses (no pill, or a
+        dictation in flight) has a reason worth reading, and a daemon that has
+        gone away is worth saying once - but neither belongs in the red label
+        beside Save, and neither may stop the placement being saved.
+        """
+        if self._preview_pill is None:
+            return
+        try:
+            reply = self._preview_pill(*self.pill_placer.placement()) or {}
+        except Exception as exc:
+            log.debug("the pill preview could not be started: %s", exc)
+            self.preview_note.setText(f"Cannot show it here: {exc}")
+            return
+        self.preview_note.setText(PREVIEW_SHOWING if reply.get("ok")
+                                  else str(reply.get("error") or "Cannot show it here."))
 
     def set_replacement_row(self, row: int, src: str, dst: str, flags: str = "") -> None:
         for col, val in enumerate((src, dst, flags)):

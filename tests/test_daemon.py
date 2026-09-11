@@ -2252,3 +2252,172 @@ def test_a_desktop_that_can_place_the_pill_gets_no_warning(isolated_xdg, qapp, m
     assert d._settings.placement_warning.isVisibleTo(d._settings) is False
     d._settings.close()
     d.shutdown()
+
+
+# -- showing the owner where the pill will land --------------------------------
+class FakePreviewTimer:
+    """Stands in for the Qt single-shot that ends the preview."""
+
+    made: list = []
+
+    def __init__(self, seconds, done):
+        self.seconds, self.done, self.cancelled = seconds, done, False
+        FakePreviewTimer.made.append(self)
+
+    def cancel(self):
+        self.cancelled = True
+
+    def fire(self):
+        self.done()
+
+
+def _preview_daemon(monkeypatch, cfg=None, **kwargs):
+    """A daemon whose helper is fake and whose preview clock is ours."""
+    from tests.conftest import FakeHelperProcess
+
+    spawns: list[dict] = []
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    made: list = []
+
+    def launcher(**kw):
+        spawns.append(kw)
+        made.append(FakeHelperProcess())
+        return made[-1]
+
+    monkeypatch.setattr("voice.daemon.default_launcher", launcher)
+    FakePreviewTimer.made = []
+    d = Daemon(cfg or Config.load(), listener=FakeListener(), sender=FakeSender(),
+               tray=FakeTray(), notifier=QuietNotifier(),
+               preview_timer=FakePreviewTimer, **kwargs)
+    d.build()
+    d.overlay.start()
+    d.helpers, d.spawns = made, spawns
+    return d
+
+
+def _lines(d, index=-1):
+    assert d.overlay.flush(2.0)
+    return d.helpers[index].lines()
+
+
+def test_the_preview_shows_the_real_pill_where_it_was_dropped(isolated_xdg, qapp, monkeypatch):
+    """The owner's "can it show the position on the desktop for say 5 sec when I
+    drop it in settings?" - the helper is restarted at the placement being tried
+    and shows a recording pill."""
+    from voice.daemon import PREVIEW_SECONDS
+
+    d = _preview_daemon(monkeypatch)
+    reply = d.handle({"cmd": "preview_pill", "position": "top-right",
+                      "margin_x": 12, "margin_y": 30})
+    assert reply["ok"] is True
+    assert d.spawns[-1]["position"] == "top-right"
+    assert (d.spawns[-1]["margin_x"], d.spawns[-1]["margin_y"]) == (12, 30)
+    states = [m for m in _lines(d) if "state" in m]
+    assert states[0] == {"state": "recording"}
+    assert any("level" in m for m in _lines(d)), "the pill has nothing to show"
+    assert FakePreviewTimer.made[-1].seconds == PREVIEW_SECONDS
+    d.shutdown()
+
+
+def test_the_preview_is_not_a_dictation(isolated_xdg, qapp, monkeypatch):
+    """No history entry, no state machine change: it is a picture, not a recording."""
+    from voice.pipeline import State
+
+    d = _preview_daemon(monkeypatch)
+    d.handle({"cmd": "preview_pill", "position": "top-left", "margin_x": 0, "margin_y": 0})
+    assert d.dictation.state is State.IDLE
+    assert d.history.last() is None
+    d.shutdown()
+
+
+def test_the_preview_hides_itself_and_puts_the_pill_back(isolated_xdg, qapp, monkeypatch):
+    d = _preview_daemon(monkeypatch)
+    d.handle({"cmd": "preview_pill", "position": "top-left", "margin_x": 4, "margin_y": 4})
+    preview_lines = _lines(d)
+    FakePreviewTimer.made[-1].fire()
+    assert preview_lines[-1] != {"state": "hidden"}      # it was still showing
+    assert d.helpers[-2].lines()[-1] == {"state": "hidden"}
+    # and the helper that is running now is back at the configured placement
+    assert d.spawns[-1]["position"] == "bottom-center"
+    assert (d.spawns[-1]["margin_x"], d.spawns[-1]["margin_y"]) == (0, 48)
+    d.shutdown()
+
+
+def test_a_real_dictation_ends_the_preview_at_once(isolated_xdg, qapp, monkeypatch):
+    """A preview left on screen would be mistaken for the recording itself."""
+    from voice.pipeline import State
+
+    d = _preview_daemon(monkeypatch)
+    d.handle({"cmd": "preview_pill", "position": "top-left", "margin_x": 0, "margin_y": 0})
+    preview = d.helpers[-1]
+    d._on_dictation_state(State.RECORDING, "")
+    assert preview.lines()[-1] == {"state": "hidden"}
+    assert FakePreviewTimer.made[-1].cancelled is True
+    assert d.spawns[-1]["position"] == "bottom-center"   # the real pill is back
+    assert _lines(d)[-1] == {"state": "recording"}       # and it is recording
+    d.shutdown()
+
+
+def test_the_preview_is_refused_when_there_is_no_pill(isolated_xdg, qapp, monkeypatch):
+    cfg = Config.load()
+    cfg.set("ui.overlay", False)
+    d = _preview_daemon(monkeypatch, cfg)
+    reply = d.handle({"cmd": "preview_pill", "position": "top-left",
+                      "margin_x": 0, "margin_y": 0})
+    assert reply["ok"] is False and "off" in reply["error"]
+    assert d.spawns == []
+    d.shutdown()
+
+
+def test_the_preview_is_refused_while_a_dictation_is_running(isolated_xdg, qapp, monkeypatch):
+    from voice.pipeline import State
+
+    d = _preview_daemon(monkeypatch)
+    d.dictation._state = State.RECORDING
+    reply = d.handle({"cmd": "preview_pill", "position": "top-left",
+                      "margin_x": 0, "margin_y": 0})
+    assert reply["ok"] is False and "dicta" in reply["error"]
+    d.dictation._state = State.IDLE
+    d.shutdown()
+
+
+def test_a_nonsense_placement_is_refused_rather_than_shown(isolated_xdg, qapp, monkeypatch):
+    d = _preview_daemon(monkeypatch)
+    before = len(d.spawns)                              # the real pill is already up
+    assert d.handle({"cmd": "preview_pill", "position": "sideways",
+                     "margin_x": 0, "margin_y": 0})["ok"] is False
+    assert d.handle({"cmd": "preview_pill", "position": "top-left",
+                     "margin_x": "x", "margin_y": 0})["ok"] is False
+    assert d.handle({"cmd": "preview_pill", "position": "top-left",
+                     "margin_x": True, "margin_y": 0})["ok"] is False
+    assert len(d.spawns) == before                      # and nothing was started
+    d.shutdown()
+
+
+def test_a_second_preview_replaces_the_first(isolated_xdg, qapp, monkeypatch):
+    """Nudging the pill repeatedly must not leave a queue of helpers behind."""
+    d = _preview_daemon(monkeypatch)
+    d.handle({"cmd": "preview_pill", "position": "top-left", "margin_x": 0, "margin_y": 0})
+    d.handle({"cmd": "preview_pill", "position": "top-right", "margin_x": 0, "margin_y": 0})
+    assert FakePreviewTimer.made[0].cancelled is True
+    assert d.spawns[-1]["position"] == "top-right"
+    FakePreviewTimer.made[-1].fire()
+    assert d.spawns[-1]["position"] == "bottom-center"
+    d.shutdown()
+
+
+def test_the_settings_window_previews_through_the_daemon(isolated_xdg, qapp, monkeypatch):
+    """The window asks over the same command the CLI would use, so there is one
+    path into the preview and one place it is validated."""
+    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    d = _preview_daemon(monkeypatch)
+    d.open_settings()
+    d._settings.pill_placer.set_placement("top-right", 10, 20)
+    d._settings.pill_placer.placement_changed.emit()
+    d._settings.preview_timer.timeout.emit()
+    assert d.spawns[-1]["position"] == "top-right"
+    assert (d.spawns[-1]["margin_x"], d.spawns[-1]["margin_y"]) == (10, 20)
+    assert "Showing" in d._settings.preview_note.text()
+    d._settings.close()
+    d.shutdown()

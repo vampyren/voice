@@ -978,3 +978,82 @@ def test_the_warning_survives_a_reload_of_the_window(qapp):
     dlg.set_layer_shell(False)
     dlg.reload_from_disk()
     assert dlg.placement_warning.isVisibleTo(dlg) is True
+
+
+# -- showing the owner where the pill would land -------------------------------
+def _previewing(qapp, reply=None, **values):
+    """A dialog whose preview requests are recorded instead of shown."""
+    asked = []
+
+    def preview(position, margin_x, margin_y):
+        asked.append((position, margin_x, margin_y))
+        return reply if reply is not None else {"ok": True, "seconds": 5.0}
+
+    cfg = Config.load()
+    for key, value in values.items():
+        cfg.set(key, value)
+    cfg.save()
+    dlg = SettingsDialog(Config.load(), capture_key=lambda cb: None, sources=lambda: [],
+                         preview_pill=preview)
+    return dlg, asked
+
+
+def test_dropping_the_pill_asks_the_daemon_to_show_it(qapp):
+    """The owner's "can it show the position on the desktop for say 5 sec when I
+    drop it in settings so I see where it would show?"."""
+    from voice.ui.settings import PREVIEW_SHOWING
+
+    dlg, asked = _previewing(qapp)
+    _drag_pill_to(dlg, "top-right", 12, 30)
+    assert asked == []                                  # not until the drag settles
+    dlg.preview_timer.timeout.emit()                    # the pause after the drop
+    assert asked == [("top-right", 12, 30)]
+    assert PREVIEW_SHOWING.split("…")[0] in dlg.preview_note.text()
+    assert dlg.error_label.text() == ""                 # it is not an error
+
+
+def test_a_run_of_nudges_asks_once(qapp):
+    """Arrow keys fire per keystroke; a helper restarted per keystroke would
+    flicker across the screen."""
+    dlg, asked = _previewing(qapp)
+    for _ in range(5):
+        _drag_pill_to(dlg, "top-left", 0, 0)
+    assert asked == []
+    assert dlg.preview_timer.isActive() is True
+    dlg.preview_timer.timeout.emit()
+    assert asked == [("top-left", 0, 0)]
+
+
+def test_merely_opening_the_window_shows_nothing(qapp):
+    dlg, asked = _previewing(qapp, **{"ui.overlay_position": "middle-left"})
+    assert asked == []
+    assert dlg.preview_timer.isActive() is False
+    dlg.reload_from_disk()
+    assert asked == []
+
+
+def test_a_refused_preview_says_why_without_alarming_anyone(qapp):
+    dlg, asked = _previewing(qapp, reply={"ok": False, "error": "not while a dictation is running"})
+    _drag_pill_to(dlg, "top-left", 0, 0)
+    dlg.preview_timer.timeout.emit()
+    assert "dictation" in dlg.preview_note.text()
+    assert dlg.error_label.text() == ""
+
+
+def test_a_window_with_no_daemon_behind_it_just_does_not_preview(qapp):
+    cfg, dlg, _ = make(qapp)                            # no preview callback at all
+    _drag_pill_to(dlg, "top-left", 0, 0)
+    assert dlg.preview_timer.isActive() is False
+    dlg.preview_timer.timeout.emit()                    # and firing it is harmless
+    assert dlg.preview_note.text() == ""
+
+
+def test_a_preview_that_blows_up_does_not_take_the_window_with_it(qapp):
+    def boom(position, margin_x, margin_y):
+        raise RuntimeError("the daemon went away")
+
+    dlg = SettingsDialog(Config.load(), capture_key=lambda cb: None, sources=lambda: [],
+                         preview_pill=boom)
+    _drag_pill_to(dlg, "top-left", 0, 0)
+    dlg.preview_timer.timeout.emit()
+    assert "went away" in dlg.preview_note.text()

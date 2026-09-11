@@ -588,3 +588,31 @@ def test_the_padding_around_the_pill_is_transparent_not_filled(tmp_path):
                if not (20 <= x < 20 + width and 476 <= y < 476 + height)]
     assert max(img(x, y)[3] for x, y in outside) == 0, "the padding must not be painted"
     assert img.count(lambda p: p[3] > 0, y0=476, y1=520) > 100, "the pill is still drawn"
+
+
+@pytest.mark.parametrize("position,window,pill_box", [
+    ("bottom-center", (271, 540), (0, 496, 271, 540)),
+    ("top-right", (960, 540), (689, 0, 960, 44)),
+    ("middle-center", (271, 44), (0, 0, 271, 44)),
+])
+def test_the_padded_window_has_the_pill_in_one_corner_of_it_and_nothing_else(
+        tmp_path, position, window, pill_box):
+    """Rendered at the geometry the helper really asks for on a 1920x1080
+    screen, and read back: everything drawn is inside the pill's rectangle, and
+    what is outside it was never painted at all."""
+    from voice.ui.overlay import padded_window
+
+    model = _model("recording")
+    width, height = natural_width(model, 44), 44
+    assert (width, height) == (271, 44), "this table is written for the 271 px pill"
+    size, origin = padded_window(position, 0, 48, (1920, 1080), (width, height))
+    assert size == window
+    img = Image(_window_png(model, tmp_path / f"{position}.png", size, (width, height), origin))
+    drawn = [(x, y) for y in range(size[1]) for x in range(size[0]) if img(x, y)[3] > 0]
+    x0, y0, x1, y1 = pill_box
+    assert (min(x for x, _ in drawn), min(y for _, y in drawn)) == (x0, y0)
+    assert (max(x for x, _ in drawn), max(y for _, y in drawn)) == (x1 - 1, y1 - 1)
+    assert all(x0 <= x < x1 and y0 <= y < y1 for x, y in drawn), "paint outside the pill"
+    # ... and the pill is a pill: opaque in the middle, rounded off at its ends.
+    assert img((x0 + x1) // 2, (y0 + y1) // 2 - 18)[3] > 200
+    assert img(x0, y0)[3] < 40 and img(x1 - 1, y1 - 1)[3] < 40

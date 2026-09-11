@@ -6,10 +6,13 @@ import shutil
 import subprocess
 from typing import Callable, Iterable
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import (QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
-                               QTabWidget, QVBoxLayout, QWidget)
+from html import escape
+
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal
+from PySide6.QtWidgets import (QComboBox, QDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+                               QLineEdit, QListWidget, QPushButton, QSizePolicy, QSpinBox,
+                               QTableWidget, QTableWidgetItem, QTabWidget, QToolButton,
+                               QToolTip, QVBoxLayout, QWidget)
 
 from voice import APP_ID
 from voice.audio.capture import Source
@@ -32,6 +35,12 @@ PROFILE_TEMPLATES: dict[str, dict] = {
     "local-swedish": {"backend": "local", "model": "KBLab/kb-whisper-large", "device": "cuda", "compute_type": "float16", "beam_size": 5, "prompt": ""},
 }
 _LOCAL_FIELDS = ["model", "device", "compute_type", "beam_size", "prompt"]
+#: The profile form reads as a form, not as a config file: the keys stay the
+#: keys (they are what is written), only what the user reads changes.
+_FIELD_LABELS = {"backend": "Backend", "base_url": "Base URL", "model": "Model",
+                 "api_key": "API key", "api_key_env": "API key variable",
+                 "prompt": "Vocabulary hint", "device": "Device",
+                 "compute_type": "Compute type", "beam_size": "Beam size"}
 _CLOUD_FIELDS = ["base_url", "model", "api_key", "api_key_env", "prompt"]
 _LANGUAGES = [("English", "en"), ("Swedish", "sv"), ("Auto-detect", "auto")]
 #: inject.mode, in the order the combo shows it; the data is the config value.
@@ -91,6 +100,51 @@ HOTKEY_HINTS = {
     "evdev": "Type an evdev key name, or press \"Capture key\".",
     "portal": "These evdev keys apply only if hotkeys.backend goes back to evdev.",
 }
+#: Behind the other "?" buttons, one paragraph each.
+HELP = {
+    "pill_position": PILL_PLACEMENT_NOTE,
+    "profile_per_language": (
+        "Switching to one of these languages also activates the profile beside it, so a "
+        "Swedish dictation uses a Swedish model without a second switch. \"(keep current)\" "
+        "leaves the profile alone. Add the profile first on the Transcription tab."),
+    "text_insertion": (
+        "\"Paste automatically\" copies the text and sends the paste chord for you. "
+        "\"Copy only\" leaves it on the clipboard and tells you to press Ctrl+V - which is "
+        "what to use on a desktop that refuses synthetic keystrokes, or where the pill would "
+        "take the keyboard."),
+    "max_seconds": ("A recording stops itself after this many seconds, so a hotkey left held "
+                    "by accident cannot record all afternoon."),
+    "profiles": ("A profile is one transcription backend and its settings - a local model, or "
+                 "a cloud API. \"Use this profile\" makes the selected one active; "
+                 "\"Add from template\" fills in a known service, and you add the API key."),
+    "dictionary": (
+        "Every replacement is applied to the text before it is inserted, in order: names and "
+        "jargon the model hears wrong, fixed once here. Flags are optional: \"icase\" matches "
+        "any capitalisation, \"regex\" treats the left column as a regular expression."),
+}
+#: The longest run of text allowed to sit on a tab. Anything above this belongs
+#: behind a "?": the window is a form, not a manual.
+MAX_INLINE_TEXT = 160
+#: The circled "?" itself, and how wide its answer is allowed to be.
+HELP_SIZE = 18
+HELP_WIDTH = 320
+HELP_STYLE = f"""
+QToolButton {{
+    border: 1px solid palette(mid); border-radius: {HELP_SIZE // 2}px;
+    color: palette(mid); font-weight: bold; padding: 0px;
+}}
+QToolButton:hover {{ border-color: palette(highlight); color: palette(highlight); }}
+"""
+#: Dim, one line, under the control it belongs to.
+DIALOG_STYLE = """
+QLabel[caption="true"] { color: palette(mid); }
+QGroupBox { font-weight: bold; margin-top: 8px; }
+QGroupBox::title { subcontrol-origin: margin; left: 2px; padding: 0 3px; }
+"""
+#: The one spacing the whole window uses, so no two tabs breathe differently.
+ROW_SPACING = 8
+COLUMN_SPACING = 12
+MARGIN = 12
 
 
 def shortcut_settings_command(which: Callable[[str], str | None] | None = None) -> list[str] | None:
@@ -120,6 +174,45 @@ def _wrapped(text: str) -> QLabel:
     label = QLabel(text)
     label.setWordWrap(True)
     return label
+
+
+def _caption(text: str = "") -> QLabel:
+    """A dim one-line note under a control. Never a paragraph - see HELP."""
+    label = _wrapped(text)
+    label.setProperty("caption", True)
+    return label
+
+
+class HelpButton(QToolButton):
+    """The circled "?" beside a control: one click, one paragraph of detail.
+
+    The tabs used to carry that paragraph inline, which is what made the window
+    read as a wall of text. The words are unchanged; they are simply not on
+    screen until they are asked for - and they are the tooltip as well, so
+    hovering answers the question without a click.
+    """
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        self.help_text = text
+        self.setText("?")
+        self.setAccessibleName("More information")
+        self.setToolTip(_as_rich(text))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.setFixedSize(HELP_SIZE, HELP_SIZE)
+        self.setStyleSheet(HELP_STYLE)
+        self.clicked.connect(self._show)
+
+    def _show(self) -> None:
+        QToolTip.showText(self.mapToGlobal(QPoint(0, self.height())), _as_rich(self.help_text),
+                          self)
+
+
+def _as_rich(text: str) -> str:
+    """Help text as the small rich-text block a tooltip will wrap for us."""
+    body = "<br><br>".join(escape(part.strip()) for part in text.split("\n\n") if part.strip())
+    return f"<div style='max-width:{HELP_WIDTH}px'>{body}</div>"
 
 
 def _spawn(command: list[str]) -> None:
@@ -178,16 +271,19 @@ class SettingsDialog(QDialog):
         self._pill_placement_changed = False  # True once the pill was moved here
         self._captured.connect(self._on_captured)
         self._desktop_answered.connect(self._on_desktop_answered)
+        #: Every circled "?" in the window, by the control it explains.
+        self.help_buttons: dict[str, HelpButton] = {}
+        self.setStyleSheet(DIALOG_STYLE)
         tabs = QTabWidget()
         tabs.addTab(self._general_tab(), "General")
         tabs.addTab(self._hotkeys_tab(), "Hotkeys")
         tabs.addTab(self._audio_tab(), "Audio")
         tabs.addTab(self._transcription_tab(), "Transcription")
         tabs.addTab(self._dictionary_tab(), "Dictionary")
-        self.error_label = QLabel()
+        self.error_label = _wrapped("")
         self.error_label.setStyleSheet("color: #e5484d")
-        self.error_label.setWordWrap(True)
         self.save_button = QPushButton("Save")
+        self.save_button.setDefault(True)
         self.save_button.clicked.connect(self._save)
         close = QPushButton("Close")
         close.clicked.connect(self.close)
@@ -196,10 +292,60 @@ class SettingsDialog(QDialog):
         buttons.addWidget(self.save_button)
         buttons.addWidget(close)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(MARGIN, MARGIN, MARGIN, MARGIN)
+        layout.setSpacing(ROW_SPACING)
         layout.addWidget(tabs)
         layout.addWidget(self.error_label)
         layout.addLayout(buttons)
         self._load()
+
+    # -- the pieces every tab is built from -----------------------------------
+    def _form(self, parent: QWidget | None = None) -> QFormLayout:
+        """One form layout, spaced and aligned like every other one here."""
+        form = QFormLayout(parent) if parent is not None else QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setHorizontalSpacing(COLUMN_SPACING)
+        form.setVerticalSpacing(ROW_SPACING)
+        form.setContentsMargins(0, 0, 0, 0)
+        return form
+
+    def _group(self, title: str, layout) -> QGroupBox:
+        """A titled box around one group of rows, so a tab reads as sections."""
+        box = QGroupBox(title)
+        box.setLayout(layout)
+        layout.setContentsMargins(MARGIN, ROW_SPACING, MARGIN, MARGIN)
+        return box
+
+    def _row(self, form: QFormLayout, label: str, field: QWidget,
+             help_key: str | None = None) -> None:
+        """One labelled row, with the circled "?" at the end where there is one."""
+        form.addRow(label, field if help_key is None
+                    else self._with_help(field, help_key, HELP[help_key]))
+
+    def _with_help(self, field: QWidget, key: str, text: str) -> QWidget:
+        """`field` with a circled "?" after it, as one widget the form can take.
+
+        The "?" ends up in the same place on every row, so the buttons read as
+        a column rather than as decoration stuck to each field.
+        """
+        button = HelpButton(text)
+        self.help_buttons[key] = button
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(COLUMN_SPACING // 2)
+        if (field.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Fixed
+                or field.minimumWidth() == field.maximumWidth()):
+            # A narrow field stays narrow and on the left; the "?" still lines
+            # up with every other one down the right of the column.
+            row.addWidget(field, 0)
+            row.addStretch(1)
+        else:
+            row.addWidget(field, 1)
+        row.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
+        return holder
 
     def reload_from_disk(self) -> None:
         """Re-read the file and repopulate every widget, discarding unsaved edits."""
@@ -219,7 +365,6 @@ class SettingsDialog(QDialog):
     # -- tabs -----------------------------------------------------------------
     def _general_tab(self) -> QWidget:
         w = QWidget()
-        form = QFormLayout(w)
         self.language_combo = QComboBox()
         for label, code in _LANGUAGES:
             self.language_combo.addItem(label, code)
@@ -240,52 +385,67 @@ class SettingsDialog(QDialog):
         # shown a placement.
         self.pill_placer = PillPlacer()
         self.pill_placer.placement_changed.connect(self._on_pill_placement_picked)
-        self.pill_placement_label = QLabel()
-        self.pill_placement_label.setWordWrap(True)
-        # Shown only where it is true, and never as an error: the placement is
-        # still recorded and still applies on a desktop that can honour it.
-        self.placement_warning = _wrapped(NO_LAYER_SHELL_NOTE)
-        self.placement_warning.setVisible(False)
-        #: What the preview is doing, or why it is not. Never the red label:
-        #: a preview that cannot run is not a settings error.
-        self.preview_note = _wrapped("")
+        # Three captions under the placement, each at most a line: what it is,
+        # whether this desktop will honour it, and what the preview is doing.
+        # None of them is an error, and none of them is a paragraph.
         #: One preview per gesture: a drag emits once, but arrow keys emit per
         #: keystroke, and a helper restarted per keystroke flickers across the
         #: screen. Every move restarts this; the pause after the last one shows.
         self.preview_timer = QTimer(self)
         self.preview_timer.setSingleShot(True)
         self.preview_timer.timeout.connect(self._request_pill_preview)
+        self.pill_placement_label = _caption()
+        self.placement_warning = _caption(NO_LAYER_SHELL_NOTE)
+        self.placement_warning.setVisible(False)
+        self.preview_note = _caption()
         beside = QVBoxLayout()
+        beside.setSpacing(ROW_SPACING // 2)
         beside.addWidget(self.pill_placement_label)
         beside.addWidget(self.placement_warning)
         beside.addWidget(self.preview_note)
-        beside.addStretch()
-        placement = QHBoxLayout()
-        placement.addWidget(self.pill_placer)
-        placement.addLayout(beside, 1)
+        # Full width rather than a form row: the placer is as wide as the screen
+        # it models, and a label column beside it leaves the captions in a
+        # gutter too narrow to read.
+        pill_help = HelpButton(HELP["pill_position"])
+        self.help_buttons["pill_position"] = pill_help
+        preview = QHBoxLayout()
+        preview.setSpacing(COLUMN_SPACING)
+        preview.addWidget(self.pill_placer, 0, Qt.AlignmentFlag.AlignTop)
+        preview.addStretch(1)
+        preview.addWidget(pill_help, 0, Qt.AlignmentFlag.AlignTop)
+        # The captions go under the placer, not beside it: a column beside a
+        # 320 px preview is too narrow to read a sentence in.
+        placement = QVBoxLayout()
+        placement.setSpacing(ROW_SPACING)
+        placement.addLayout(preview)
+        placement.addLayout(beside)
         self.language_profile_table = QTableWidget(0, 2)
         self.language_profile_table.setHorizontalHeaderLabels(["Language", "Profile"])
         self.language_profile_table.horizontalHeader().setStretchLastSection(True)
         self.language_profile_table.verticalHeader().setVisible(False)
         self.language_profile_combos: dict[str, QComboBox] = {}
-        hint = QLabel("Switching to one of these languages also activates its profile.")
-        hint.setWordWrap(True)
-        form.addRow("Language", self.language_combo)
-        form.addRow("Notifications", self.notifications_combo)
-        form.addRow("Text insertion", self.inject_mode_combo)
-        form.addRow("Pill position", placement)
-        form.addRow(_wrapped(PILL_PLACEMENT_NOTE))
-        form.addRow("Profile per language", self.language_profile_table)
-        form.addRow(hint)
+
+        dictation = self._form()
+        self._row(dictation, "Language", self.language_combo)
+        self._row(dictation, "Notifications", self.notifications_combo)
+        self._row(dictation, "Text insertion", self.inject_mode_combo, "text_insertion")
+        self._row(dictation, "Profile per language", self.language_profile_table,
+                  "profile_per_language")
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(MARGIN, MARGIN, MARGIN, MARGIN)
+        layout.setSpacing(ROW_SPACING)
+        layout.addWidget(self._group("Dictation", dictation))
+        layout.addWidget(self._group("Recording pill", placement))
+        layout.addStretch()
         return w
 
     def _hotkeys_tab(self) -> QWidget:
         w = QWidget()
-        form = QFormLayout(w)
         self.hotkey_edit = QLineEdit()
         self.capture_button = QPushButton("Capture key")
         self.capture_button.clicked.connect(self._start_capture)
         row = QHBoxLayout()
+        row.setSpacing(COLUMN_SPACING // 2)
         row.addWidget(self.hotkey_edit)
         row.addWidget(self.capture_button)
         self.mode_combo = QComboBox()
@@ -298,51 +458,72 @@ class SettingsDialog(QDialog):
         self.portal_note: QLabel | None = None
         self.shortcuts_button: QPushButton | None = None
         self.shortcut_note: QLabel | None = None
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(MARGIN, MARGIN, MARGIN, MARGIN)
+        layout.setSpacing(ROW_SPACING)
         if self._backend == "portal":
             # The compositor consumes the chord before we see it, so there is
-            # nothing to capture: these are the triggers we ask it to bind -
-            # once, and only where the desktop admits it has never seen them.
+            # nothing to capture: these fields are the desktop's own keys, and
+            # Save writes them into its store (see _apply_desktop_shortcuts).
             self.capture_button.setVisible(False)
-            self.portal_note = _wrapped(PORTAL_NOTE)
-            form.addRow(self.portal_note)
+            desktop = self._form()
+            self.portal_note = _caption(PORTAL_NOTE)
+            desktop.addRow(self._with_help(self.portal_note, "hotkeys",
+                                           HOTKEY_HELP[self._backend]))
             for name, label in PORTAL_TRIGGERS:
                 edit = QLineEdit()
-                effective = QLabel()
+                edit.setPlaceholderText("not bound")
+                effective = _caption()
                 self.portal_edits[name] = edit
                 self.portal_effective[name] = effective
-                pair = QHBoxLayout()          # never `row`: that one holds the dictate key
+                pair = QVBoxLayout()          # never `row`: that one holds the dictate key
+                pair.setSpacing(2)
                 pair.addWidget(edit)
                 pair.addWidget(effective)
-                form.addRow(f"{label} (asked for once)", pair)
-            self.shortcuts_button = QPushButton("Open shortcut settings")
+                desktop.addRow(label, pair)
+            self.shortcuts_button = QPushButton("Open shortcut settings…")
             self.shortcuts_button.clicked.connect(self._open_shortcut_settings)
-            self.shortcut_note = _wrapped("")
-            form.addRow(self.shortcuts_button)
-            form.addRow(self.shortcut_note)
-        self.hotkey_hint = QLabel(HOTKEY_HINTS.get(self._backend, HOTKEY_HINTS["evdev"]))
-        self.hotkey_hint.setWordWrap(True)
-        form.addRow(self.hotkey_hint)
-        form.addRow("Dictate key", row)
-        form.addRow("Mode", self.mode_combo)
-        form.addRow("Recall last", self.recall_edit)
-        form.addRow("Cancel recording", self.cancel_edit)
+            self.shortcut_note = _caption()
+            desktop.addRow("", self.shortcuts_button)
+            desktop.addRow("", self.shortcut_note)
+            layout.addWidget(self._group("Desktop shortcuts", desktop))
+        self.hotkey_hint = _caption(HOTKEY_HINTS.get(self._backend, HOTKEY_HINTS["evdev"]))
+        keys = self._form()
+        if self._backend == "portal":
+            keys.addRow(self.hotkey_hint)          # spans: it is about the group
+        else:
+            keys.addRow(self._with_help(self.hotkey_hint, "hotkeys",
+                                        HOTKEY_HELP[self._backend]))
+        keys.addRow("Dictate key", row)
+        keys.addRow("Mode", self.mode_combo)
+        keys.addRow("Recall last", self.recall_edit)
+        keys.addRow("Cancel recording", self.cancel_edit)
+        layout.addWidget(self._group("Keyboard device keys", keys))
+        layout.addStretch()
         return w
 
     def _audio_tab(self) -> QWidget:
         w = QWidget()
-        form = QFormLayout(w)
         self.device_combo = QComboBox()
+        self.device_combo.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                        QSizePolicy.Policy.Fixed)
         self.device_combo.currentIndexChanged.connect(self._on_device_picked)
         self.max_seconds = QSpinBox()
         self.max_seconds.setRange(5, 600)
-        form.addRow("Microphone", self.device_combo)
-        form.addRow("Max seconds", self.max_seconds)
+        self.max_seconds.setSuffix(" s")
+        self.max_seconds.setFixedWidth(90)
+        form = self._form()
+        self._row(form, "Microphone", self.device_combo)
+        self._row(form, "Stop after", self.max_seconds, "max_seconds")
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(MARGIN, MARGIN, MARGIN, MARGIN)
+        layout.setSpacing(ROW_SPACING)
+        layout.addWidget(self._group("Recording", form))
+        layout.addStretch()
         return w
 
     def _transcription_tab(self) -> QWidget:
         w = QWidget()
-        outer = QHBoxLayout(w)
-        left = QVBoxLayout()
         self.profile_list = QListWidget()
         self.profile_list.currentRowChanged.connect(self._show_profile)
         self.add_profile_combo = QComboBox()
@@ -351,37 +532,61 @@ class SettingsDialog(QDialog):
         self.add_profile_button.clicked.connect(self._add_profile)
         self.activate_button = QPushButton("Use this profile")
         self.activate_button.clicked.connect(self._activate_profile)
-        left.addWidget(self.profile_list)
-        left.addWidget(self.add_profile_combo)
-        left.addWidget(self.add_profile_button)
+        left = QVBoxLayout()
+        left.setSpacing(ROW_SPACING // 2)
+        left.addWidget(self.profile_list, 1)
+        add = QHBoxLayout()                       # the two halves of one action
+        add.setSpacing(ROW_SPACING // 2)
+        add.addWidget(self.add_profile_combo, 1)
+        add.addWidget(self.add_profile_button)
+        left.addLayout(add)
         left.addWidget(self.activate_button)
         self.profile_form: dict[str, QLineEdit] = {}
         self._form_widget = QWidget()
-        self._form_layout = QFormLayout(self._form_widget)
+        self._form_layout = self._form(self._form_widget)
         self.active_label = QLabel()
+        self.active_label.setStyleSheet("font-weight: bold")
         right = QVBoxLayout()
+        right.setSpacing(ROW_SPACING)
         right.addWidget(self.active_label)
         right.addWidget(self._form_widget)
         right.addStretch()
-        outer.addLayout(left, 1)
-        outer.addLayout(right, 2)
+        columns = QHBoxLayout()
+        columns.setSpacing(COLUMN_SPACING)
+        columns.addWidget(self._group("Profiles", left), 1)
+        columns.addWidget(self._group("Settings", right), 2)
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(MARGIN, MARGIN, MARGIN, MARGIN)
+        layout.setSpacing(ROW_SPACING)
+        layout.addLayout(columns)
+        layout.addWidget(self._with_help(_caption("The active profile transcribes every "
+                                                  "dictation."), "profiles", HELP["profiles"]))
         return w
 
     def _dictionary_tab(self) -> QWidget:
         w = QWidget()
-        layout = QVBoxLayout(w)
         self.replacements_table = QTableWidget(0, 3)
-        self.replacements_table.setHorizontalHeaderLabels(["Heard", "Replace with", "Flags (icase, regex)"])
+        self.replacements_table.setHorizontalHeaderLabels(["Heard", "Replace with", "Flags"])
         self.replacements_table.horizontalHeader().setStretchLastSection(True)
+        self.replacements_table.verticalHeader().setVisible(False)
         add = QPushButton("Add row")
         add.clicked.connect(lambda: self.replacements_table.insertRow(self.replacements_table.rowCount()))
         remove = QPushButton("Remove selected")
         remove.clicked.connect(lambda: self.replacements_table.removeRow(self.replacements_table.currentRow()))
         row = QHBoxLayout()
+        row.setSpacing(ROW_SPACING // 2)
+        row.addStretch()
         row.addWidget(add)
         row.addWidget(remove)
-        layout.addWidget(self.replacements_table)
-        layout.addLayout(row)
+        inner = QVBoxLayout()
+        inner.setSpacing(ROW_SPACING)
+        inner.addWidget(self._with_help(_caption("Fixes applied to every dictation, in order."),
+                                        "dictionary", HELP["dictionary"]))
+        inner.addWidget(self.replacements_table, 1)
+        inner.addLayout(row)
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(MARGIN, MARGIN, MARGIN, MARGIN)
+        layout.addWidget(self._group("Word replacements", inner))
         return w
 
     # -- load/save --------------------------------------------------------------
@@ -560,13 +765,14 @@ class SettingsDialog(QDialog):
             self._form_layout.removeRow(0)
         self.profile_form = {}
         fields = _LOCAL_FIELDS if profile.get("backend") == "local" else _CLOUD_FIELDS
-        self._form_layout.addRow("backend", QLabel(str(profile.get("backend", ""))))
+        self._form_layout.addRow(_FIELD_LABELS["backend"],
+                                 QLabel(str(profile.get("backend", ""))))
         for field in fields:
             edit = QLineEdit(str(profile.get(field, "")))
             if field == "api_key":
                 edit.setEchoMode(QLineEdit.EchoMode.Password)
             self.profile_form[field] = edit
-            self._form_layout.addRow(field, edit)
+            self._form_layout.addRow(_FIELD_LABELS.get(field, field), edit)
 
     def _commit_profile_form(self) -> bool:
         if not self._current_profile or not self.profile_form:

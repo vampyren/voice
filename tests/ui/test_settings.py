@@ -1057,3 +1057,85 @@ def test_a_preview_that_blows_up_does_not_take_the_window_with_it(qapp):
     _drag_pill_to(dlg, "top-left", 0, 0)
     dlg.preview_timer.timeout.emit()
     assert "went away" in dlg.preview_note.text()
+
+
+# -- the shape of the window itself --------------------------------------------
+def _labels(dlg):
+    from PySide6.QtWidgets import QLabel
+
+    return [w for w in dlg.findChildren(QLabel) if w.text().strip()]
+
+
+@pytest.mark.parametrize("backend", ["evdev", "portal"])
+def test_no_tab_shows_a_paragraph_of_prose(qapp, backend):
+    """The owner: "the huge text pieces could be a question mark or something
+    the user clicks to show more information". Nothing on a tab may be an essay;
+    the detail lives behind the "?" beside the control it explains."""
+    from voice.ui.settings import MAX_INLINE_TEXT
+
+    cfg = Config.load()
+    dlg = SettingsDialog(cfg, capture_key=lambda cb: None, sources=lambda: [],
+                         backend=backend, shortcut_store=lambda: None)
+    too_long = [label.text() for label in _labels(dlg) if len(label.text()) > MAX_INLINE_TEXT]
+    assert too_long == [], f"{len(too_long)} paragraph(s) still on a tab"
+
+
+def test_the_long_explanations_are_behind_help_buttons(qapp):
+    cfg, dlg, _ = make(qapp)
+    assert "pill_position" in dlg.help_buttons
+    assert "anchor" in dlg.help_buttons["pill_position"].help_text
+    assert "hotkeys" in dlg.help_buttons
+    assert "profile_per_language" in dlg.help_buttons
+    for button in dlg.help_buttons.values():
+        assert button.text() == "?"
+        assert button.toolTip()                       # hovering says it too
+        assert button.width() <= 24 and button.height() <= 24
+
+
+def test_a_help_button_shows_its_text_when_clicked(qapp, monkeypatch):
+    shown = []
+    monkeypatch.setattr("voice.ui.settings.QToolTip.showText",
+                        lambda point, text, *a, **k: shown.append(text))
+    cfg, dlg, _ = make(qapp)
+    dlg.help_buttons["pill_position"].click()
+    assert shown and "anchor" in shown[0]
+
+
+@pytest.mark.parametrize("backend", ["evdev", "portal"])
+def test_every_control_survived_the_polish(qapp, backend):
+    """This is presentation only: the same widgets, in a tidier arrangement."""
+    cfg = Config.load()
+    dlg = SettingsDialog(cfg, capture_key=lambda cb: None, sources=lambda: [],
+                         backend=backend, shortcut_store=lambda: None)
+    for name in ("language_combo", "notifications_combo", "inject_mode_combo", "pill_placer",
+                 "pill_placement_label", "placement_warning", "preview_note",
+                 "language_profile_table", "hotkey_edit", "capture_button", "mode_combo",
+                 "recall_edit", "cancel_edit", "hotkey_hint", "device_combo", "max_seconds",
+                 "profile_list", "add_profile_combo", "add_profile_button", "activate_button",
+                 "active_label", "replacements_table", "error_label", "save_button"):
+        widget = getattr(dlg, name)
+        assert widget is not None, name
+        assert widget.parentWidget() is not None, f"{name} is not in the layout"
+    tabs = dlg.findChildren(__import__("PySide6.QtWidgets", fromlist=["QTabWidget"]).QTabWidget)[0]
+    assert [tabs.tabText(i) for i in range(tabs.count())] == [
+        "General", "Hotkeys", "Audio", "Transcription", "Dictionary"]
+
+
+def test_the_form_labels_line_up_in_one_column(qapp):
+    """A column that moves per row is what makes a window look thrown together."""
+    from PySide6.QtWidgets import QFormLayout
+
+    cfg, dlg, _ = make(qapp)
+    dlg.resize(dlg.sizeHint())
+    dlg.show()
+    qapp.processEvents()
+    for form in dlg.findChildren(QFormLayout):
+        # The labels are right-aligned against the field column, so it is their
+        # right edge that has to be one line down the form, not their left.
+        edges = set()
+        for row in range(form.rowCount()):
+            item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
+            if item is not None and item.widget() is not None and item.widget().text():
+                edges.add(item.widget().geometry().right())
+        assert len(edges) <= 1, f"labels end at {sorted(edges)}"
+    dlg.close()

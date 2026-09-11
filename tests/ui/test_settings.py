@@ -1166,9 +1166,11 @@ def dark_palette(derive: bool = True):
 
     `derive` fills in the shade roles (Mid, Dark, Midlight...) the way a real
     dark theme does - which is what made `palette(mid)` dark grey on dark grey
-    and started this. The flat one is a palette built by hand: it leaves those
-    roles light and `PlaceholderText` black, so a fix that trusts either role
-    blindly is caught by one of the two.
+    and started this - and gives the disabled group its own grey, as every real
+    theme does. The flat one is a palette built by hand: it leaves the shade
+    roles light, `PlaceholderText` black, and the disabled `WindowText` equal to
+    the ordinary one, so a fix that trusts any single role is caught by one of
+    the two.
     """
     from PySide6.QtGui import QColor, QPalette
 
@@ -1182,6 +1184,12 @@ def dark_palette(derive: bool = True):
                          (QPalette.ColorRole.Highlight, "#3584e4"),
                          (QPalette.ColorRole.HighlightedText, "#ffffff")):
         palette.setColor(role, QColor(colour))
+    if derive:
+        # setColor sets every group at once, which would leave the disabled
+        # text the same colour as the ordinary text - something no real theme
+        # does, and it would hide the rung of the ladder that reads that role.
+        for role in (QPalette.ColorRole.WindowText, QPalette.ColorRole.Text):
+            palette.setColor(QPalette.ColorGroup.Disabled, role, QColor("#6e7173"))
     return palette
 
 
@@ -1218,26 +1226,37 @@ def themed(qapp):
 @pytest.mark.parametrize("theme", ["light", "dark", "flat dark"])
 def test_dim_text_is_legible_on_every_theme(qapp, theme):
     """The owner runs a dark desktop and reported "the help text is invisible
-    now": a grey taken from `palette(mid)` is dark grey on a dark window."""
-    from PySide6.QtGui import QPalette
+    now": a grey taken from `palette(mid)` is dark grey on a dark window.
 
-    from voice.ui.settings import MIN_CONTRAST, contrast_ratio, secondary_text_colour
+    Measured against the hardest surface the palette offers, because the style
+    does not paint `Window` behind a caption - it paints a panel it derives from
+    `Button`, a shade further out than anything the palette names.
+    """
+    from voice.ui.settings import (MIN_CONTRAST, conservative_background, contrast_ratio,
+                                   secondary_text_colour)
 
     palette = palettes(qapp)[theme]
-    behind = palette.color(QPalette.ColorRole.Window)
+    behind = conservative_background(palette)
     ratio = contrast_ratio(secondary_text_colour(palette), behind)
     assert ratio >= MIN_CONTRAST, f"{theme}: dim text at {ratio:.2f}:1 against {behind.name()}"
+
+
+def test_the_bar_is_the_one_for_text_people_have_to_read(qapp):
+    """3:1 is the floor for incidental text and it left no margin at all: the
+    worst caption measured 3.14:1 on the real pixels behind it."""
+    from voice.ui.settings import MIN_CONTRAST
+
+    assert MIN_CONTRAST >= 4.5
 
 
 @pytest.mark.parametrize("theme", ["light", "dark", "flat dark"])
 def test_the_error_line_is_legible_on_every_theme(qapp, theme):
     """Red on a mid-grey window is a signal nobody can see."""
-    from PySide6.QtGui import QPalette
-
-    from voice.ui.settings import MIN_CONTRAST, contrast_ratio, error_text_colour
+    from voice.ui.settings import (MIN_CONTRAST, conservative_background, contrast_ratio,
+                                   error_text_colour)
 
     palette = palettes(qapp)[theme]
-    behind = palette.color(QPalette.ColorRole.Window)
+    behind = conservative_background(palette)
     ratio = contrast_ratio(error_text_colour(palette), behind)
     assert ratio >= MIN_CONTRAST, f"{theme}: the error line at {ratio:.2f}:1"
 
@@ -1247,13 +1266,13 @@ def test_the_captions_and_the_question_marks_follow_the_theme(qapp, themed):
     colours, each readable on the window it is painted on."""
     from PySide6.QtGui import QPalette
 
-    from voice.ui.settings import MIN_CONTRAST, contrast_ratio
+    from voice.ui.settings import MIN_CONTRAST, conservative_background, contrast_ratio
 
     seen = {}
     for theme in ("light", "dark"):
         palette = palettes(qapp)[theme]
         dlg = themed(palette)
-        behind = palette.color(QPalette.ColorRole.Window)
+        behind = conservative_background(palette)
         caption = dlg.pill_placement_label.palette().color(QPalette.ColorRole.WindowText)
         glyph = dlg.help_buttons["pill_position"].glyph_colour
         for what, colour in (("caption", caption), ("?", glyph)):
@@ -1274,21 +1293,33 @@ def test_the_window_writes_no_colour_of_its_own(qapp):
     assert "color" not in DIALOG_STYLE
 
 
-def test_a_theme_change_while_the_window_is_open_is_followed(qapp, themed):
+@pytest.mark.parametrize("how", ["the whole application", "this window"])
+def test_a_theme_change_while_the_window_is_open_is_followed(qapp, themed, how):
     """A desktop that switches to dark at sunset must not leave the window's
-    dim text in yesterday's colour."""
+    dim text in yesterday's colour.
+
+    Both ways it can arrive. A desktop changes the application's palette, which
+    reaches every widget on its own; a palette set on the window itself does
+    not, because this dialog has a stylesheet and a stylesheet stops Qt passing
+    a palette down the tree - even one with no colour in it. The captions had to
+    be told by hand, and this is the case that proves they are.
+    """
     from PySide6.QtGui import QPalette
 
-    from voice.ui.settings import MIN_CONTRAST, contrast_ratio
+    from voice.ui.settings import MIN_CONTRAST, conservative_background, contrast_ratio
 
     dlg = themed(palettes(qapp)["light"])
     dark = palettes(qapp)["dark"]
-    qapp.setPalette(dark)
-    dlg.setPalette(dark)
+    if how == "the whole application":
+        qapp.setPalette(dark)
+    else:
+        dlg.setPalette(dark)
     qapp.processEvents()
-    behind = dark.color(QPalette.ColorRole.Window)
+    behind = conservative_background(dark)
     caption = dlg.pill_placement_label.palette().color(QPalette.ColorRole.WindowText)
-    assert contrast_ratio(caption, behind) >= MIN_CONTRAST
+    glyph = dlg.help_buttons["pill_position"].glyph_colour
+    assert contrast_ratio(caption, behind) >= MIN_CONTRAST, "the caption kept the old theme"
+    assert contrast_ratio(glyph, behind) >= MIN_CONTRAST, "the \"?\" kept the old theme"
 
 
 # -- and saying what the preview actually did -----------------------------------
@@ -1401,3 +1432,83 @@ def test_a_reply_that_will_not_say_how_long_still_clears_the_note(qapp, reply):
     assert dlg.preview_note_timer.interval() == int(ASSUMED_PREVIEW_SECONDS * 1000)
     dlg.preview_note_timer.timeout.emit()
     assert dlg.preview_note.text() == ""
+
+
+def _ink_on_paper(image):
+    """(paper, ink, contrast) for a rendered widget, off its pixels.
+
+    The paper is the colour most of the crop is; the ink is the colour furthest
+    from it in luminance that is not a stray antialiased pixel. This is the only
+    honest way to check contrast - the crop has to come out of a render of the
+    whole window, because a widget grabbed on its own paints its palette's
+    background rather than the panel the style really put behind it, and looking
+    at the picture does not work either: an image viewer that normalises
+    contrast shows 1.5:1 text as perfectly readable.
+    """
+    import collections
+
+    from PySide6.QtGui import QColor
+
+    from voice.ui.settings import _luminance, contrast_ratio
+
+    counts = collections.Counter()
+    for y in range(image.height()):
+        for x in range(image.width()):
+            counts[image.pixelColor(x, y).rgb()] += 1
+    paper = QColor.fromRgb(counts.most_common(1)[0][0])
+    ink, furthest = paper, 0.0
+    for rgb in counts:
+        # The furthest pixel from the paper, however few there are of it: on a
+        # "?" barely any pixel is fully covered, and taking only the ones that
+        # repeat would measure the antialiasing rather than the colour.
+        colour = QColor.fromRgb(rgb)
+        gap = abs(_luminance(colour) - _luminance(paper))
+        if gap > furthest:
+            ink, furthest = colour, gap
+    return paper, ink, contrast_ratio(paper, ink)
+
+
+def _dim_things(dlg, page):
+    """Every piece of secondary text on `page`: the captions and the "?"s."""
+    from PySide6.QtWidgets import QLabel
+
+    from voice.ui.settings import HelpButton
+
+    things = [(w, w.text()[:44]) for w in page.findChildren(QLabel)
+              if w.text().strip() and w.property("caption") and w.isVisibleTo(dlg)]
+    things += [(w, '"?"') for w in page.findChildren(HelpButton) if w.isVisibleTo(dlg)]
+    return things
+
+
+@pytest.mark.parametrize("theme", ["light", "dark", "flat dark"])
+def test_every_dim_thing_on_every_tab_is_legible_in_every_theme(qapp, themed, theme):
+    """The end of the argument: not what the palette says, not what the picture
+    looks like, but the contrast between the pixels of every caption and every
+    "?" and the pixels the style actually painted behind them - on all five
+    tabs, in each theme.
+    """
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QTabWidget
+
+    from voice.ui.settings import MIN_CONTRAST
+
+    dlg = themed(palettes(qapp)[theme])
+    dlg.resize(600, 620)
+    dlg.show()
+    qapp.processEvents()
+    tabs = dlg.findChildren(QTabWidget)[0]
+    failures, worst = [], (99.0, "")
+    for index in range(tabs.count()):
+        tabs.setCurrentIndex(index)
+        qapp.processEvents()
+        shot = dlg.grab().toImage()
+        for widget, what in _dim_things(dlg, tabs.widget(index)):
+            corner = widget.mapTo(dlg, QPoint(0, 0))
+            crop = shot.copy(corner.x(), corner.y(), widget.width(), widget.height())
+            paper, ink, ratio = _ink_on_paper(crop)
+            where = f"{tabs.tabText(index)}: {what} ({ink.name()} on {paper.name()})"
+            worst = min(worst, (ratio, where))
+            if ratio < MIN_CONTRAST:
+                failures.append(f"{ratio:.2f}:1  {where}")
+    assert tabs.count() == 5 and worst[1], "no dim text was measured at all"
+    assert failures == [], f"worst {worst[0]:.2f}:1 at {worst[1]}\n" + "\n".join(failures)

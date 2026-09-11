@@ -8,8 +8,8 @@ from typing import Callable, Iterable
 
 from html import escape
 
-from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QImage, QPalette, QRegion
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFormLayout, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
                                QSizePolicy, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget,
@@ -168,14 +168,26 @@ DIALOG_STYLE = """
 QGroupBox { font-weight: bold; margin-top: 8px; }
 QGroupBox::title { subcontrol-origin: margin; left: 2px; padding: 0 3px; }
 """
-#: The least contrast a colour of ours may have against what is behind it.
-#: Below about 3:1 dim text is not quiet, it is gone - which is what a dark
-#: desktop did to `palette(mid)`, and what the owner reported as "the help text
-#: is invisible now". 3:1 is the WCAG AA floor for incidental and large text.
-MIN_CONTRAST = 3.0
+#: The least contrast a colour of ours may have against what is painted behind
+#: it. These are sentences the owner has to read, not decoration, so the bar is
+#: the WCAG AA floor for normal text rather than the 3:1 allowed for incidental
+#: text - which left no margin at all: at 3:1 the worst caption measured 3.14:1
+#: on the real pixels, and dim text that cannot be read is not dim, it is
+#: missing.
+MIN_CONTRAST = 4.5
 #: How far the theme's own text colour is faded when the palette offers nothing
 #: dim that can be read: enough to read as secondary, not enough to disappear.
 DIM_ALPHA = 0.65
+#: What the chooser actually aims for. No pixel of a thin glyph is ever the full
+#: colour - a "?" is mostly antialiasing, and its circle is a one-pixel line -
+#: so a colour computed to land exactly on the bar measures a few hundredths
+#: under it once it is drawn. Aim a little over, and the rendered pixels clear
+#: the bar rather than sitting just below it.
+TARGET_CONTRAST = MIN_CONTRAST * 1.05
+#: How far from `Window` a palette colour may be and still be believable as a
+#: panel this window's text sits on. A tab pane is a shade of the window; a role
+#: a hand-built palette never filled in is not.
+SHADE_OF_WINDOW = 2.0
 #: An error is a signal, not a theme colour, so the hue stays put on every
 #: desktop - but `error_text_colour` lightens or darkens it until it can be
 #: read, because a red the window swallows is not a signal at all.
@@ -243,39 +255,146 @@ def _legible(colour: QColor, behind: QColor) -> QColor:
     for step in range(21):
         mixed = _over(QColor(towards.red(), towards.green(), towards.blue(),
                              round(255 * step / 20)), colour)
-        if contrast_ratio(mixed, behind) >= MIN_CONTRAST:
+        if contrast_ratio(mixed, behind) >= TARGET_CONTRAST:
             break
     return mixed
 
 
-def secondary_text_colour(palette: QPalette) -> QColor:
+def _mix(one: QColor, other: QColor, part: float) -> QColor:
+    """`part` of the way from `one` to `other`."""
+    return QColor.fromRgbF(one.redF() + (other.redF() - one.redF()) * part,
+                           one.greenF() + (other.greenF() - one.greenF()) * part,
+                           one.blueF() + (other.blueF() - one.blueF()) * part)
+
+
+def conservative_background(palette: QPalette) -> QColor:
+    """The hardest surface in the palette to read dim text on.
+
+    The style does not paint `Window` behind a caption. Fusion fills a tab pane
+    with a colour it derives from `Button` and lightens - `#424242` where the
+    window is `#2b2b2b` - and that shade is nowhere in the palette. Where the
+    real colour cannot be sampled (`painted_background`), the palette's own
+    extreme in the direction that hurts is used instead: the lightest surface on
+    a dark theme, where the text will be light, and the darkest on a light one.
+    That errs towards too much contrast rather than towards too little.
+
+    Only surfaces that are a shade of the window count. A palette built by hand
+    leaves roles it was never given at their light defaults, and an
+    `AlternateBase` of near-white behind a `#2b2b2b` window is not a panel this
+    text will ever sit on - believing it would choose dark text for a dark
+    window, which is the bug this whole ladder exists to avoid.
+    """
+    window = palette.color(QPalette.ColorRole.Window)
+    surfaces = [colour for colour in
+                (palette.color(role) for role in (QPalette.ColorRole.Base,
+                                                  QPalette.ColorRole.AlternateBase,
+                                                  QPalette.ColorRole.Button))
+                if contrast_ratio(colour, window) <= SHADE_OF_WINDOW]
+    surfaces.append(window)
+    dark_theme = _luminance(window) < 0.5
+    return max(surfaces, key=_luminance) if dark_theme else min(surfaces, key=_luminance)
+
+
+def theme_palette(widget: QWidget) -> QPalette:
+    """The palette a widget should take its theme from: its window's.
+
+    Not its parent's. A stylesheet anywhere up the tree stops Qt propagating a
+    palette set on that widget down to its children - even a stylesheet with no
+    colour in it, which is what this dialog has - so a parent halfway down can
+    still be holding the theme before last. The window is always current: it is
+    what the palette was set on. An application-wide change, which is what a
+    desktop switching theme actually does, reaches everything either way.
+    """
+    window = widget.window()
+    if window is None or window is widget:
+        return QApplication.palette()
+    return window.palette()
+
+
+def painted_background(widget: QWidget, theme: QPalette) -> QColor | None:
+    """What is really painted behind `widget`, or None while nothing can say.
+
+    Walks out through the ancestors, rendering each one alone - no children, and
+    no forced background - onto a transparent pixel at the widget's own centre.
+    The first one that covers that pixel is what the text sits on: a group box
+    paints only its frame, a tab page paints nothing at all, and it is the tab
+    widget's pane that is actually behind every caption in this window.
+
+    A whole column of the widget's height is sampled, not one pixel: a tab pane
+    is a gradient, so the top of a caption sits on a slightly different shade
+    from its bottom, and the one that is taken is the shade that makes the text
+    hardest to read - the lightest on a dark theme, the darkest on a light one.
+
+    None until the widget has been laid out, which is why everything here is
+    re-taken on `showEvent` as well as on a palette change.
+    """
+    height = widget.height()
+    if not widget.isVisible() or widget.width() <= 0 or height <= 0:
+        # Nothing is painted behind a widget that is not on screen, and its
+        # ancestors have neither been laid out nor, on a window that was given a
+        # palette it could not pass on, repainted in the theme now running. What
+        # they would draw is fiction; the palette's own worst case is not.
+        return None
+    top = QPoint(widget.width() // 2, 0)
+    column = QImage(1, height, QImage.Format.Format_ARGB32)
+    dark_theme = _luminance(theme.color(QPalette.ColorRole.Window)) < 0.5
+    ancestor = widget.parentWidget()
+    while ancestor is not None:
+        spot = widget.mapTo(ancestor, top)
+        if ancestor.rect().contains(spot):
+            column.fill(Qt.GlobalColor.transparent)
+            try:
+                ancestor.render(column, QPoint(0, 0), QRegion(QRect(spot, QSize(1, height))),
+                                QWidget.RenderFlag(0))
+            except Exception as exc:        # a colour is never worth a broken window
+                log.debug("could not sample what is behind %s: %s", widget.objectName(), exc)
+                return None
+            painted = [column.pixelColor(0, y) for y in range(height)
+                       if column.pixelColor(0, y).alpha() == 255]
+            if painted:
+                return (max(painted, key=_luminance) if dark_theme
+                        else min(painted, key=_luminance))
+        ancestor = ancestor.parentWidget()
+    return None
+
+
+def secondary_text_colour(palette: QPalette, behind: QColor | None = None) -> QColor:
     """Dim text the running theme can actually show, taken from its own palette.
 
     `PlaceholderText` is the role meant for exactly this and most themes fill it
     in; a palette built by hand leaves it black, which a dark window swallows.
     The disabled `WindowText` is the usual second best, and on a light theme it
-    is a grey too pale to read. So neither is trusted on its own: whichever the
-    theme can show against its own window wins, and if neither can, the theme's
-    own text colour faded is - it contrasts by definition.
+    is a grey too pale to read. The theme's own text colour, faded, is the third.
+    None is trusted on its own: whichever of them can be read on `behind` wins.
 
-    Measured against `Window` rather than against whatever the style happens to
-    paint behind a particular widget: that is the colour the theme guarantees,
-    and every panel a caption sits on is within a shade or two of it.
+    And if none of them can, the ladder does not stop at a best effort - the
+    dimmest candidate is moved towards the theme's own text until it clears the
+    bar, and past even that towards black or white. There is always an answer,
+    because dim text that cannot be read is not dim, it is missing.
     """
-    behind = palette.color(QPalette.ColorRole.Window)
-    for group, role in ((QPalette.ColorGroup.Active, QPalette.ColorRole.PlaceholderText),
-                        (QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText)):
-        candidate = _over(palette.color(group, role), behind)
-        if contrast_ratio(candidate, behind) >= MIN_CONTRAST:
-            return candidate
-    faded = QColor(palette.color(QPalette.ColorRole.WindowText))
+    behind = behind if behind is not None and behind.isValid() else conservative_background(palette)
+    foreground = palette.color(QPalette.ColorRole.WindowText)
+    faded = QColor(foreground)
     faded.setAlphaF(DIM_ALPHA)
-    return _over(faded, behind)
+    ladder = [_over(palette.color(QPalette.ColorGroup.Active,
+                                  QPalette.ColorRole.PlaceholderText), behind),
+              _over(palette.color(QPalette.ColorGroup.Disabled,
+                                  QPalette.ColorRole.WindowText), behind),
+              _over(faded, behind)]
+    for candidate in ladder:
+        if contrast_ratio(candidate, behind) >= TARGET_CONTRAST:
+            return candidate
+    for step in range(1, 21):
+        towards_text = _mix(ladder[0], foreground, step / 20)
+        if contrast_ratio(towards_text, behind) >= TARGET_CONTRAST:
+            return towards_text
+    return _legible(foreground, behind)     # a theme whose own text cannot be read here
 
 
-def error_text_colour(palette: QPalette) -> QColor:
+def error_text_colour(palette: QPalette, behind: QColor | None = None) -> QColor:
     """The red beside Save, lightened or darkened until this theme can show it."""
-    return _legible(QColor(ERROR_HUE), palette.color(QPalette.ColorRole.Window))
+    behind = behind if behind is not None and behind.isValid() else conservative_background(palette)
+    return _legible(QColor(ERROR_HUE), behind)
 
 
 class TintedLabel(QLabel):
@@ -287,10 +406,13 @@ class TintedLabel(QLabel):
 
     The colour is derived from the *parent's* palette rather than from its own,
     which this class overwrites - deriving from a colour it had already dimmed
-    would fade a shade further on every palette change.
+    would fade a shade further on every palette change - and it is measured
+    against the colour really painted behind the label, not against `Window`,
+    which the style does not put there.
     """
 
-    def __init__(self, text: str = "", tint: Callable[[QPalette], QColor] = secondary_text_colour,
+    def __init__(self, text: str = "",
+                 tint: Callable[[QPalette, QColor | None], QColor] = secondary_text_colour,
                  parent=None):
         super().__init__(text, parent)
         self.setWordWrap(True)
@@ -303,18 +425,27 @@ class TintedLabel(QLabel):
         if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ParentChange):
             self.retint()
 
+    def showEvent(self, event) -> None:
+        # Laid out at last: only now can what is behind this label be sampled.
+        super().showEvent(event)
+        self.retint()
+
     def theme(self) -> QPalette:
         """The palette this label should take its colour from."""
-        parent = self.parentWidget()
-        return parent.palette() if parent is not None else QApplication.palette()
+        return theme_palette(self)
 
     def retint(self) -> None:
         if self._tinting:                    # setPalette comes back through changeEvent
             return
         self._tinting = True
         try:
-            colour = self._tint(self.theme())
-            palette = self.palette()
+            theme = self.theme()
+            colour = self._tint(theme, painted_background(self, theme))
+            # Two roles on an otherwise untouched palette, never a copy of the
+            # resolved one: a palette with every role spoken for stops
+            # inheriting, so Qt would never tell this label the theme changed
+            # again - and the first thing it would miss is the switch to dark.
+            palette = QPalette()
             palette.setColor(QPalette.ColorRole.WindowText, colour)
             palette.setColor(QPalette.ColorRole.Text, colour)
             self.setPalette(palette)
@@ -368,15 +499,19 @@ class HelpButton(QToolButton):
         if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ParentChange):
             self.retint()
 
+    def showEvent(self, event) -> None:
+        # Laid out at last: only now can what is behind this glyph be sampled.
+        super().showEvent(event)
+        self.retint()
+
     def retint(self) -> None:
         """Take the glyph's colour from whatever theme is running now."""
         if self._tinting:                    # applying a stylesheet re-enters here
             return
         self._tinting = True
         try:
-            parent = self.parentWidget()
-            palette = parent.palette() if parent is not None else QApplication.palette()
-            self.glyph_colour = secondary_text_colour(palette)
+            theme = theme_palette(self)
+            self.glyph_colour = secondary_text_colour(theme, painted_background(self, theme))
             self.setStyleSheet(HELP_STYLE.format(colour=self.glyph_colour.name(),
                                                  radius=HELP_SIZE // 2))
         finally:
@@ -540,6 +675,35 @@ class SettingsDialog(QDialog):
             row.addWidget(field, 1)
         row.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
         return holder
+
+    def showEvent(self, event) -> None:
+        """Re-take every dim colour once the window has been laid out.
+
+        A child's own `showEvent` arrives before this one and, on the tab that
+        opens first, before the tab widget has a pane to sample - so that tab's
+        captions would keep the colour they were given against a guess while
+        every other tab got the real one. Qt sends this last; by here the
+        geometry is final and there is something real behind them.
+        """
+        super().showEvent(event)
+        self.retint_all()
+
+    def changeEvent(self, event) -> None:
+        """A palette set on this window has to be passed on by hand.
+
+        This dialog has a stylesheet, and a stylesheet stops Qt propagating a
+        palette change from here down to the children - so the captions would
+        never hear about it. An application-wide change reaches them on its own;
+        this covers the case where the window is given a palette directly.
+        """
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.PaletteChange:
+            self.retint_all()
+
+    def retint_all(self) -> None:
+        """Every dim colour in the window, re-taken from the theme as it is now."""
+        for widget in self.findChildren(TintedLabel) + self.findChildren(HelpButton):
+            widget.retint()
 
     def reload_from_disk(self) -> None:
         """Re-read the file and repopulate every widget, discarding unsaved edits."""

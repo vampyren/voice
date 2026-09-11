@@ -1677,6 +1677,45 @@ def test_change_hands_the_new_combination_to_the_desktop(qapp):
     assert Config.load().get("hotkeys.portal_dictate") == "CTRL+ALT+D"
 
 
+def test_a_key_the_desktop_took_is_kept_without_a_save(qapp):
+    """Change… then Close (not Save) used to throw the change away: the field
+    was repopulated from the file, which still held the old trigger, while the
+    row showed the desktop's new one - so the tab contradicted itself, and the
+    next Save for any reason pushed the stale trigger back over the user's key.
+    """
+    from PySide6.QtCore import Qt
+
+    store = FakeStore()
+    desktop = {"dictate": "CTRL+space"}
+    cfg, dlg = _hotkeys_dialog(qapp, "desktop-store", triggers=lambda: dict(desktop),
+                               store=store)
+    dlg.change_buttons["dictate"].click()
+    _press(qapp, dlg, Qt.Key.Key_D,
+           Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)
+    assert Config.load().get("hotkeys.portal_dictate") == "CTRL+ALT+D"
+    desktop["dictate"] = "CTRL+ALT+D"           # the desktop holds it from now on
+    dlg.close()                                 # Close, not Save
+    dlg.reload_from_disk()                      # which is what reopening it does
+
+    assert dlg.portal_edits["dictate"].text() == "CTRL+ALT+D"   # both halves of the tab
+    assert dlg.key_labels["dictate"].text() == "Ctrl+Alt+D"     # say the same thing
+    dlg.save_button.click()                     # and a later save cannot revert it
+    assert Config.load().get("hotkeys.portal_dictate") == "CTRL+ALT+D"
+
+
+def test_a_key_the_desktop_refused_is_not_kept(qapp):
+    """The file follows the desktop, so a write that did not happen writes
+    nothing here either."""
+    from PySide6.QtCore import Qt
+
+    store = FakeStore(fail="that shortcut is not stored yet")
+    cfg, dlg = _hotkeys_dialog(qapp, "desktop-store", triggers=lambda: {"dictate": "CTRL+space"},
+                               store=store)
+    dlg.change_buttons["dictate"].click()
+    _press(qapp, dlg, Qt.Key.Key_D, Qt.KeyboardModifier.ControlModifier)
+    assert Config.load().get("hotkeys.portal_dictate") == "CTRL+space"
+
+
 def test_escape_leaves_the_key_as_it_was(qapp):
     from PySide6.QtCore import Qt
 

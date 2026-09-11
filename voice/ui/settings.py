@@ -116,6 +116,10 @@ CHANGE_STOPPED = "Left as it was."
 #: desktop's own spelling, and the ids it skipped - which is a sentence for
 #: whoever wrote the store. It goes to the log; this goes on screen.
 CHANGED_ON_DESKTOP = "Your desktop now uses {key} for: {what}."
+#: And the one way that can half-succeed: the desktop took the key, and this
+#: window could not write it down. Both halves have to agree, so say so.
+TRIGGER_NOT_KEPT = ("Your desktop now uses {key}, but it could not be saved here "
+                    "({error}) - press Save.")
 SAVED_TO_DESKTOP = "Your shortcuts have been handed to your desktop."
 #: And the one case where nothing can be handed over: a shortcut this desktop
 #: has never been told about, because voice has never asked it for one. Saving
@@ -1751,7 +1755,32 @@ class SettingsDialog(QDialog):
                 self._say_about_hotkeys(CHANGE_REFUSED)
             return
         self.key_labels[name].setText(pretty_trigger(trigger))
+        self._keep_the_trigger(name, trigger)
         self.shortcuts_rebound.emit()
+
+    def _keep_the_trigger(self, name: str, trigger: str) -> None:
+        """Write a trigger the desktop has taken into the config, at once.
+
+        The desktop holds the new key from this moment on, so the file has to
+        as well: without this, closing the window without saving left the field
+        on the old trigger and the row on the new one - the tab contradicting
+        itself - and the next Save for any reason wrote every field back,
+        pushing the old trigger over the key the user had just set.
+
+        Through a fresh read of the file, not this window's snapshot, for the
+        same reason the daemon does it that way: only the one setting that has
+        actually changed may be written from here. The snapshot is updated too,
+        so a later Save from this window agrees with the file.
+        """
+        self._cfg.set(f"hotkeys.portal_{name}", trigger)
+        try:
+            on_disk = Config.load(self._cfg.path)
+            on_disk.set(f"hotkeys.portal_{name}", trigger)
+            on_disk.save()
+        except Exception as exc:
+            log.exception("could not save the trigger the desktop took")
+            self.error_label.setText(TRIGGER_NOT_KEPT.format(
+                key=pretty_trigger(trigger), error=exc))
 
     def _apply_desktop_shortcuts(self, note: str = SAVED_TO_DESKTOP) -> bool:
         """Put the triggers into the desktop's own store, and say so.

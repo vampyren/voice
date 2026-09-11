@@ -200,7 +200,7 @@ def reset_probe_cache() -> None:
 
 def default_launcher(position: str = DEFAULT_POSITION, lang: str = "en", verbose: bool = False,
                      allow_fallback: bool = False, margin_x: object = DEFAULT_MARGIN_X,
-                     margin_y: object = DEFAULT_MARGIN_Y, pad_to_place: bool = True,
+                     margin_y: object = DEFAULT_MARGIN_Y, pad_to_place: bool = False,
                      popen: Callable = subprocess.Popen):
     """Spawn the helper, or return None when this machine cannot run it.
 
@@ -223,11 +223,11 @@ def default_launcher(position: str = DEFAULT_POSITION, lang: str = "en", verbose
     cmd += ["--position", normalise_position(position),
             "--margin-x", str(clamp_margin(margin_x, DEFAULT_MARGIN_X)),
             "--margin-y", str(clamp_margin(margin_y, DEFAULT_MARGIN_Y))]
-    if not pad_to_place:
-        # Only the no-layer-shell path pads, and only to make the placement mean
-        # something where the compositor would otherwise centre the pill; the
-        # flag is the owner saying they would rather have a pill-sized window.
-        cmd.append("--no-pad-to-place")
+    if pad_to_place:
+        # Only the no-layer-shell path pads, and only when the owner asks for it:
+        # it moves the pill toward the placement, and charges for it in clicks
+        # that land on the transparent padding instead of the window behind it.
+        cmd.append("--pad-to-place")
     if lang:
         cmd += ["--lang", lang]
     if not allow_fallback:

@@ -281,9 +281,9 @@ def test_defaults_carry_the_language_cycle_and_the_overlay(isolated_xdg):
     assert cfg.get("ui.overlay_margin_x") == 0
     assert cfg.get("ui.overlay_margin_y") == 48
     assert cfg.get("ui.overlay_allow_fallback") is False
-    # On by default: where the compositor places the pill itself it is the only
-    # thing that makes ui.overlay_position do anything at all.
-    assert cfg.get("ui.overlay_pad_to_place") is True
+    # Off by default: it moves the pill where the compositor would not, and
+    # charges for it in clicks that land on the padding around it.
+    assert cfg.get("ui.overlay_pad_to_place") is False
     assert cfg.get("hotkeys.language_toggle") == ""
     assert cfg.portal_trigger("language_toggle") == ""
     assert cfg.errors() == []

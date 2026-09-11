@@ -146,19 +146,21 @@ settings window - the daemon restarts the pill helper - without restarting the
 daemon itself.
 
 **On a desktop that places the pill itself.** GNOME gives the pill a plain
-Wayland window and centres it, and nothing in the window can argue with that.
-So the helper argues with the *size* instead: it asks for a window bigger than
-the pill and draws the pill against the edge you asked for, leaving the rest of
-it transparent. The compositor still centres the window, so `bottom-center`
-puts the pill about a quarter-screen below centre, `top-*` the same above it,
-and `left`/`right` work the same way across. It is near, not exact - the window
-is capped at half the screen, and a margin asking for more than that is spent as
-far as the cap goes. The transparent padding asks the compositor to let clicks
-through it, which needs PyGObject's cairo support (Debian/Ubuntu:
-`python3-gi-cairo`); without that package the padding takes clicks that would
-otherwise reach the window behind it, which is why the cap is half a screen and
-not the whole one. `ui.overlay_pad_to_place = false` turns the whole thing off
-and gives you a pill-sized window wherever the compositor drops it.
+Wayland window and centres it, and nothing inside the window can argue with
+that: the pill appears in the middle of the screen whatever `ui.overlay_position`
+says.
+
+`ui.overlay_pad_to_place = true` argues with the *size* instead: the helper asks
+for a window bigger than the pill and draws the pill against the edge you asked
+for, leaving the rest of it transparent. The compositor still centres the
+window, so `bottom-center` puts the pill about a quarter-screen below centre,
+`top-*` the same above it, and `left`/`right` work the same way across - near,
+not exact, and capped at half the screen. **It is off by default, and it is a
+trade, not a fix:** the padding is invisible but it is still part of the window,
+so clicks in it stop at the pill's window instead of reaching what is behind it,
+unless PyGObject can set an input region (Debian/Ubuntu: `python3-gi-cairo`;
+without that package it cannot). Turn it on if you would rather have the pill
+low than have that quarter-screen clickable.
 
 **Drag it where you want it.** The settings window's General tab shows this
 screen in miniature with the pill in it: drag the pill, and the drop is saved as
@@ -328,10 +330,11 @@ overlay_position = "bottom-center"   # top|middle|bottom with left|center|right,
                                      # e.g. "bottom-right"; needs gtk4-layer-shell
 overlay_margin_x = 0       # pixels in from the anchored side; a "center" or
 overlay_margin_y = 48      # "middle" half is centred and ignores its margin
-overlay_pad_to_place = true      # where the desktop places the window itself (GNOME), make the
+overlay_pad_to_place = false     # where the desktop places the window itself (GNOME): make the
                                  # window bigger than the pill and draw the pill at the edge you
-                                 # asked for, so overlay_position still moves it; false = a
-                                 # pill-sized window wherever the compositor drops it
+                                 # asked for, so overlay_position moves it. Off because the
+                                 # padding, though invisible, still takes clicks meant for the
+                                 # window behind it
 overlay_allow_fallback = false   # show the pill without gtk4-layer-shell, accepting
                                  # that it takes keyboard focus when it appears
 

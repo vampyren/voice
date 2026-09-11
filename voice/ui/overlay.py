@@ -137,10 +137,10 @@ def build_parser() -> argparse.ArgumentParser:
                              "half has no anchored side and ignores this")
     parser.add_argument("--margin-y", type=int, default=DEFAULT_MARGIN_Y,
                         help="the same, vertically (layer-shell only)")
-    parser.add_argument("--no-pad-to-place", dest="pad_to_place", action="store_false",
-                        help="where there is no layer shell, do not pad the window out "
-                             "to move the pill toward the placement; take a pill-sized "
-                             "window wherever the compositor puts it")
+    parser.add_argument("--pad-to-place", action="store_true",
+                        help="where there is no layer shell, pad the window out and draw "
+                             "the pill at the edge the placement names; off by default "
+                             "because the padding takes clicks meant for what is behind it")
     parser.add_argument("--require-layer-shell", action="store_true",
                         help="exit 2 instead of falling back to a focus-stealing "
                              "plain window when no layer surface is available")
@@ -262,7 +262,7 @@ class _Pill:
         self._geometry: tuple[tuple[int, int], tuple[int, int]] | None = None
         #: Only a plain window needs padding: a layer surface is anchored where
         #: the placement says, and padding it would only move the pill away.
-        self._pad = layer_shell is None and bool(getattr(args, "pad_to_place", True))
+        self._pad = layer_shell is None and bool(getattr(args, "pad_to_place", False))
         self._screen = monitor_size(gdk) if self._pad else None
         #: Set once the region binding has been found unusable, so the helper
         #: says so a single time rather than on every frame.

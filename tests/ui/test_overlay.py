@@ -255,8 +255,7 @@ def test_the_fallback_window_warns_about_focus_and_about_the_placement(monkeypat
     """Both sentences, once each, on the path that really shows a plain window."""
     overlay = _fake_main(monkeypatch)
     with caplog.at_level("WARNING", logger="voice.ui.overlay"):
-        assert overlay.main(["--position", "middle-right", "--margin-x", "20",
-                             "--no-pad-to-place"]) == 0
+        assert overlay.main(["--position", "middle-right", "--margin-x", "20"]) == 0
     assert caplog.text.count("take keyboard focus") == 1
     assert caplog.text.count("middle-right") == 1
 
@@ -267,7 +266,8 @@ def test_a_padded_fallback_window_says_it_is_approximating_the_placement(monkeyp
     bug in a setting that just worked."""
     overlay = _fake_main(monkeypatch)
     with caplog.at_level("INFO", logger="voice.ui.overlay"):
-        assert overlay.main(["--position", "middle-right", "--margin-x", "20"]) == 0
+        assert overlay.main(["--position", "middle-right", "--margin-x", "20",
+                             "--pad-to-place"]) == 0
     assert caplog.text.count("take keyboard focus") == 1
     assert "do nothing here" not in caplog.text
     assert "middle-right" in caplog.text and "ui.overlay_pad_to_place" in caplog.text
@@ -596,7 +596,8 @@ def test_a_plain_window_is_padded_so_the_pill_lands_near_the_placement():
     from voice.ui.overlay import padded_window
     from voice.ui.overlay_draw import natural_width
 
-    pill = _recording_pill(["--position", "bottom-center", "--margin-y", "48"])
+    pill = _recording_pill(["--pad-to-place", "--position", "bottom-center",
+                            "--margin-y", "48"])
     pill._render()
     width = natural_width(pill.model, 44)
     window, origin = padded_window("bottom-center", 0, 48, (1920, 1080), (width, 44))
@@ -605,12 +606,13 @@ def test_a_plain_window_is_padded_so_the_pill_lands_near_the_placement():
     assert pill.view.size_request == window
 
 
-def test_the_padding_can_be_switched_off_at_the_command_line():
+def test_a_plain_window_is_the_size_of_the_pill_unless_the_padding_is_asked_for():
+    """The padding moves the pill, and charges for it in clicks; off by default."""
     from voice.ui.overlay_draw import natural_width
 
-    assert build_parser().parse_args([]).pad_to_place is True
-    assert build_parser().parse_args(["--no-pad-to-place"]).pad_to_place is False
-    pill = _recording_pill(["--no-pad-to-place"])
+    assert build_parser().parse_args([]).pad_to_place is False
+    assert build_parser().parse_args(["--pad-to-place"]).pad_to_place is True
+    pill = _recording_pill()
     pill._render()
     width = natural_width(pill.model, 44)
     assert (pill.view.paintable.width, pill.view.paintable.height) == (width, 44)
@@ -620,7 +622,7 @@ def test_the_padding_lets_clicks_through_by_asking_for_the_pills_input_region():
     cairo = pytest.importorskip("cairo")
     from voice.ui.overlay_draw import natural_width
 
-    pill = _recording_pill()
+    pill = _recording_pill(["--pad-to-place"])
     pill._render()
     width = natural_width(pill.model, 44)
     assert len(pill.window.surface.regions) == 1
@@ -633,7 +635,7 @@ def test_the_padding_lets_clicks_through_by_asking_for_the_pills_input_region():
 def test_a_display_that_cannot_take_an_input_region_still_shows_the_pill(caplog):
     """PyGObject needs its cairo foreign-struct support (python3-gi-cairo) to
     convert a region; without it the padding takes clicks and the pill still runs."""
-    pill = _recording_pill()
+    pill = _recording_pill(["--pad-to-place"])
     pill.window.surface.regions_work = False
     with caplog.at_level("INFO", logger="voice.ui.overlay"):
         pill._render()
@@ -646,7 +648,7 @@ def test_a_display_that_cannot_take_an_input_region_still_shows_the_pill(caplog)
 def test_the_padded_window_is_still_drawn_the_moment_the_surface_appears():
     """The surface only exists once the window is mapped, so the region is
     asked for again there rather than only on a resize."""
-    pill = _recording_pill()
+    pill = _recording_pill(["--pad-to-place"])
     pill.window.surface = None
     pill._render()
     pill.window.surface = FakeSurface()

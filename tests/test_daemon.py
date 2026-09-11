@@ -1186,7 +1186,7 @@ def test_the_fallback_window_flag_reaches_the_launcher(isolated_xdg, qapp, monke
     d.build()
     d.overlay.start()
     assert seen == [{"position": "top-center", "margin_x": 0, "margin_y": 48, "lang": "sv",
-                     "verbose": False, "allow_fallback": True}]
+                     "verbose": False, "allow_fallback": True, "pad_to_place": True}]
     d.shutdown()
 
 
@@ -1316,6 +1316,51 @@ def test_the_language_is_not_repeated_while_it_stays_the_same(isolated_xdg, qapp
     d.dictation.on_state(State.IDLE, "4 chars via portal in 0.1s")
     assert _overlay_lines(d, helper_processes) == [
         {"state": "transcribing"}, {"state": "done"}]
+    d.shutdown()
+
+
+def test_turning_the_padding_off_reaches_the_helper_and_restarts_it(
+        isolated_xdg, qapp, monkeypatch, helper_processes):
+    """The escape hatch has to travel the same road as the placement itself:
+    into the command line, and through a restart when it is changed."""
+    seen = []
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    monkeypatch.setattr("voice.daemon.default_launcher",
+                        lambda **kw: seen.append(kw) or helper_processes())
+    cfg = Config.load()
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    d.overlay.start()
+    assert seen[-1]["pad_to_place"] is True
+    first = d.overlay
+
+    external = Config.load()
+    external.set("ui.overlay_pad_to_place", False)
+    external.save()
+    d.apply_config()
+    assert d.overlay is not first
+    assert seen[-1]["pad_to_place"] is False
+    d.shutdown()
+
+
+def test_the_pill_preview_is_padded_like_the_real_pill(isolated_xdg, qapp, monkeypatch,
+                                                       helper_processes):
+    """A preview that ignored the workaround would show the placement landing
+    somewhere the real pill never goes."""
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    seen = []
+    monkeypatch.setattr("voice.daemon.default_launcher",
+                        lambda **kw: seen.append(kw) or helper_processes())
+    cfg = Config.load()
+    cfg.set("ui.overlay_pad_to_place", False)
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    d._preview_timer_factory = lambda seconds, fn: type("T", (), {"cancel": lambda self: None})()
+    d._preview_pill("top-right", 10, 20)
+    assert seen[-1]["position"] == "top-right"
+    assert seen[-1]["pad_to_place"] is False
     d.shutdown()
 
 

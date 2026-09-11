@@ -12,15 +12,18 @@ Status: phase 1 (dictation core). See `docs/superpowers/specs/` for the full des
   via evdev, records audio with PipeWire, transcribes it, and injects the text.
 - A thin CLI (`voice ...`) that talks to the running daemon over a Unix socket, so the
   same actions can also be bound to compositor shortcuts.
-- Everything lives under this project directory plus `~/.config/voice`; the only
-  system-wide change is one udev rule for keyboard access.
+- Installed either as an Arch package (`/usr/lib/voice` plus a udev rule, all owned by
+  pacman) or straight from this checkout for development. Either way your own files are
+  just `~/.config/voice`, `~/.local/state/voice` and the model cache.
 
 ## Requirements
 
 - CachyOS or another Arch-based distro, KDE Plasma on Wayland (GNOME works for
   development; window-class detection for the terminal paste chord is KDE-only).
-- `pipewire` (for `pw-record`), `wl-clipboard`, `xdg-desktop-portal-kde` (or
-  `xdg-desktop-portal-gnome`), and [`uv`](https://docs.astral.sh/uv/).
+- `pipewire-audio` (for `pw-record`), `pipewire` (for `pw-dump`), `wl-clipboard`,
+  `libnotify`, `xdg-desktop-portal-kde` (or `xdg-desktop-portal-gnome`), and — for the
+  git-clone route only — [`uv`](https://docs.astral.sh/uv/). The package below pulls all
+  of these in for you.
 - Optional: an NVIDIA GPU with a recent driver for local transcription on CUDA. Without
   one, the local backend falls back to CPU (slower, but works).
 - Optional, for the recording pill: `python-gobject` with GTK 4 (system package, already
@@ -28,13 +31,49 @@ Status: phase 1 (dictation core). See `docs/superpowers/specs/` for the full des
   `gir1.2-gtk4layershell-1.0`). See "Recording pill" below for why the second one is not
   really optional. The JetBrains Mono font is used for the timer if it is installed.
 
-## Install
+## Install on Arch / CachyOS
+
+The supported install is the package: pacman owns every file and removes them all again.
+
+```
+git clone https://github.com/vampyren/voice ~/Apps/voice
+cd ~/Apps/voice/packaging
+makepkg -si                                     # builds and installs `voice`
+sudo pacman -U voice-cuda-*.pkg.tar.zst         # optional: NVIDIA GPU transcription
+voice doctor
+```
+
+It builds two packages:
+
+- **`voice`** — the app, its locked Python dependency set, `/usr/bin/voice`, the desktop
+  entry, the autostart entry and the udev rule. Transcription runs on the CPU.
+- **`voice-cuda`** — the CUDA 12 runtime that switches local transcription to the GPU.
+  Install it whenever you like; nothing else changes.
+
+`makepkg` needs `uv`, `git` and `python312` (AUR) to build, downloads the locked wheels
+during the build (so build with plain `makepkg`, not a network-less chroot), and installs
+about 1.6 GB (plus 2.4 GB for `voice-cuda`). The app runs on `python312` out of
+`/usr/lib/voice`, not on the system interpreter — `packaging/README.md` explains why, and
+which dependencies exist as Arch packages and which do not.
+
+Remove it with `pacman -R voice` (and `voice-cuda`). See [Uninstall](#uninstall) for the
+three directories under your home that a package must not delete.
+
+## Install from the git clone (development)
+
+This is the development route: it keeps the code in your checkout, in a uv virtualenv, so
+an edit is live the next time the daemon starts. Use the package for a machine you just
+want to dictate on.
 
 ```
 git clone https://github.com/vampyren/voice ~/Apps/voice && cd ~/Apps/voice
 ./install.sh          # uv sync --extra gpu, udev rule (sudo once), autostart, ~/.local/bin/voice
 voice doctor
 ```
+
+Only one of the two at a time: `~/.local/bin/voice` comes first on most PATHs and would
+shadow the packaged `/usr/bin/voice`. Run `./install.sh --uninstall` before installing the
+package, or `pacman -R voice` before going back to the clone.
 
 `install.sh` is idempotent and safe to re-run. Flags:
 
@@ -415,8 +454,9 @@ sentences towards its own wording, which doubled the errors on plain English.
   session has a local seat, and `portal` otherwise. `voice doctor` prints the choice and
   the reason (`hotkey backend: portal (no local seat)`), and so does `voice status`.
 
-The portal backend needs the desktop entry `install.sh` writes
-(`~/.local/share/applications/io.github.vampyren.voice.desktop`): the portal resolves the
+The portal backend needs the desktop entry the package (or `install.sh`) writes
+(`/usr/share/applications/io.github.vampyren.voice.desktop`, or the same name under
+`~/.local/share/applications/`): the portal resolves the
 app id through it, and refuses the shortcut session with "An app id is required" without
 it. Changing `hotkeys.backend` applies on `voice reload` (and on Save in the settings
 window): the daemon closes the portal session and creates a new one, so the desktop may
@@ -548,8 +588,9 @@ other things `inject.pill_focus` can do instead.
 
 - **config** — `config.toml` parses and passes validation.
 - **keyboard access** — at least one input device is readable without root. Re-run
-  `./install.sh` (installs the udev rule) or add yourself to the `input` group and
-  log out/in. A device already open before the rule existed may need re-plugging.
+  `./install.sh` or install the package — both install the udev rule — or add yourself to
+  the `input` group and log out/in. A device already open before the rule existed may
+  need re-plugging.
 - **hotkey backend** — informational: which listener the daemon would use here and why
   (`evdev`, or `portal (no local seat)`). Never fails the run; see
   [Configuration](#configuration).
@@ -617,8 +658,9 @@ Two more common issues doctor doesn't cover directly:
   and `hotkeys.backend = "auto"` already switches to it**: no local seat means the daemon
   binds its shortcuts through the desktop instead of reading `/dev/input`, so no `input`
   group membership is needed either (the first run asks for Ctrl+Space,
-  `hotkeys.portal_dictate`; after that the key lives in your desktop's keyboard settings). Run `./install.sh` first
-  — the portal needs the desktop entry it installs to resolve this app's id. What remains
+  `hotkeys.portal_dictate`; after that the key lives in your desktop's keyboard settings). Install the package or run
+  `./install.sh` first — the portal needs the desktop entry they install to resolve this
+  app's id. What remains
   is the paste: the portal keystroke is not delivered to the focused window in some remote
   sessions, so if Ctrl+V never arrives, set `inject.restore_clipboard = false` and paste
   yourself, or drive dictation from the command line (`voice toggle`, or `voice start`
@@ -626,19 +668,29 @@ Two more common issues doctor doesn't cover directly:
 
 ## Uninstall
 
+Packaged install:
+
+```
+sudo pacman -R voice-cuda voice     # either one alone is fine too
+```
+
+Git clone:
+
 ```
 ./install.sh --uninstall
 ```
 
-This removes the `~/.local/bin/voice` wrapper, both desktop entries, and the udev rule
-(asks for sudo once). It leaves your data behind and prints the paths; delete them
-yourself if you want a clean slate:
+`pacman -R` removes every file the package owns, including the udev rule and both desktop
+entries, and reloads udev. `install.sh --uninstall` removes the `~/.local/bin/voice`
+wrapper, both desktop entries, and the udev rule (asks for sudo once). Neither touches
+your data; delete it yourself if you want a clean slate:
 
 - `~/.config/voice` — config file.
 - `~/.local/state/voice` — history, portal restore token.
 - `~/.cache/huggingface` — downloaded local models (shared with other tools that use it).
 
-Then remove the cloned project directory.
+Then remove the cloned project directory (the package install does not need it either,
+once the package is built).
 
 ## Roadmap
 

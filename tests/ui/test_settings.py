@@ -1916,3 +1916,33 @@ def test_a_desktop_store_that_vanished_still_says_something(qapp):
     _press(qapp, dlg, Qt.Key.Key_D, Qt.KeyboardModifier.ControlModifier)
     assert dlg.hotkey_status.text() == CHANGE_REFUSED
     assert dlg.key_labels["dictate"].text() == "Ctrl+Space"
+
+
+def test_the_desktops_own_spelling_of_a_shortcut_reads_like_the_others():
+    """The portal answers "Press <Control>space"; the row must not show that.
+
+    Both spellings reach the same label, so both have to come out as a person
+    writes the key, or the tab reads half in the desktop's language.
+    """
+    from voice.ui.settings import pretty_trigger
+
+    assert pretty_trigger("Press <Control>space") == "Ctrl+Space"
+    assert pretty_trigger("<Shift><Control>c") == "Shift+Ctrl+C"
+    assert pretty_trigger("CTRL+space") == "Ctrl+Space"     # our own spelling, unchanged
+    assert pretty_trigger("F13") == "F13"
+    assert pretty_trigger("") == ""
+
+
+def test_advanced_sits_under_the_shortcuts_it_expands(qapp, isolated_xdg):
+    """Pinned to the bottom of the tab it reads as belonging to nothing."""
+    from PySide6.QtWidgets import QGroupBox, QTabWidget
+
+    dlg = SettingsDialog(Config.load(), capture_key=lambda cb: None, sources=lambda: [])
+    dlg.resize(660, 520)
+    tabs = dlg.findChild(QTabWidget)
+    tabs.setCurrentIndex(1)                       # Hotkeys
+    qapp.processEvents()
+    group = next(g for g in dlg.findChildren(QGroupBox) if g.title() == "Shortcuts")
+    gap = (dlg.advanced_button.mapTo(dlg, dlg.advanced_button.rect().topLeft()).y()
+           - group.mapTo(dlg, group.rect().bottomLeft()).y())
+    assert 0 <= gap < 100, f"Advanced sits {gap}px below the group it expands"

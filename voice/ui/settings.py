@@ -1,6 +1,8 @@
 """Settings dialog: edits config.toml through Config so comments survive."""
 from __future__ import annotations
 
+import re
+
 import logging
 import shutil
 import subprocess
@@ -339,9 +341,30 @@ def _pretty_part(part: str) -> str:
     return part[:1].upper() + part[1:].lower()
 
 
+#: What the portal hands back is a sentence in the desktop's own spelling -
+#: "Press <Control>space" - not our "CTRL+space". Both have to read the same
+#: on the row, so the desktop's form is translated into ours before it is
+#: prettified, rather than being title-cased into "Press <control>space".
+_DESKTOP_MODIFIER = re.compile(r"<([A-Za-z]+)>")
+
+
+def _from_desktop_spelling(trigger: str) -> str:
+    """The desktop's own way of writing a shortcut, in ours."""
+    text = (trigger or "").strip()
+    if text.lower().startswith("press "):
+        text = text[len("press "):].strip()
+    if "<" not in text:
+        return text
+    parts = [m.group(1) for m in _DESKTOP_MODIFIER.finditer(text)]
+    key = _DESKTOP_MODIFIER.sub("", text).strip()
+    if key:
+        parts.append(key)
+    return "+".join(parts)
+
+
 def pretty_trigger(trigger: str) -> str:
     """A desktop shortcut ("CTRL+space") as a person writes it ("Ctrl+Space")."""
-    parts = [part.strip() for part in (trigger or "").split("+") if part.strip()]
+    parts = [part.strip() for part in _from_desktop_spelling(trigger).split("+") if part.strip()]
     return "+".join(_pretty_part(part) for part in parts)
 
 
@@ -1067,8 +1090,10 @@ class SettingsDialog(QDialog):
         layout.addLayout(header)
         layout.addWidget(self._group("Shortcuts", keys))
         layout.addWidget(self.hotkey_status)
-        layout.addStretch()
+        # Directly under the shortcuts it expands on, not pinned to the far
+        # bottom of the tab where it reads as belonging to nothing.
         layout.addWidget(self._advanced_keys(), 0)
+        layout.addStretch()
         return w
 
     def _advanced_keys(self) -> QWidget:

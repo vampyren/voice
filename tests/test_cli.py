@@ -342,6 +342,10 @@ def test_status_still_reports_keyboard_access_on_the_evdev_backend(isolated_xdg,
 
 @pytest.mark.parametrize("state,triggers,expected", [
     ("bound", {"dictate": "F13"}, "shortcuts: bound (dictate=F13)"),
+    # A bound dictation key with an optional shortcut left unbound: still bound,
+    # and the one without a key is named rather than shown as "language_toggle=".
+    ("bound", {"dictate": "F13", "language_toggle": ""},
+     "shortcuts: bound (dictate=F13, language_toggle=no key assigned)"),
     ("unassigned", {"dictate": ""},
      "shortcuts: registered, no key assigned \u2014 assign it in Settings \u203a Keyboard \u203a Keyboard Shortcuts (GNOME) or System Settings \u203a Shortcuts (KDE)"),
     ("unassigned", {"dictate": "", "language_toggle": "F14"},

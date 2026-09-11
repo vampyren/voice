@@ -56,7 +56,12 @@ DESCRIPTIONS = {
     "dictate": "Voice dictation",
     "recall": "Re-insert the last dictation",
     "cancel": "Cancel the current recording",
+    "language_toggle": "Switch dictation language",
 }
+#: The shortcut the whole backend stands or falls by: without it there is no
+#: dictation at all, while the other three are conveniences a user may leave
+#: unbound on purpose.
+PRIMARY_SHORTCUT = "dictate"
 #: ConfigureShortcuts (the desktop's own rebinding dialog) arrived in version 2.
 CONFIGURE_VERSION = 2
 #: What the portal made of our shortcuts, once it has answered.
@@ -209,13 +214,32 @@ class PortalListener:
         return None if state is None else state == STATE_BOUND
 
     def shortcut_state(self) -> str | None:
-        """One of STATE_*, or None before the portal has answered."""
+        """One of STATE_*, or None before the portal has answered.
+
+        Decided by the dictation key alone. Every id used to have to have a
+        trigger, so registering `language_toggle` and leaving it unbound - the
+        ordinary thing to do with an optional shortcut - reported the backend
+        dead: a cross in `voice doctor`, "no key assigned" in `voice status`,
+        and a critical notification on every start, all while dictation worked.
+        The ids that really have no key are named by `unassigned_shortcuts()`.
+        """
         with self._state_lock:
             if self._bound is None:
                 return None
             if not self._bound:
                 return STATE_DENIED
-            return STATE_UNASSIGNED if not all(self._triggers.values()) else STATE_BOUND
+            if PRIMARY_SHORTCUT in self._triggers:
+                primary_ok = bool(self._triggers[PRIMARY_SHORTCUT])
+            else:
+                # No dictation shortcut configured at all: then the ones there
+                # are decide, or a listener bound to nothing reads as healthy.
+                primary_ok = bool(self._triggers) and all(self._triggers.values())
+            return STATE_BOUND if primary_ok else STATE_UNASSIGNED
+
+    def unassigned_shortcuts(self) -> list[str]:
+        """The ids the desktop registered and attached no key to, in order."""
+        with self._state_lock:
+            return [sid for sid, trigger in self._triggers.items() if not trigger]
 
     def effective_triggers(self) -> dict[str, str]:
         """The trigger the desktop actually holds per shortcut id ("" = none)."""

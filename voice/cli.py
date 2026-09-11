@@ -51,6 +51,10 @@ def _shortcut_row(reply: dict, keyboard) -> str:
     `shortcut_state` is what a current daemon reports; the bool fallback keeps a
     `voice status` run against an older one readable.
     """
+    # Imported here rather than at module scope: the CLI starts on every `voice
+    # status`, and the listener module pulls jeepney in with it.
+    from voice.hotkey.portal_listener import NO_TRIGGER
+
     state = reply.get("shortcut_state")
     triggers = reply.get("shortcut_triggers") or {}
     if state == "unassigned":
@@ -61,7 +65,10 @@ def _shortcut_row(reply: dict, keyboard) -> str:
     if state == "denied":
         return DENIED_SHORTCUT
     if state == "bound":
-        keys = ", ".join(f"{sid}={trigger}" for sid, trigger in triggers.items())
+        # The dictation key decides the state, so a shortcut left unbound on
+        # purpose still appears here - by name, never as a bare "sid=".
+        keys = ", ".join(f"{sid}={trigger or NO_TRIGGER}"
+                         for sid, trigger in triggers.items())
         return f"bound ({keys})" if keys else "bound"
     if keyboard is None:
         return "waiting for the desktop"

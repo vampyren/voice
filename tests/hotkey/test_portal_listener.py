@@ -738,3 +738,52 @@ def test_a_connection_dropped_mid_loop_ends_the_listener_quietly():
     assert conn.closed
     assert listener._conn is None
     listener._listen()                         # a late loop entry stays quiet
+
+
+def test_a_keyless_secondary_shortcut_does_not_condemn_the_dictation_key():
+    """The owner's dictate key is bound and language_toggle is not, which is the
+    ordinary case for an optional shortcut. Reporting the whole backend as
+    "unassigned" made `voice status` show a failure, `voice doctor` a cross, and
+    the daemon pop a critical "shortcut is not assigned" on every start - while
+    dictation worked perfectly."""
+    listener, _, _ = make({"dictate": "CTRL+space", "language_toggle": "CTRL+SHIFT+l"},
+                          bind_triggers={"dictate": "F13", "language_toggle": ""})
+    listener.start()
+    started(listener)
+    try:
+        assert listener.shortcut_state() == STATE_BOUND
+        assert listener.devices_ok() is True
+        assert listener.unassigned_shortcuts() == ["language_toggle"]
+    finally:
+        listener.stop()
+
+
+def test_the_dictation_key_is_what_decides_the_state():
+    listener, _, _ = make({"dictate": "CTRL+space", "recall": "F14"},
+                          bind_triggers={"dictate": "", "recall": "F14"})
+    listener.start()
+    started(listener)
+    try:
+        assert listener.shortcut_state() == STATE_UNASSIGNED
+        assert listener.unassigned_shortcuts() == ["dictate"]
+    finally:
+        listener.stop()
+
+
+def test_every_shortcut_we_register_is_described_in_the_desktops_own_words():
+    """The desktop lists these by description; a raw id reads as a bug beside
+    three sentences."""
+    from voice.hotkey.portal_listener import DESCRIPTIONS
+
+    listener, conn, _ = make({"dictate": "CTRL+space", "recall": "", "cancel": "",
+                              "language_toggle": "CTRL+SHIFT+l"})
+    listener.start()
+    started(listener)
+    try:
+        bound = conn.bodies("BindShortcuts")[0][1]
+        for sid, options in bound:
+            assert sid in DESCRIPTIONS
+            assert options["description"][1] == DESCRIPTIONS[sid]
+            assert sid not in DESCRIPTIONS[sid]          # a sentence, not the id
+    finally:
+        listener.stop()

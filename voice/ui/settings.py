@@ -423,6 +423,12 @@ class SettingsDialog(QDialog):
         self.language_profile_table.setHorizontalHeaderLabels(["Language", "Profile"])
         self.language_profile_table.horizontalHeader().setStretchLastSection(True)
         self.language_profile_table.verticalHeader().setVisible(False)
+        # The last column stretches, so there is nothing to scroll to sideways -
+        # and a scrollbar that appears anyway steals the height the rows need.
+        self.language_profile_table.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.language_profile_table.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.language_profile_combos: dict[str, QComboBox] = {}
 
         dictation = self._form()
@@ -713,8 +719,14 @@ class SettingsDialog(QDialog):
             table.setCellWidget(row, 1, combo)
             self.language_profile_combos[code] = combo
         # Exactly as tall as its rows: a fixed height leaves either dead space
-        # under two languages or a scrollbar under four.
-        rows = sum(table.rowHeight(r) for r in range(table.rowCount()))
+        # under two languages or a scrollbar under four. The rows have to be
+        # measured after the combos are in them - a row still holding only its
+        # default height reports about half what the combo will need, which is
+        # what squashed this table to a row and a half.
+        table.resizeRowsToContents()
+        rows = sum(max(table.rowHeight(r),
+                       table.cellWidget(r, 1).sizeHint().height() if table.cellWidget(r, 1) else 0)
+                   for r in range(table.rowCount()))
         table.setFixedHeight(table.horizontalHeader().height() + rows + 2 * table.frameWidth())
 
     def _on_language_picked(self, index: int) -> None:

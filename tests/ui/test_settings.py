@@ -1139,3 +1139,22 @@ def test_the_form_labels_line_up_in_one_column(qapp):
                 edges.add(item.widget().geometry().right())
         assert len(edges) <= 1, f"labels end at {sorted(edges)}"
     dlg.close()
+
+
+def test_the_profile_table_shows_every_language_without_scrolling(qapp, isolated_xdg):
+    """Two languages must both be visible: the table is sized, not scrolled.
+
+    A scrollbar appearing inside a fixed-height table steals the height the
+    second row needs, which is how this shipped showing a row and a half.
+    """
+    cfg = Config.load()
+    cfg.set("general.languages", ["en", "sv"])
+    cfg.save()
+    dlg = SettingsDialog(cfg, capture_key=lambda cb: None, sources=lambda: [])
+    table = dlg.language_profile_table
+    assert table.rowCount() == 2
+    needed = table.horizontalHeader().height() + sum(
+        table.rowHeight(r) for r in range(table.rowCount()))
+    assert table.height() >= needed, (
+        f"table is {table.height()}px for {needed}px of header and rows")
+    assert table.horizontalScrollBar().isVisibleTo(table) is False

@@ -1748,6 +1748,18 @@ def test_escape_leaves_the_key_as_it_was(qapp):
     ("Key_Space", None, None),                   # nor the space bar itself
     ("Key_Return", None, None),
     ("Key_Backspace", None, None),
+    # Punctuation. Qt hands us the bare character, which GTK cannot parse, so
+    # the trigger has to carry the keysym name instead - and `+` in particular
+    # is not even separable in our own "CTRL+plus" syntax as a character.
+    ("Key_Comma", "ControlModifier", "CTRL+comma"),
+    ("Key_Period", "ControlModifier", "CTRL+period"),
+    ("Key_BracketLeft", "MetaModifier", "SUPER+bracketleft"),
+    ("Key_Minus", "ControlModifier", "CTRL+minus"),
+    ("Key_Plus", "ControlModifier", "CTRL+plus"),
+    ("Key_Slash", "ControlModifier", "CTRL+slash"),
+    # And a punctuation key on its own is still a key somebody types with.
+    ("Key_Comma", None, None),
+    ("Key_Slash", None, None),
 ])
 def test_only_a_combination_that_can_be_a_global_shortcut_is_handed_over(
         qapp, key, modifiers, trigger):
@@ -1785,7 +1797,8 @@ def test_a_refused_key_leaves_the_next_one_still_being_listened_for(qapp):
                                store=store)
     dlg.change_buttons["dictate"].click()
     _press(qapp, dlg, Qt.Key.Key_A)                              # refused
-    _press(qapp, dlg, Qt.Key.Key_Slash, Qt.KeyboardModifier.ControlModifier)
+    # "Volume Up" is Qt's own spelling and no keysym at all, so it stays refused.
+    _press(qapp, dlg, Qt.Key.Key_VolumeUp, Qt.KeyboardModifier.ControlModifier)
     assert dlg.hotkey_status.text() == CHANGE_UNUSABLE           # and refused again
     assert store.writes == []
     _press(qapp, dlg, Qt.Key.Key_D, Qt.KeyboardModifier.ControlModifier)

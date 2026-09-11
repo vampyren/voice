@@ -60,6 +60,28 @@ _KEYSYMS = {"space": "space", "return": "Return", "enter": "Return", "tab": "Tab
             "backtab": "ISO_Left_Tab", "iso_left_tab": "ISO_Left_Tab",
             "sysreq": "Sys_Req", "sys_req": "Sys_Req", "clear": "Clear",
             "help": "Help", "cancel": "Cancel"}
+#: Every ASCII punctuation key, as the character a keyboard sends and the X
+#: keysym name GTK parses it back from. Both halves are needed, and neither is
+#: optional: Qt hands the settings dialog the bare character, which GTK refuses
+#: outright (`Gtk.accelerator_parse('<Control>,')` -> (False, 0, 0)), while the
+#: name is what GTK accepts (`<Control>comma` -> (True, 44, CONTROL_MASK)) and
+#: what a person copies out of the desktop's own documentation into the
+#: Advanced fields. Both measured against GTK 4, name by name.
+#:
+#: `+` matters twice over: as a character it cannot even be written in our own
+#: "CTRL+plus" syntax, because that is the separator.
+PUNCTUATION_KEYSYMS = {
+    "!": "exclam", '"': "quotedbl", "#": "numbersign", "$": "dollar",
+    "%": "percent", "&": "ampersand", "'": "apostrophe", "(": "parenleft",
+    ")": "parenright", "*": "asterisk", "+": "plus", ",": "comma",
+    "-": "minus", ".": "period", "/": "slash", ":": "colon", ";": "semicolon",
+    "<": "less", "=": "equal", ">": "greater", "?": "question", "@": "at",
+    "[": "bracketleft", "\\": "backslash", "]": "bracketright",
+    "^": "asciicircum", "_": "underscore", "`": "grave", "{": "braceleft",
+    "|": "bar", "}": "braceright", "~": "asciitilde",
+}
+#: The names on their own, for a trigger that already holds one.
+PUNCTUATION_NAMES = frozenset(PUNCTUATION_KEYSYMS.values())
 #: The last function key X has a name for: F36 and up are not keysyms at all.
 _LAST_FUNCTION_KEY = 35
 #: An empty GVariant array of strings needs its type: `<[]>` alone is not valid.
@@ -111,6 +133,10 @@ def _keysym(key: str) -> str:
     lowered = key.lower()
     if lowered in _KEYSYMS:
         return _KEYSYMS[lowered]
+    if lowered in PUNCTUATION_NAMES:
+        return lowered           # already a keysym name; GTK wants it lowercase
+    if key in PUNCTUATION_KEYSYMS:
+        return PUNCTUATION_KEYSYMS[key]
     if len(lowered) > 1 and lowered[0] == "f" and lowered[1:].isdigit():
         if not 1 <= int(lowered[1:]) <= _LAST_FUNCTION_KEY:
             raise ValueError(f"there is no {key.upper()} key on this desktop")
@@ -154,6 +180,10 @@ class GnomeShortcutStore:
         self._which = which
         self.app_id = app_id
         self.key = GNOME_KEY_TEMPLATE.format(app_id=app_id)
+        #: `{shortcut id: why}` for the triggers the last write could not spell
+        #: and therefore left alone. The sentence goes into the write's own
+        #: answer as well; this is for a caller that has to show it somewhere.
+        self.refused: dict[str, str] = {}
 
     # -- public ------------------------------------------------------------
     def write(self, triggers: dict[str, str]) -> str:
@@ -162,7 +192,13 @@ class GnomeShortcutStore:
         Returns one sentence for the user. Raises ShortcutStoreError, with the
         reason, rather than writing anything it is not sure of.
         """
-        accelerators = self._converted(triggers)
+        accelerators, self.refused = self._converted(triggers)
+        if not accelerators:
+            # Nothing could be spelled, so there is nothing to write and the
+            # whole call is the failure - which is also the only shape a
+            # single-key "Change..." can take.
+            raise ShortcutStoreError("; ".join(self.refused.values()))
+        refused = _refused_note(self.refused)
         self._require_dconf()
         entries = _parse_entries(self._read(), self.key)
         known = {sid for sid, _ in entries}
@@ -179,23 +215,30 @@ class GnomeShortcutStore:
         if not changed:
             return (f"{self.name} already holds "
                     f"{_spell(accelerators, skipped)}; nothing to change."
-                    + _skipped_note(skipped))
+                    + _skipped_note(skipped) + refused)
         self._write_value("[" + ", ".join(rebuilt) + "]")
         log.info("wrote %s to %s", ", ".join(changed), self.key)
         return (f"Saved to {self.name}'s own shortcut store: "
                 f"{_spell({sid: accelerators[sid] for sid in changed}, skipped)}."
-                + _skipped_note(skipped))
+                + _skipped_note(skipped) + refused)
 
     # -- dconf -------------------------------------------------------------
-    def _converted(self, triggers: dict[str, str]) -> dict[str, str]:
-        """Every trigger as an accelerator, or a refusal before anything is read."""
-        out = {}
+    def _converted(self, triggers: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+        """The accelerators to write, and the ids nothing could be made of.
+
+        A trigger this version cannot spell fails *that key* and no other. It
+        used to raise for the set, so a single legacy `hotkeys.portal_cancel`
+        left over from a version that spelled keys differently stopped the user
+        changing any key at all - and said nothing about which field was at
+        fault, which is the one thing that would have let them fix it.
+        """
+        out, refused = {}, {}
         for sid, trigger in triggers.items():
             try:
                 out[sid] = to_accelerator(trigger)
             except ValueError as exc:
-                raise ShortcutStoreError(f"{sid}: {exc}") from exc
-        return out
+                refused[sid] = f"{sid}: {exc}"
+        return out, refused
 
     def _require_dconf(self) -> None:
         if not self._which("dconf"):
@@ -232,6 +275,16 @@ class GnomeShortcutStore:
 def _spell(accelerators: dict[str, str], skipped: list[str]) -> str:
     return ", ".join(f"{sid} = {accel or 'no key'}"
                      for sid, accel in accelerators.items() if sid not in skipped)
+
+
+def _refused_note(refused: dict[str, str]) -> str:
+    if not refused:
+        return ""
+    return (" One was left as it was, because its trigger cannot be spelled for "
+            f"this desktop: {'; '.join(refused.values())}."
+            if len(refused) == 1 else
+            " Some were left as they were, because their triggers cannot be "
+            f"spelled for this desktop: {'; '.join(refused.values())}.")
 
 
 def _skipped_note(skipped: list[str]) -> str:

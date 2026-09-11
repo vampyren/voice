@@ -87,11 +87,34 @@ def test_qts_own_spelling_of_a_key_becomes_one_gtk_can_parse(qt, keysym):
     assert to_accelerator(f"CTRL+{qt}") == f"<Control>{keysym}"
 
 
+#: Every ASCII punctuation key, in both the spellings that reach us: the bare
+#: character, which is what Qt hands the dialog, and the X keysym name, which
+#: is what a person types into the Advanced fields and what GTK actually
+#: parses. Measured against GTK 4 on this machine - `<Control>comma` is
+#: (True, 44, CONTROL_MASK) and `<Control>,` is (False, 0, 0) - so the
+#: character has to become the name before anything is written.
+@pytest.mark.parametrize("ours,theirs", [
+    ("CTRL+comma", "<Control>comma"), ("CTRL+,", "<Control>comma"),
+    ("CTRL+period", "<Control>period"), ("CTRL+.", "<Control>period"),
+    ("SUPER+bracketleft", "<Super>bracketleft"), ("SUPER+[", "<Super>bracketleft"),
+    ("CTRL+minus", "<Control>minus"), ("CTRL+-", "<Control>minus"),
+    ("CTRL+plus", "<Control>plus"),
+    ("CTRL+slash", "<Control>slash"), ("CTRL+/", "<Control>slash"),
+    ("CTRL+SHIFT+equal", "<Shift><Control>equal"),
+    ("ALT+grave", "<Alt>grave"), ("ALT+`", "<Alt>grave"),
+    ("CTRL+backslash", "<Control>backslash"),
+])
+def test_a_punctuation_key_reaches_the_desktop_as_the_keysym_gtk_parses(ours, theirs):
+    """Ctrl+, worked before this branch and has to keep working: the whitelist
+    that replaced the pass-through refused every punctuation key there is."""
+    assert to_accelerator(ours) == theirs
+
+
 #: Not a keysym and not spellable as one, so the write would go through and the
-#: shortcut would never fire. `/`, `,` and `-` are Qt's spelling of those keys
-#: and GTK refuses all three; F36 is past the last function key there is.
-@pytest.mark.parametrize("bad", ["CTRL+/", "CTRL+,", "CTRL+-", "CTRL+banana",
-                                 "CTRL+F36", "CTRL+Volume"])
+#: shortcut would never fire. F36 is past the last function key there is, and
+#: "Volume" is half of Qt's "Volume Up", which is not a keysym name at all.
+@pytest.mark.parametrize("bad", ["CTRL+banana", "CTRL+F36", "CTRL+Volume",
+                                 "CTRL+Page Up"])
 def test_a_key_that_cannot_be_spelled_for_the_desktop_is_refused(bad):
     """A write that cannot work has to report failure, not success: the dialog
     said "Your desktop now uses Ctrl+Ins" over an accelerator GTK drops."""
@@ -108,9 +131,24 @@ def test_the_media_keys_are_still_passed_through():
 def test_a_key_that_cannot_be_spelled_is_refused_before_anything_is_written():
     runner = FakeRunner()
     with pytest.raises(ShortcutStoreError) as exc:
-        store(runner).write({"dictate": "CTRL+/"})
+        store(runner).write({"dictate": "CTRL+banana"})
     assert runner.calls == []
     assert "dictate" in str(exc.value)
+
+
+def test_one_unusable_trigger_fails_that_key_and_not_the_whole_write():
+    """A legacy field nobody can spell used to poison the entire save: one
+    `hotkeys.portal_cancel` this version cannot spell and no key in the window
+    could be changed at all, with no way to find out which field was at fault."""
+    runner = FakeRunner()
+    desktop = store(runner)
+    message = desktop.write({"dictate": "CTRL+ALT+d", "recall": "CTRL+banana"})
+    written = runner.calls[1][3]
+    assert "<Alt><Control>d" in written or "<Control><Alt>d" in written
+    assert "<['F14']>" in written                 # recall left exactly as it was
+    assert "recall" in message and "banana" in message
+    assert set(desktop.refused) == {"recall"}
+    assert "recall" in desktop.refused["recall"]
 
 
 # -- which desktop this is ---------------------------------------------------

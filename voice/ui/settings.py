@@ -17,7 +17,8 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFormLayout, QG
 
 from voice.audio.capture import Source
 from voice.config import INJECT_MODES, Config, is_language_code
-from voice.hotkey.desktop_shortcuts import (ShortcutStoreError, desktop_shortcut_store,
+from voice.hotkey.desktop_shortcuts import (PUNCTUATION_KEYSYMS, PUNCTUATION_NAMES,
+                                            ShortcutStoreError, desktop_shortcut_store,
                                             to_accelerator)
 from voice.hotkey.keyspec import parse_keyspec
 from voice.hotkey.portal_listener import DIALOG_MESSAGE
@@ -342,6 +343,10 @@ _KEY_WORDS = {"SPACE": "Space", "ESC": "Escape", "ESCAPE": "Escape", "RETURN": "
               "LEFTBRACE": "[", "RIGHTBRACE": "]", "MINUS": "-", "EQUAL": "=",
               "SEMICOLON": ";", "APOSTROPHE": "'", "GRAVE": "`", "COMMA": ",", "DOT": ".",
               "SLASH": "/", "BACKSLASH": "\\"}
+#: And the X keysym names a portal trigger now carries for those same keys, so
+#: "CTRL+comma" reads back as "Ctrl+," rather than as "Ctrl+Comma". One table,
+#: read the other way round, so the two cannot drift apart.
+_KEY_WORDS.update({name.upper(): char for char, name in PUNCTUATION_KEYSYMS.items()})
 
 
 def _pretty_part(part: str) -> str:
@@ -421,6 +426,10 @@ def chord_trigger(event) -> str | None:
     if key in _HALF_A_CHORD or not key:
         return None
     name = QKeySequence(key).toString()
+    # Qt writes a punctuation key as the character itself, which GTK cannot
+    # parse - and "+" cannot even survive our own separator. The keysym name
+    # can do both, so it is what the trigger carries from here on.
+    name = PUNCTUATION_KEYSYMS.get(name, name)
     if not name or " " in name or "+" in name or len(name) > 20:
         return ""
     modifiers = event.modifiers()
@@ -433,7 +442,7 @@ def chord_trigger(event) -> str | None:
 #: away from every other window on the machine, so a bare letter, digit or
 #: typing key is not a shortcut - it is that key, gone. Anything else (a
 #: function key, Insert, a media key) is nobody's typing and is fine alone.
-_NEVER_ALONE = {"space", "return", "enter", "tab", "backspace"}
+_NEVER_ALONE = {"space", "return", "enter", "tab", "backspace"} | set(PUNCTUATION_NAMES)
 
 
 def chord_problem(trigger: str) -> str | None:
@@ -1832,6 +1841,12 @@ class SettingsDialog(QDialog):
             self.error_label.setText(f"Could not change this desktop's shortcuts: {exc}")
             return False
         log.info("the desktop's shortcut store: %s", message)
+        refused = dict(getattr(store, "refused", None) or {})
+        if refused:
+            # The rest of the set did move, so this is not a failed save - it is
+            # the one field that stayed behind, named, because a trigger nothing
+            # can be made of is otherwise invisible until the key never fires.
+            self.error_label.setText("; ".join(refused.values()))
         self._say_about_hotkeys(note)
         return True
 

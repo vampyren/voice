@@ -19,7 +19,8 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFormLayout, QG
 
 from voice.audio.capture import Source
 from voice.config import INJECT_MODES, Config, is_language_code
-from voice.hotkey.desktop_shortcuts import ShortcutStoreError, desktop_shortcut_store
+from voice.hotkey.desktop_shortcuts import (ShortcutStoreError, desktop_shortcut_store,
+                                            to_accelerator)
 from voice.hotkey.keyspec import parse_keyspec
 from voice.hotkey.portal_listener import DIALOG_MESSAGE
 from voice.ui.pill_placer import PillPlacer
@@ -120,7 +121,13 @@ SAVED_TO_DESKTOP = "Your shortcuts have been handed to your desktop."
 #: has never been told about, because voice has never asked it for one. Saving
 #: asks, which is why that is what this says to do.
 NOT_OFFERED = "Your desktop has not been offered this shortcut yet - press Save, then Change… again."
-CHANGE_UNUSABLE = "That key cannot be used as a shortcut - try another one."
+#: Both refusals a key press can meet, and both leave the window still
+#: listening: the user has just pressed something and has to be told what to
+#: press instead, not handed back a window that says nothing is happening.
+CHANGE_UNUSABLE = ("That key cannot be used as a shortcut - try another one, "
+                   "or press Escape to leave it as it is.")
+NEEDS_A_COMBINATION = ("A key on its own would stop working everywhere else - hold Ctrl, "
+                       "Alt or Super as well, or press Escape to leave it as it is.")
 #: And when the store refuses without a word of its own to show.
 CHANGE_REFUSED = "Your desktop did not take that key."
 #: What a listener that cannot hand back a key answers with instead: a sentence
@@ -322,6 +329,7 @@ _KEY_WORDS = {"SPACE": "Space", "ESC": "Escape", "ESCAPE": "Escape", "RETURN": "
               "PAGEDOWN": "Page Down", "PAGE_DOWN": "Page Down", "UP": "Up", "DOWN": "Down",
               "LEFT": "Left", "RIGHT": "Right", "CAPSLOCK": "Caps Lock", "MENU": "Menu",
               "PRINT": "Print Screen", "SYSRQ": "Print Screen", "PAUSE": "Pause",
+              "INS": "Insert", "PGUP": "Page Up", "PGDOWN": "Page Down",
               "LEFTBRACE": "[", "RIGHTBRACE": "]", "MINUS": "-", "EQUAL": "=",
               "SEMICOLON": ";", "APOSTROPHE": "'", "GRAVE": "`", "COMMA": ",", "DOT": ".",
               "SLASH": "/", "BACKSLASH": "\\"}
@@ -410,6 +418,35 @@ def chord_trigger(event) -> str | None:
     parts = [word for flag, word in _CHORD_MODIFIERS if modifiers & flag]
     parts.append(name)
     return "+".join(parts)
+
+
+#: Keys that cannot be a shortcut on their own. A global shortcut takes its key
+#: away from every other window on the machine, so a bare letter, digit or
+#: typing key is not a shortcut - it is that key, gone. Anything else (a
+#: function key, Insert, a media key) is nobody's typing and is fine alone.
+_NEVER_ALONE = {"space", "return", "enter", "tab", "backspace"}
+
+
+def chord_problem(trigger: str) -> str | None:
+    """Why this combination cannot be given to the desktop, or None if it can.
+
+    The window grabs the whole application while it waits for a combination, so
+    every key press in it arrives here - including the ones the user only meant
+    to type. Answering with the reason rather than writing them is what keeps
+    "Change…" from quietly rebinding dictation to the letter A.
+    """
+    if not trigger:
+        return CHANGE_UNUSABLE
+    parts = trigger.split("+")
+    key = parts[-1]
+    if len(parts) == 1 and (key.lower() in _NEVER_ALONE
+                            or (len(key) == 1 and key.isascii() and key.isalnum())):
+        return NEEDS_A_COMBINATION
+    try:
+        to_accelerator(trigger)          # the desktop's own spelling of it, or a refusal
+    except ValueError:
+        return CHANGE_UNUSABLE
+    return None
 
 
 def _luminance(colour: QColor) -> float:
@@ -1674,8 +1711,16 @@ class SettingsDialog(QDialog):
         if trigger is None:                      # a modifier on its own: keep waiting
             return True
         name = self._changing
-        if not trigger or name is None:
-            self._stop_change(CHANGE_UNUSABLE)
+        if name is None:                         # nothing is being changed any more
+            self._stop_change(CHANGE_STOPPED)
+            return True
+        problem = chord_problem(trigger)
+        if problem is not None:
+            # Say why and keep listening: the user has just pressed a key, and a
+            # window that let go of the keyboard here would leave them with
+            # nothing waiting for the key they press instead. Escape is read
+            # above, before this, so it can always end the wait.
+            self._say_about_hotkeys(problem)
             return True
         self._stop_change("")
         self._give_the_desktop(name, trigger)

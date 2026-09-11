@@ -4,8 +4,9 @@ from voice.audio.capture import Source
 from voice.config import Config
 from voice.hotkey.desktop_shortcuts import ShortcutStoreError
 from voice.hotkey.portal_listener import DIALOG_MESSAGE, NO_CAPTURE_MESSAGE
-from voice.ui.settings import (ACTION_LABELS, ACTIONS, CHANGE, CHANGE_STOPPED,
-                               CHANGED_ON_DESKTOP, DESKTOP_DIALOG_OPEN, NOT_OFFERED,
+from voice.ui.settings import (ACTION_LABELS, ACTIONS, CHANGE, CHANGE_BUSY, CHANGE_STOPPED,
+                               CHANGE_UNUSABLE, CHANGED_ON_DESKTOP, DESKTOP_DIALOG_OPEN,
+                               DESKTOP_STORE, NEEDS_A_COMBINATION, NOT_OFFERED,
                                NOT_SET, PROFILE_TEMPLATES, SAVED_TO_DESKTOP,
                                SETTINGS_APP_MISSING, SETTINGS_APP_OPENED,
                                SHORTCUT_SETTINGS_PATH, UNKNOWN_TRIGGER, WHO_MANAGES,
@@ -1690,6 +1691,83 @@ def test_escape_leaves_the_key_as_it_was(qapp):
     assert dlg.hotkey_status.text() == CHANGE_STOPPED
     _press(qapp, dlg, Qt.Key.Key_D, Qt.KeyboardModifier.ControlModifier)   # no longer listening
     assert store.writes == []
+
+
+#: What may be handed to the desktop as a global shortcut, and what may not.
+#: A bare key here is a key taken away from every other window on the machine -
+#: and "Change…" grabs the whole application, so a user who clicks it and then
+#: types anywhere in this window used to rebind to whatever they typed.
+@pytest.mark.parametrize("key,modifiers,trigger", [
+    ("Key_A", "ControlModifier", "CTRL+A"),
+    ("Key_D", "ControlModifier|AltModifier", "CTRL+ALT+D"),
+    ("Key_Space", "ControlModifier", "CTRL+Space"),
+    ("Key_F13", None, "F13"),                    # a function key needs no modifier
+    ("Key_Insert", None, "Ins"),                 # nor does a key nobody types with
+    ("Key_A", None, None),                       # a bare letter: never
+    ("Key_1", None, None),                       # nor a bare digit
+    ("Key_Space", None, None),                   # nor the space bar itself
+    ("Key_Return", None, None),
+    ("Key_Backspace", None, None),
+])
+def test_only_a_combination_that_can_be_a_global_shortcut_is_handed_over(
+        qapp, key, modifiers, trigger):
+    from PySide6.QtCore import Qt
+
+    flags = Qt.KeyboardModifier.NoModifier
+    for word in (modifiers or "").split("|"):
+        if word:
+            flags |= getattr(Qt.KeyboardModifier, word)
+    store = FakeStore()
+    cfg, dlg = _hotkeys_dialog(qapp, "desktop-store", triggers=lambda: {"dictate": "CTRL+space"},
+                               store=store)
+    dlg.change_buttons["dictate"].click()
+    _press(qapp, dlg, getattr(Qt.Key, key), flags)
+    if trigger is None:
+        assert store.writes == [], f"{key} must not become a global shortcut"
+        assert dlg.hotkey_status.text() == NEEDS_A_COMBINATION
+        # Still waiting: a refusal that let go of the keyboard would leave the
+        # user having pressed a key and been given nothing to press instead.
+        assert dlg.change_buttons["dictate"].text() == CHANGE_BUSY[DESKTOP_STORE]
+        assert dlg.key_labels["dictate"].text() == "Ctrl+Space"
+    else:
+        assert store.writes == [{"dictate": trigger, "cancel": "", "language_toggle": "",
+                                 "recall": ""}]
+        assert dlg.change_buttons["dictate"].text() == CHANGE
+
+
+def test_a_refused_key_leaves_the_next_one_still_being_listened_for(qapp):
+    """The grab is application-wide, so giving up on a refusal would strand the
+    user: they pressed a key, nothing happened, and nothing is waiting either."""
+    from PySide6.QtCore import Qt
+
+    store = FakeStore()
+    cfg, dlg = _hotkeys_dialog(qapp, "desktop-store", triggers=lambda: {"dictate": "CTRL+space"},
+                               store=store)
+    dlg.change_buttons["dictate"].click()
+    _press(qapp, dlg, Qt.Key.Key_A)                              # refused
+    _press(qapp, dlg, Qt.Key.Key_Slash, Qt.KeyboardModifier.ControlModifier)
+    assert dlg.hotkey_status.text() == CHANGE_UNUSABLE           # and refused again
+    assert store.writes == []
+    _press(qapp, dlg, Qt.Key.Key_D, Qt.KeyboardModifier.ControlModifier)
+    assert store.writes == [{"dictate": "CTRL+D", "cancel": "", "language_toggle": "",
+                             "recall": ""}]
+    assert dlg.change_buttons["dictate"].text() == CHANGE
+
+
+def test_escape_still_ends_a_change_that_has_refused_a_key(qapp):
+    """Whatever else the grab does, Escape has to get the user out of it."""
+    from PySide6.QtCore import Qt
+
+    store = FakeStore()
+    cfg, dlg = _hotkeys_dialog(qapp, "desktop-store", triggers=lambda: {"dictate": "CTRL+space"},
+                               store=store)
+    dlg.change_buttons["dictate"].click()
+    _press(qapp, dlg, Qt.Key.Key_A)
+    _press(qapp, dlg, Qt.Key.Key_Escape)
+    assert dlg.hotkey_status.text() == CHANGE_STOPPED
+    assert dlg.change_buttons["dictate"].text() == CHANGE
+    _press(qapp, dlg, Qt.Key.Key_D, Qt.KeyboardModifier.ControlModifier)
+    assert store.writes == []                    # no longer listening
 
 
 def test_a_desktop_that_refuses_the_key_leaves_the_row_on_the_truth(qapp):

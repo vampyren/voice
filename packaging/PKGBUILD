@@ -1,0 +1,218 @@
+# Maintainer: vampyren <vampyren@protonmail.com>
+#
+# voice - Wayland-native voice typing, packaged for Arch / CachyOS.
+#
+#   cd packaging && makepkg -si          # build + install, GPU-ready
+#   VOICE_GPU=0 makepkg -si              # the CPU-only variant (see _gpu below)
+#
+# One package, and it includes the GPU stack. Transcription on an NVIDIA card is
+# what this app is for, so `makepkg -si` must produce an install that uses it -
+# not one that needs a second package afterwards. See packaging/README.md for
+# why a split build was rejected (a dependency cycle pacman resolves badly on
+# removal) and what the CPU-only escape hatch costs.
+#
+# Why the app does not live in /usr/lib/python3.X/site-packages: the locked
+# dependency set includes wheels no Arch package provides - CTranslate2 and
+# onnxruntime - plus a CUDA 12 runtime that Arch's `cuda` (13.x) cannot supply.
+# So the locked, tested set is installed under /usr/lib/voice and imported from
+# there, and only the pieces the *desktop* owns (PyGObject, GTK 4, pycairo,
+# gtk4-layer-shell, PipeWire, wl-clipboard, libnotify) come from pacman.
+#
+# It runs on Arch's own `python`, and that has a price worth stating plainly:
+# the wheels under deps/ are compiled for one CPython minor version, so when
+# Arch bumps `python` (3.14 -> 3.15) this package stops importing until it is
+# rebuilt. The fix is to run `makepkg -si` again; nothing detects the bump for
+# you, and the symptom is an ImportError from a native module the first time
+# voice runs afterwards. That is the ordinary situation for an Arch package
+# that bundles compiled Python wheels, and it is what dropping the AUR buys:
+# the package used to depend on `python312`, which exists only in the AUR, and
+# `makepkg -s` does not fetch from there - so the very first install failed on
+# a clean machine for a reason the owner could do nothing about. There is no
+# middle option: python311, python312 and python313 are all AUR-only, and
+# `python` is the only interpreter in the official repositories.
+# See packaging/README.md for the full reasoning.
+
+pkgname=voice
+pkgver=0.1.0
+pkgrel=2
+pkgdesc="Wayland-native voice typing: hold a key, speak, release, text appears"
+arch=('x86_64')
+url="https://github.com/vampyren/voice"
+# The repository has no LICENSE file yet (README: "all-rights-reserved until
+# one is added"). Replace both this and the install -Dm644 below once it has.
+license=('LicenseRef-all-rights-reserved')
+makedepends=('git' 'uv')   # the interpreter itself is a runtime depend
+# The wheels under deps/ and cuda/ are prebuilt and already stripped upstream;
+# letting makepkg walk several gigabytes of them costs minutes and gains nothing.
+options=('!strip' '!debug')
+install=voice.install
+
+#: GPU support, on by default. This is the one build option the package has.
+#:
+#: A machine with no NVIDIA card can build the CPU-only variant with
+#:
+#:     VOICE_GPU=0 makepkg -si
+#:
+#: which drops ~3 GB of CUDA 12 wheels and the `nvidia-utils` dependency.
+#: Everything else - package name, paths, wrapper, desktop entry - is identical,
+#: and `LocalTranscriber` already falls back to CPU int8 with a warning that
+#: `voice doctor` repeats. It is a variant, not a second product: do not rename
+#: the package, and do not make this the default.
+_gpu=${VOICE_GPU:-1}
+case "$_gpu" in
+  0|1) ;;
+  *) echo "VOICE_GPU must be 0 or 1, got: $_gpu" >&2; return 1 ;;
+esac
+if (( ! _gpu )); then
+  pkgdesc="$pkgdesc (CPU-only build)"
+fi
+
+#: The branch this package is cut from. Change it (or switch to the GitHub
+#: line) when the work lands somewhere else.
+_branch=phase1-dictation-core
+source=("$pkgname::git+file://${startdir}/..#branch=$_branch")
+#source=("$pkgname::git+https://github.com/vampyren/voice.git#branch=$_branch")
+sha256sums=('SKIP')
+
+#: Where the Python install lands. `app` holds this project and nothing else -
+#: `voice.ui.overlay_client.repo_root()` is the parent of the `voice` package
+#: and the daemon hands it to the pill helper as PYTHONPATH, so anything else
+#: in there would be on the pill helper's path too. `deps` is the locked
+#: third-party set (compiled for `_py`), `cuda` the CUDA 12 runtime.
+#:
+#: _py is Arch's `python`. Everything that consumes the bundled wheels - the
+#: build below, compileall, /usr/bin/voice - has to name this one interpreter,
+#: because the extension modules under deps/ are built for exactly its ABI.
+_prefix=/usr/lib/voice
+_py=/usr/bin/python3
+#: Must equal voice.APP_ID: the desktop portal resolves our app id (needed by
+#: the GlobalShortcuts hotkey backend) through an entry with exactly this name.
+_appid=io.github.vampyren.voice
+
+depends=(
+  'python'             # Arch's own interpreter; see the header for the cost
+  'pipewire'           # pw-dump: the microphone list
+  'pipewire-audio'     # pw-record: the capture itself (NOT in `pipewire`)
+  'wl-clipboard'       # wl-copy / wl-paste: how text reaches the focused window
+  'libnotify'          # notify-send
+  'xdg-desktop-portal' 'xdg-desktop-portal-impl'   # RemoteDesktop + GlobalShortcuts
+  # The recording pill is on by default (ui.overlay = true) and runs on the
+  # *system* interpreter, which is where PyGObject and pycairo live. Without
+  # gtk4-layer-shell it can only be a focus-stealing window, which the helper
+  # refuses to show - so the default pill needs all four.
+  'python-gobject' 'gtk4' 'python-cairo' 'gtk4-layer-shell'
+)
+if (( _gpu )); then
+  # /usr/lib/libcuda.so.1 - the driver half of the CUDA pair. The other half,
+  # cuBLAS 12, comes from the bundled wheels and NOT from Arch's `cuda`: that is
+  # 13.x and ships libcublas.so.13, while the CTranslate2 wheel dlopens
+  # libcublas.so.12. A soname mismatch, so `depends=('cuda')` would install 6 GB
+  # and still fall back to the CPU.
+  depends+=('nvidia-utils')
+fi
+optdepends=(
+  'wtype: fallback key injection where the portal cannot send the paste chord'
+  'ydotool: the other fallback key injection backend'
+  'ttf-jetbrains-mono: the pill timer font (any monospace font does)'
+  'dconf: let `voice doctor` read the shortcut GNOME stored'
+)
+backup=("etc/xdg/autostart/$_appid.desktop")
+# 0.1.0-1 was a split build whose second half carried the CUDA wheels. Those
+# files live here now, so an old voice-cuda has to go. Drop these two lines once
+# no machine still has 0.1.0-1 installed.
+conflicts=('voice-cuda')
+replaces=('voice-cuda')
+
+build() {
+  cd "$srcdir/$pkgname"
+
+  export UV_CACHE_DIR="$srcdir/uv-cache"   # keep the build out of the user cache
+  export UV_PYTHON_DOWNLOADS=never         # build against $_py, never a download
+  export UV_NO_CONFIG=1                    # ignore any uv.toml on the build host
+
+  # --frozen: the versions the test suite runs against, no re-resolution here.
+  uv export --frozen --no-dev --no-hashes --no-emit-project \
+            --format requirements-txt -o "$srcdir/requirements.txt"
+
+  uv build --wheel --python "$_py" --out-dir "$srcdir/dist"
+
+  # --no-deps everywhere: requirements.txt is already the full closure.
+  uv pip install --python "$_py" --target "$srcdir/app" --no-deps --link-mode=copy \
+                 "$srcdir"/dist/voice-*-py3-none-any.whl
+  uv pip install --python "$_py" --target "$srcdir/deps" --no-deps --link-mode=copy \
+                 -r "$srcdir/requirements.txt"
+
+  if (( _gpu )); then
+    uv export --frozen --no-dev --no-hashes --no-emit-project --extra gpu \
+              --format requirements-txt -o "$srcdir/requirements-gpu.txt"
+    grep -E '^nvidia-' "$srcdir/requirements-gpu.txt" > "$srcdir/requirements-cuda.txt"
+    uv pip install --python "$_py" --target "$srcdir/cuda" --no-deps --link-mode=copy \
+                   -r "$srcdir/requirements-cuda.txt"
+    rm -rf "$srcdir/cuda/bin"
+    find "$srcdir/cuda" -name '__pycache__' -prune -exec rm -rf {} +
+  fi
+
+  # Console scripts carry a $srcdir shebang and nothing uses them: /usr/bin/voice
+  # and /usr/bin/voice-overlay are the wrappers in packaging/.
+  rm -rf "$srcdir/app/bin" "$srcdir/deps/bin"
+  find "$srcdir/app" "$srcdir/deps" -name '__pycache__' -prune -exec rm -rf {} +
+}
+
+check() {
+  # Proves the directories are a complete, importable install before they are
+  # ever packaged - a missing wheel shows up here rather than on first use.
+  # `makepkg --nocheck` skips it.
+  cd "$srcdir"
+  PYTHONPATH="$srcdir/app:$srcdir/deps" "$_py" -P -m voice.cli --version
+  PYTHONPATH="$srcdir/app:$srcdir/deps" "$_py" -P -c 'import voice, voice.cli, voice.paths'
+  PYTHONPATH="$srcdir/app:$srcdir/deps" "$_py" -P -c 'import faster_whisper, ctranslate2, onnxruntime'
+  PYTHONPATH="$srcdir/app:$srcdir/deps" "$_py" -P -c 'import numpy, evdev, jeepney, httpx, tomlkit'
+  PYTHONPATH="$srcdir/app:$srcdir/deps" "$_py" -P -c 'import PySide6.QtCore'
+
+  if (( _gpu )); then
+    # The point of the default build: the library CTranslate2 dlopens is in the
+    # tree about to be packaged. Without this a `gpu` extra that stopped
+    # resolving would produce a GPU-ready-looking package that runs on the CPU.
+    test -e "$srcdir/cuda/nvidia/cublas/lib/libcublas.so.12"
+  fi
+}
+
+package() {
+  cd "$srcdir/$pkgname"
+
+  install -dm755 "$pkgdir$_prefix"
+  cp -a "$srcdir/app" "$pkgdir$_prefix/app"
+  cp -a "$srcdir/deps" "$pkgdir$_prefix/deps"
+  # cuBLAS 12 from the wheel, not Arch's `cuda` (see the depends comment).
+  # /usr/bin/voice adds these directories to LD_LIBRARY_PATH when they exist.
+  if (( _gpu )); then
+    cp -a "$srcdir/cuda" "$pkgdir$_prefix/cuda"
+  fi
+  # `cp -a` keeps whatever modes the wheels and the build user's umask produced;
+  # a package ships neither group-writable files nor unreadable ones.
+  chmod -R u=rwX,go=rX "$pkgdir$_prefix"
+
+  # Bytecode: /usr/lib is read-only at runtime, so without this every start
+  # re-compiles the whole tree. Strict for our own code, tolerant for the
+  # wheels (some ship files that are not valid on this interpreter).
+  "$_py" -m compileall -q -j 0 -s "$pkgdir" -p / "$pkgdir$_prefix/deps" || true
+  "$_py" -m compileall -q -j 0 -s "$pkgdir" -p / "$pkgdir$_prefix/app"
+
+  install -Dm755 packaging/voice.wrapper "$pkgdir/usr/bin/voice"
+  install -Dm755 packaging/voice-overlay.wrapper "$pkgdir/usr/bin/voice-overlay"
+
+  # Both entries carry the app id as their file name (see _appid).
+  install -Dm644 packaging/voice.desktop "$pkgdir/usr/share/applications/$_appid.desktop"
+  install -Dm644 packaging/voice.desktop "$pkgdir/etc/xdg/autostart/$_appid.desktop"
+
+  # /usr/lib/udev/rules.d, not /etc: /etc belongs to the admin.
+  install -Dm644 packaging/70-voice-input.rules \
+                 "$pkgdir/usr/lib/udev/rules.d/70-voice-input.rules"
+
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 packaging/README.md "$pkgdir/usr/share/doc/$pkgname/packaging.md"
+  # No LICENSE file upstream yet; ship the statement that stands in its place.
+  install -dm755 "$pkgdir/usr/share/licenses/$pkgname"
+  sed -n '/^## License/,$p' README.md > "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  chmod 644 "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

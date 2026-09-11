@@ -1,0 +1,46 @@
+[project]
+name = "voice"
+version = "0.1.0"
+description = "Wayland-native voice typing: hold a key, speak, release, text appears."
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "faster-whisper>=1.2,<2",
+    "numpy>=1.26",
+    "evdev>=1.7",
+    "jeepney>=0.9",
+    "httpx>=0.27",
+    "tomlkit>=0.13",
+    "PySide6>=6.8",
+]
+
+[project.optional-dependencies]
+gpu = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12>=9,<10"]
+
+[project.scripts]
+voice = "voice.cli:main"
+# The overlay helper needs PyGObject, which is a system package rather than
+# a project dependency; where the venv has no `gi`, the daemon launches the
+# equivalent `python3 -m voice.ui.overlay` on the system interpreter.
+voice-overlay = "voice.ui.overlay:main"
+
+[dependency-groups]
+# pycairo is a test dependency, not a runtime one: the overlay helper runs on an
+# interpreter that has it (it ships with the distro's python-gobject), while the
+# daemon never imports cairo. Without it here tests/ui/test_overlay_draw.py
+# skips wholesale and the renderer is never executed by the suite.
+dev = ["pytest>=8", "pytest-timeout>=2", "pycairo>=1.26"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["voice"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not boundary and not gpu' --timeout=60"
+markers = [
+    "boundary: needs a live Wayland session with pipewire/wl-clipboard/portal (run in the dev VM)",
+    "gpu: needs an NVIDIA GPU with CUDA (run on the owner's PC)",
+]

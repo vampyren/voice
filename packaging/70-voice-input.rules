@@ -1,0 +1,2 @@
+# voice: let the logged-in seat user read keyboard events for push-to-talk (no group change, no re-login)
+SUBSYSTEM=="input", KERNEL=="event*", TAG+="uaccess"

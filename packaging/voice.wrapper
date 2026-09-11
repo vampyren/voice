@@ -1,0 +1,33 @@
+#!/bin/sh
+# /usr/bin/voice - installed by the `voice` package.
+#
+# The app runs out of /usr/lib/voice on Arch's own `python` - the same
+# interpreter the package was built against, which is what makes the compiled
+# wheels under `deps` (CTranslate2, onnxruntime, numpy, PySide6) importable.
+# `app` holds the project, `deps` the locked third-party wheels. If Arch bumps
+# `python` to a new minor version this exec still succeeds but those wheels no
+# longer import; rebuild the package (`makepkg -si`) to fix it.
+#
+# -P keeps the current directory off sys.path, so running this from a checkout
+# of the project cannot shadow the installed package with the working copy.
+set -e
+
+prefix=/usr/lib/voice
+PYTHONPATH="$prefix/app:$prefix/deps${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+
+# CTranslate2 dlopens libcublas.so.12 at runtime and nothing puts the wheel's
+# copy on the loader path. Absent from a VOICE_GPU=0 build, in which case the
+# local backend falls back to CPU int8 with a warning. install.sh builds the
+# same path for a git checkout - the two must stay in step.
+if [ -d "$prefix/cuda/nvidia" ]; then
+    for dir in "$prefix"/cuda/nvidia/*/lib; do
+        # A literal glob (nothing matched) fails this test and is skipped.
+        if [ -d "$dir" ]; then
+            LD_LIBRARY_PATH="$dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        fi
+    done
+    export LD_LIBRARY_PATH
+fi
+
+exec /usr/bin/python3 -P -m voice.cli "$@"

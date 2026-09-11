@@ -52,6 +52,15 @@ if [ "${DRY_RUN:-0}" = 1 ]; then
 else
   cat > "$BIN" <<EOF
 #!/usr/bin/env bash
+# CTranslate2 dlopens libcublas.so.12 and libcudnn at runtime, and nothing puts
+# the --extra gpu wheels' copies on the loader path, so without this the GPU
+# libraries are installed but never found and the local backend quietly falls
+# back to CPU int8. Harmless when the wheels are absent: the glob matches
+# nothing and LD_LIBRARY_PATH is left alone.
+for dir in "$ROOT"/.venv/lib/python*/site-packages/nvidia/*/lib; do
+  [ -d "\$dir" ] && LD_LIBRARY_PATH="\$dir\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+done
+[ -n "\${LD_LIBRARY_PATH:-}" ] && export LD_LIBRARY_PATH
 exec uv --project "$ROOT" run --no-sync $APP "\$@"
 EOF
   chmod +x "$BIN"

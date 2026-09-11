@@ -58,3 +58,35 @@ def test_uninstall_removes_the_app_id_entry_and_the_legacy_name():
     cp = run("--uninstall")
     assert f"{APP_ID}.desktop" in cp.stdout
     assert "applications/voice.desktop" in cp.stdout      # pre-app-id installs
+
+
+def _wrapper_body():
+    """The heredoc install.sh writes into ~/.local/bin/voice."""
+    src = (ROOT / "install.sh").read_text()
+    start = src.index('cat > "$BIN" <<EOF')
+    body = src[src.index("\n", start) + 1:src.index("\nEOF", start)]
+    return body
+
+
+def test_the_wrapper_exposes_the_gpu_libraries_it_installed():
+    """`--extra gpu` puts cuBLAS and cuDNN in the venv; nothing found them.
+
+    CTranslate2 dlopens libcublas.so.12 at runtime, so without the loader path
+    the wheels sit there unused and the local backend falls back to CPU int8 on
+    a machine with a GPU - silently, because that fallback is by design.
+    """
+    body = _wrapper_body()
+    assert "site-packages/nvidia" in body, "the wrapper must look where the wheels land"
+    assert "LD_LIBRARY_PATH" in body
+    assert "--no-sync" in body, "and still run the project's own environment"
+
+
+def test_the_wrapper_survives_a_cpu_only_install(tmp_path):
+    """No wheels, no glob match, no empty entry pushed onto the loader path."""
+    import subprocess
+
+    body = _wrapper_body()
+    body = body[:body.index("exec uv")] + 'echo "LDPATH=[${LD_LIBRARY_PATH:-}]"\n'
+    body = body.replace("$ROOT", str(tmp_path))
+    out = subprocess.run(["bash", "-c", body], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "LDPATH=[]", out.stdout

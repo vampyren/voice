@@ -1,14 +1,12 @@
 """Settings dialog: edits config.toml through Config so comments survive."""
 from __future__ import annotations
 
-import re
-
 import logging
+import re
 import shutil
 import subprocess
-from typing import Callable, Iterable
-
 from html import escape
+from typing import Callable, Iterable
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPalette, QRegion

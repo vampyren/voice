@@ -2129,3 +2129,85 @@ def test_a_real_paste_still_says_inserted(method):
 
     assert overlay_messages(State.IDLE, f"11 chars via {method} in 0.9s", "en") == [
         {"state": "done"}]
+
+
+# -- the rebuilt settings window has to learn the desktop's keys ---------------
+class ReadyPortalListener(FakeListener):
+    """A portal listener that only answers once it has been started.
+
+    Exactly like the real one: `refresh_triggers` short-circuits while the
+    connection is None, which is the whole of this bug.
+    """
+
+    key = "F13"
+
+    def __init__(self, on_event, shortcuts, **kwargs):
+        super().__init__()
+        self.on_ready = kwargs.get("on_ready")
+        self.answered = False
+
+    def shortcut_state(self):
+        return STATE_BOUND if self.answered else None
+
+    def effective_triggers(self):
+        return {"dictate": self.key} if self.answered else {}
+
+    def refresh_triggers(self):
+        # The real one returns what it already has while its connection is
+        # still being opened, which is as long as the desktop takes to ask.
+        return self.effective_triggers()
+
+    def answer(self):
+        """The portal has bound the shortcut, on the listener thread."""
+        self.answered = True
+        self.on_ready(STATE_BOUND)
+
+
+def test_a_dialog_rebuilt_for_a_new_backend_is_told_what_the_desktop_holds(
+        isolated_xdg, qapp, monkeypatch):
+    """The window was thrown away and rebuilt *before* the new listener started,
+    so it asked a listener that could not answer and sat on "waiting for an
+    answer" until it was closed and reopened."""
+    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.PortalListener", ReadyPortalListener)
+    d = _evdev_daemon(monkeypatch)
+    d.open_settings()
+    external = Config.load()
+    external.set("hotkeys.backend", "portal")
+    external.save()
+    d.apply_config()
+
+    label = d._settings.portal_effective["dictate"]
+    assert settle(qapp, lambda: label.text(), timeout=0.3)
+    assert ReadyPortalListener.key not in label.text()   # the portal has not answered
+
+    d.listener.answer()                                 # it does, a moment later
+    assert settle(qapp, lambda: ReadyPortalListener.key in label.text()), label.text()
+    d._settings.close()
+    d.shutdown()
+
+
+def test_the_desktops_answer_reaches_a_window_that_is_already_open(
+        isolated_xdg, qapp, monkeypatch):
+    """The portal answers on its own thread, whenever the user accepts its
+    dialog; a window opened before that must not keep showing nothing."""
+    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.PortalListener", ReadyPortalListener)
+    cfg = Config.load()
+    cfg.set("hotkeys.backend", "portal")
+    cfg.save()
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    d = Daemon(cfg, sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    d.open_settings()
+    label = d._settings.portal_effective["dictate"]
+    # Let the refresh the window starts for itself finish first, so what is
+    # asserted below is the push and not that background read arriving late.
+    assert settle(qapp, lambda: not d._refreshers["triggers"].is_alive())
+    assert ReadyPortalListener.key not in label.text()      # nothing answered yet
+
+    d.listener.answer()                                     # from the listener thread
+    assert settle(qapp, lambda: ReadyPortalListener.key in label.text()), label.text()
+    d._settings.close()
+    d.shutdown()

@@ -457,13 +457,16 @@ class Daemon:
         previous_backend, self.hotkey_backend = self.hotkey_backend, backend
         self.listener = listener
         self._hotkey_settings = self._hotkey_snapshot()
-        if backend != previous_backend:
-            self._rebuild_settings_dialog()
-
         try:
             self.listener.start()
         except Exception:
             log.exception("failed to start the rebuilt listener")
+        # After start(), never before: the replacement window asks the listener
+        # what the desktop holds as it is built, and a listener that has not
+        # started yet can only answer "nothing". The portal's own answer comes
+        # later still, and reaches the window through _on_hotkeys_ready.
+        if backend != previous_backend:
+            self._rebuild_settings_dialog()
 
     def _make_listener(self):
         """The hotkey listener plus the name of the backend it represents.
@@ -489,7 +492,15 @@ class Daemon:
         that used to pass for success: the desktop registered our shortcut and
         attached no key to it, so nothing we do makes a press arrive - only the
         user, in their keyboard settings, can.
+
+        This is also the moment a settings window that is already open learns
+        what the desktop holds: it may have been built (or rebuilt for a new
+        backend) while the portal was still opening its session, and nothing
+        else would have told it afterwards - the fields then read "waiting for
+        an answer" until the window was closed and reopened. Queued through the
+        bridge, because this runs on the listener thread.
         """
+        self._bridge.triggers_refreshed.emit()
         if state == STATE_BOUND:
             # A key is attached again (the user assigned one, or the desktop told
             # us so with ShortcutsChanged). The one-shot latch must not outlive

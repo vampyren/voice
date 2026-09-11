@@ -358,3 +358,63 @@ def test_the_placement_probe_is_quiet_when_there_is_no_pill(monkeypatch, isolate
     cfg.save()
     monkeypatch.setattr("voice.doctor.probe_helper", lambda: HelperProbe(None, (), "no PyGObject"))
     assert default_probes()["pill placement"]()[0] is True
+
+
+# -- the model cache --------------------------------------------------------
+def _local_profile(model: str):
+    from voice.config import Config
+
+    cfg = Config.load()
+    cfg.set("stt.profiles.local.model", model)
+    cfg.set("stt.active", "local")
+    cfg.save()
+    return cfg
+
+
+def test_the_model_cache_probe_finds_a_model_stored_under_its_real_repository(
+        isolated_xdg, monkeypatch, tmp_path):
+    """faster-whisper maps the short names we ship onto repositories on the hub
+    - `medium` is `Systran/faster-whisper-medium`, `large-v3-turbo` is
+    `mobiuslabsgmbh/faster-whisper-large-v3-turbo` - and the cache directory is
+    named after the repository, not the alias. Looking up the raw config value
+    said "not downloaded yet" over a model that had been there all along, for
+    the shipped default profile."""
+    from voice.doctor import default_probes
+
+    _local_profile("medium")
+    hub = tmp_path / "hf"
+    (hub / "hub" / "models--Systran--faster-whisper-medium").mkdir(parents=True)
+    monkeypatch.setenv("HF_HOME", str(hub))
+
+    ok, detail = default_probes()["model cache"]()
+    assert ok is True, detail
+    assert "models--Systran--faster-whisper-medium" in detail
+
+
+def test_the_model_cache_probe_takes_a_full_repository_name_as_it_stands(
+        isolated_xdg, monkeypatch, tmp_path):
+    """Only the short names are aliases; anything with a slash in it is already
+    the repository, and the Swedish profile we document is one."""
+    from voice.doctor import default_probes
+
+    _local_profile("KBLab/kb-whisper-large")
+    hub = tmp_path / "hf"
+    (hub / "hub" / "models--KBLab--kb-whisper-large").mkdir(parents=True)
+    monkeypatch.setenv("HF_HOME", str(hub))
+
+    ok, detail = default_probes()["model cache"]()
+    assert ok is True, detail
+    assert "models--KBLab--kb-whisper-large" in detail
+
+
+def test_the_model_cache_probe_still_reports_one_that_is_not_there(
+        isolated_xdg, monkeypatch, tmp_path):
+    """And it says it in the name the user wrote, not the repository's."""
+    from voice.doctor import default_probes
+
+    _local_profile("medium")
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+
+    ok, detail = default_probes()["model cache"]()
+    assert ok is False
+    assert "medium not downloaded yet" in detail

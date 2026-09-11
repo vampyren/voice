@@ -220,13 +220,35 @@ def _cuda() -> tuple[bool, str]:
     return True, f"{n} CUDA device(s)"
 
 
+def _hub_repository(model: str) -> str:
+    """The repository faster-whisper will really fetch `model` from.
+
+    The short names we ship are aliases: faster-whisper maps `large-v3-turbo`
+    to `mobiuslabsgmbh/faster-whisper-large-v3-turbo` and `medium` to
+    `Systran/faster-whisper-medium`, and the cache directory is named after the
+    repository rather than the alias - so looking up the raw config value here
+    reported "not downloaded yet" over a model that had been on disk all along,
+    for the shipped default profile.
+
+    faster-whisper's own table is asked, never copied: the copy `stt/local.py`
+    used to keep was wrong, and removing it was right. A build without
+    faster-whisper installed gets the name as it stands, which is the answer
+    for anything already spelled as a repository.
+    """
+    try:
+        from faster_whisper.utils import _MODELS
+    except Exception:                       # not installed, or it moved
+        return model
+    return _MODELS.get(model, model)
+
+
 def _model_cache() -> tuple[bool, str]:
     from voice.config import Config
     cfg = Config.load()
     _, profile = cfg.stt_profile()
     if profile.get("backend") != "local":
         return True, "active profile is cloud; nothing to cache"
-    name = str(profile["model"]).replace("/", "--")
+    name = _hub_repository(str(profile["model"])).replace("/", "--")
     hub = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub" / f"models--{name}"
     return (True, str(hub)) if hub.exists() else (False, f"{profile['model']} not downloaded yet (first dictation downloads it)")
 

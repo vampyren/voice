@@ -12,7 +12,7 @@ cairo = pytest.importorskip("cairo")
 
 from voice.ui import overlay_draw as od                        # noqa: E402
 from voice.ui.overlay_draw import natural_width, render_png    # noqa: E402
-from voice.ui.overlay_model import COLLAPSE, OverlayModel  # noqa: E402
+from voice.ui.overlay_model import COLLAPSE, FINISH, FRAME, OverlayModel  # noqa: E402
 
 
 class Clock:
@@ -354,6 +354,47 @@ def test_the_checkmark_draws_itself_in_then_the_label_rises(tmp_path):
     label = dict(x0=36 + 60, x1=36 + 132)
     assert early.count(lambda p: p[3] > 60 and max(p[:3]) > 90, **label) == 0
     assert late.count(lambda p: p[3] > 60 and max(p[:3]) > 90, **label) > 20
+
+
+def _finishing(sweep=1.0, age=0.0):
+    """A pill that has just been told the transcription is over.
+
+    `sweep` is how long it had been transcribing - the fill is caught
+    part-way across, exactly as a real transcription leaves it - and `age` is
+    how far into the ending we are.
+    """
+    clock = Clock()
+    model = OverlayModel(clock=clock)
+    model.set_state("recording")
+    for lvl in SPEECH:
+        model.push_level(lvl)
+    model.set_state("transcribing", now=clock.t)
+    model.tick(clock.advance(sweep))
+    model.set_state("done", now=clock.t)
+    if age:
+        model.tick(clock.advance(age))
+    return model
+
+
+def test_the_fill_reaches_the_end_of_the_track_before_the_checkmark(tmp_path):
+    """The owner's complaint: "the bar never goes to the end, it stops in the
+    middle and then it's done"."""
+    def reach(img):
+        lit = [x for x in range(img.width) for y in (21, 22) if wave(img(x, y))]
+        return max(lit)
+
+    well_x, well_right = 36, 36 + 132
+    caught = Image(render_png(_finishing(), tmp_path / "f0.png"))
+    landed = Image(render_png(_finishing(age=FINISH - FRAME), tmp_path / "f1.png"))
+    after = Image(render_png(_finishing(age=FINISH + 0.45), tmp_path / "f2.png"))
+
+    assert reach(caught) < well_right - 30, "the sweep is caught part-way across"
+    assert reach(landed) >= well_right - 2, "the fill has to arrive at the end"
+    assert reach(landed) > reach(caught) + 20
+    well = dict(x0=well_x, x1=well_right)
+    assert caught.count(emerald, **well) == 0, "no checkmark while the fill runs"
+    assert landed.count(emerald, **well) == 0
+    assert after.count(emerald, **well) > 20, "and then the checkmark draws in"
 
 
 def test_done_shows_an_emerald_status_dot(tmp_path):

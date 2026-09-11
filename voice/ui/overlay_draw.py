@@ -433,7 +433,10 @@ def draw(ctx: cairo.Context, width: int, height: int, model: OverlayModel) -> No
         _progress_line(ctx, model, well_x, cy, s)
         _bars(ctx, model, well_x, cy, s)        # still collapsing into the track
     elif model.state == "done":
-        _done_well(ctx, model, well_x, cy, s)
+        if model.finishing:                     # the fill still running to 100%
+            _progress_line(ctx, model, well_x, cy, s)
+        else:
+            _done_well(ctx, model, well_x, cy, s)
     elif model.state == "notice":
         _notice_well(ctx, model, well_x, cy, s)
     elif model.state == "error":

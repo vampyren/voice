@@ -10,7 +10,7 @@ from voice.ui.overlay import (
     parse_line,
     reduced_motion,
 )
-from voice.ui.overlay_model import BAR_FLOOR, TAPER, OverlayModel
+from voice.ui.overlay_model import BAR_FLOOR, FINISH, TAPER, OverlayModel
 from voice.ui.placement import normalise_position
 
 
@@ -270,6 +270,30 @@ def test_a_dictation_session_read_line_by_line(model):
         apply_message(model, parse_line(json.dumps(message)))
         seen.append(model.state)
     assert seen == ["recording"] * 4 + ["transcribing", "done", "hidden"]
+
+
+@pytest.mark.parametrize("text", [None, "Copied · Ctrl+V"])
+def test_a_done_after_transcribing_runs_the_fill_to_the_end(text):
+    """However the dictation ends - inserted, or only copied to the clipboard -
+    the daemon says `done` the same way, and the pill finishes the fill first."""
+    clock = Clock()
+    model = OverlayModel(clock=clock)
+    assert apply_message(model, {"state": "transcribing"}) is True
+    clock.t += 1.0
+    model.tick()
+    caught = model.sweep[0]
+    assert 0.0 < caught < 1.0
+    message = {"state": "done"} if text is None else {"state": "done", "text": text}
+    assert apply_message(model, message) is True
+    assert model.finishing is True
+    assert model.sweep[0] == pytest.approx(caught), "it carries on from where it was"
+    clock.t += FINISH / 2
+    model.tick()
+    assert model.finishing is True and caught < model.sweep[0] < 1.0
+    clock.t += FINISH                           # well past the 0.2 s completion
+    model.tick()
+    assert model.sweep == pytest.approx((1.0, 1.0))
+    assert model.finishing is False and model.text == text
 
 
 # -- review findings ------------------------------------------------------

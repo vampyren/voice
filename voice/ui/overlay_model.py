@@ -45,11 +45,28 @@ BREATH_PERIOD = 2.4          # recording dot, ease-in-out, infinite
 SWEEP_PERIOD = 2.6           # transcribing fill line, indeterminate loop
 SWEEP_HOLD = 0.85            # fraction of the loop spent growing; then it fades
 COLLAPSE = 0.2               # bars melting into the track when transcribing starts
+#: The sweep is indeterminate, and real transcriptions end part-way through
+#: it, so the checkmark used to replace a half-drawn line - an operation
+#: abandoned rather than one completed. When the transcription ends the fill
+#: instead runs from wherever it stands to a full track, and only then does
+#: the checkmark begin. 0.2 s is the same beat as COLLAPSE, the gesture that
+#: melted the bars into this track in the first place, and - not a
+#: coincidence, it is why this length was chosen - exactly the DASH_DELAY the
+#: checkmark already waits before its stroke starts. The well was blank for
+#: those 200 ms (the pop-in scales a zero-length path); the fill now spends
+#: them arriving. So the completion costs the ending nothing at all: no hold
+#: to give back, no gap where neither the line nor the checkmark is on screen,
+#: and the checkmark, its label and the 1.2 s hold keep their original timing.
+FINISH = 0.2
 POP_IN = 0.35                # checkmark container pop
 DASH_DELAY, DASH_DUR = 0.2, 0.5      # checkmark stroke drawing itself in
 LABEL_DELAY, LABEL_DUR = 0.5, 0.4    # "Inserted" rising in
 RISE = 0.3                   # notice text rising in
 SWAP = 0.3                   # language badge swapping out and back in
+
+#: How far the completion pushes the checkmark's presentation back: nothing,
+#: as long as the fill lands inside the lead-in the stroke already waits out.
+DONE_DELAY = max(0.0, FINISH - DASH_DELAY)
 
 #: Waveform: 21 bars fed from a rolling history of recent levels. The newest
 #: sample is the centre bar and older ones move outward, one bar per chunk, so
@@ -173,6 +190,11 @@ class OverlayModel:
         #: The loudest recent level, and when it was set: full scale for the bars.
         self._peak = PEAK_FLOOR
         self._peak_at = self._now
+        #: Where the transcribing fill stood when the transcription finished,
+        #: as (width, opacity) - the start of its run to 100%. `None` whenever
+        #: `done` was not reached from a visible sweep, which is what keeps an
+        #: error, a reduced-motion pill and a repeated `done` from animating.
+        self._finish_from: tuple[float, float] | None = None
 
     # -- geometry ---------------------------------------------------------
 
@@ -232,6 +254,13 @@ class OverlayModel:
 
     def _enter(self, state: str, text: str | None, now: float,
                reset_counter: bool) -> None:
+        # A transcription that ends runs its fill to the end before the
+        # checkmark: read the sweep where it stands *now*, while the
+        # transcribing clock is still the current one.
+        self._finish_from = (
+            self._sweep_at(max(0.0, now - self._state_since))
+            if state == "done" and self.state == "transcribing"
+            and not self.reduced_motion else None)
         self._now = self._last_tick = self._state_since = now
         if state == "recording" and self.state != "recording":
             if reset_counter:                  # a notice restores, it never restarts
@@ -333,20 +362,61 @@ class OverlayModel:
         phase = (self.state_age % BREATH_PERIOD) / BREATH_PERIOD
         return (1.0 - math.cos(2 * math.pi * phase)) / 2
 
-    @property
-    def sweep(self) -> tuple[float, float]:
-        """Transcribing fill line as (width 0..1, opacity 0..1)."""
+    def _sweep_at(self, age: float) -> tuple[float, float]:
+        """The indeterminate loop at `age` seconds into the transcribing state."""
         if self.reduced_motion:
             return 0.35, 1.0
-        phase = (self.state_age % SWEEP_PERIOD) / SWEEP_PERIOD
+        phase = (age % SWEEP_PERIOD) / SWEEP_PERIOD
         width = ease_in_out(_clamp01(phase / SWEEP_HOLD))
         fade = 1.0 if phase <= SWEEP_HOLD else 1.0 - (phase - SWEEP_HOLD) / (1 - SWEEP_HOLD)
         return width, _clamp01(fade)
 
     @property
+    def sweep(self) -> tuple[float, float]:
+        """The fill line as (width 0..1, opacity 0..1).
+
+        While transcribing this is the indeterminate loop. Once the
+        transcription is over it is the completion: the same line carried from
+        wherever it stood to a full track, eased so a long remainder still
+        reads as quick and a short one does not crawl. A line caught in the
+        loop's trailing fade brightens back up as it finishes - the point is a
+        finished bar, and half-faded is not that.
+        """
+        if self._finish_from is not None:
+            start_w, start_a = self._finish_from
+            done = ease_out(_clamp01(self.state_age / FINISH)) if FINISH > 0 else 1.0
+            return start_w + (1.0 - start_w) * done, start_a + (1.0 - start_a) * done
+        return self._sweep_at(self.state_age)
+
+    @property
+    def finishing(self) -> bool:
+        """True while the fill is still running to the end of the track.
+
+        What the well shows: the progress line, not the `done` well. The
+        checkmark's container may already be popping in underneath - it scales
+        a zero-length path and draws nothing until `check_draw` starts, which
+        is the moment the fill lands.
+        """
+        return self._finish_from is not None and self.state_age < FINISH
+
+    @property
+    def _done_age(self) -> float:
+        """Seconds the checkmark's own presentation has been running.
+
+        The fill has to land before the stroke starts, and the stroke already
+        waits DASH_DELAY, so a completion no longer than that delay is free:
+        it fills a window the checkmark was going to spend invisible anyway
+        and the presentation is not moved at all (`DONE_DELAY` is 0). Only a
+        completion longer than the delay pushes the checkmark back, and then
+        by just the excess - never the whole of it.
+        """
+        return max(0.0, self.state_age
+                   - (DONE_DELAY if self._finish_from is not None else 0.0))
+
+    @property
     def check_pop(self) -> tuple[float, float]:
         """Checkmark container as (scale, opacity) during its .35 s pop-in."""
-        progress = ease_out(_clamp01(self.state_age / POP_IN))
+        progress = ease_out(_clamp01(self._done_age / POP_IN))
         scale = 0.6 + (1.08 - 0.6) * (progress / 0.6) if progress < 0.6 else \
             1.08 + (1.0 - 1.08) * ((progress - 0.6) / 0.4)
         return scale, progress
@@ -354,12 +424,12 @@ class OverlayModel:
     @property
     def check_draw(self) -> float:
         """0..1 of the checkmark stroke that has been drawn in."""
-        return _stage(self.state_age, DASH_DELAY, DASH_DUR)
+        return _stage(self._done_age, DASH_DELAY, DASH_DUR)
 
     @property
     def label_rise(self) -> float:
         """0..1 progress of the "Inserted" label rising into place."""
-        return _stage(self.state_age, LABEL_DELAY, LABEL_DUR)
+        return _stage(self._done_age, LABEL_DELAY, LABEL_DUR)
 
     @property
     def notice_rise(self) -> float:

@@ -4,11 +4,19 @@ from voice.ui.overlay_model import (
     BAR_FLOOR,
     BREATH_PERIOD,
     COLLAPSE,
+    DASH_DELAY,
+    DASH_DUR,
+    DONE_DELAY,
     DONE_HOLD,
     ERROR_HOLD,
+    FINISH,
     FRAME,
     IDLE_GRACE,
+    LABEL_DELAY,
+    LABEL_DUR,
     NOTICE_TTL,
+    POP_IN,
+    SWEEP_PERIOD,
     OverlayModel,
     TAPER,
     ease_in_out,
@@ -597,3 +605,161 @@ def test_a_close_microphone_is_not_clipped_flat(model):
     heights = model.bar_heights
     assert max(heights) >= 0.8
     assert min(heights[8:13]) < 0.75          # the quiet syllables still dip
+
+
+# -- finishing the fill ---------------------------------------------------
+#: The transcription is usually over before the indeterminate sweep has
+#: crossed the track, so the checkmark used to replace a half-drawn line. The
+#: fill now runs to the end first - from wherever it stood, never from zero.
+
+def _mid_sweep(model, clock, age=1.0):
+    """Transcribing, part-way through a sweep. Returns the live (width, alpha)."""
+    model.set_state("transcribing")
+    model.tick(clock.advance(age))
+    return model.sweep
+
+
+def test_the_fill_runs_to_the_end_before_the_checkmark_draws(model, clock):
+    started = _mid_sweep(model, clock)[0]
+    assert 0.0 < started < 1.0, "the sweep should be caught part-way across"
+    entry = clock.t
+    model.set_state("done", now=entry)
+    assert model.finishing is True
+    assert model.sweep[0] == pytest.approx(started), "it must not restart at zero"
+    widths = [model.sweep[0]]
+    while model.state_age < FINISH - FRAME:
+        model.tick(clock.advance(FRAME))
+        widths.append(model.sweep[0])
+        # The container's pop-in may run underneath - it scales a zero-length
+        # path and draws nothing. The stroke is the part that must wait.
+        assert model.check_draw == 0.0, "the checkmark must wait for the fill"
+    assert widths == sorted(widths), "the fill never goes backwards"
+    clock.t = entry + FINISH
+    model.tick(clock.t)
+    assert model.sweep == pytest.approx((1.0, 1.0)), "it has to land on 100%"
+    assert model.check_draw == pytest.approx(0.0, abs=1e-9), \
+        "and only then does the stroke get its cue"
+    model.tick(clock.advance(FRAME))            # the next frame is the checkmark's
+    assert model.finishing is False
+    assert model.sweep == pytest.approx((1.0, 1.0))
+
+
+def test_the_completion_starts_from_where_the_sweep_stood(model, clock):
+    """Early, mid-loop and inside the trailing fade: always from the live fill."""
+    for age in (0.3, 1.4, 2.5):
+        m = OverlayModel(clock=clock)
+        m.set_state("transcribing", now=clock.t)
+        m.tick(clock.advance(age))
+        width, alpha = m.sweep
+        m.set_state("done", now=clock.t)
+        assert m.sweep == pytest.approx((width, alpha))
+        m.tick(clock.advance(FINISH / 2))
+        half_w, half_a = m.sweep
+        assert half_w >= width and half_a >= alpha, f"went backwards from {age}s"
+        assert half_w > width or width == pytest.approx(1.0)
+        clock.advance(FINISH)
+
+
+def test_a_long_transcription_still_loops(model, clock):
+    model.set_state("transcribing")
+    model.tick(clock.advance(SWEEP_PERIOD * 0.5))
+    peak = model.sweep[0]
+    model.tick(clock.advance(SWEEP_PERIOD * 0.55))     # over the top and round again
+    assert model.sweep[0] < peak, "the indeterminate sweep must keep looping"
+    model.tick(clock.advance(SWEEP_PERIOD * 3))
+    assert model.state == "transcribing" and model.finishing is False
+
+
+def test_an_error_skips_the_completion(model, clock):
+    """A failure is not an operation to finish: no run to 100% first."""
+    _mid_sweep(model, clock)
+    model.set_state("error", text="whisper died", now=clock.t)
+    assert model.finishing is False
+    model.tick(clock.advance(ERROR_HOLD - 0.05))
+    assert model.state == "error"
+    model.tick(clock.advance(0.1))
+    assert model.state == "hidden"
+
+
+def test_the_completion_does_not_move_the_checkmark_or_its_label(model, clock):
+    """It rides inside the lead-in the stroke already waited out, so the
+    checkmark, the label and the hold all keep the times they had before."""
+    assert DONE_DELAY == 0.0, "a completion within DASH_DELAY costs nothing"
+    _mid_sweep(model, clock)
+    model.set_state("done", now=clock.t)
+    plain = OverlayModel(clock=clock)
+    plain.set_state("done", now=clock.t)                 # no transcription behind it
+    for step in (DASH_DELAY, DASH_DUR, LABEL_DELAY - DASH_DELAY - DASH_DUR,
+                 LABEL_DUR, 0.1):
+        now = clock.advance(step)
+        model.tick(now)
+        plain.tick(now)
+        assert model.check_pop == pytest.approx(plain.check_pop)
+        assert model.check_draw == pytest.approx(plain.check_draw)
+        assert model.label_rise == pytest.approx(plain.label_rise)
+    assert model.check_draw == pytest.approx(1.0) and model.label_rise == pytest.approx(1.0)
+    assert model.state == "done", "the whole presentation still fits inside the hold"
+
+
+def test_the_checkmarks_stroke_never_starts_before_the_fill_has_landed(model, clock):
+    """The invariant behind the chosen 0.2 s: however the two are tuned, no
+    part of the checkmark is drawn while the fill is still on its way."""
+    from voice.ui.overlay_model import FINISH as finish
+
+    assert finish <= DASH_DELAY + DONE_DELAY
+    _mid_sweep(model, clock)
+    model.set_state("done", now=clock.t)
+    while model.state_age < DONE_HOLD:
+        model.tick(clock.advance(FRAME))
+        if model.state != "done":
+            break
+        if model.check_draw > 0.0:
+            assert model.sweep == pytest.approx((1.0, 1.0)), "a half-drawn line"
+            assert model.finishing is False
+
+
+def test_the_completion_comes_out_of_the_done_hold(model, clock):
+    """The ending must not grow: `done` still lasts exactly DONE_HOLD from the
+    moment the daemon says so, completion included."""
+    _mid_sweep(model, clock)
+    model.set_state("done", now=clock.t)
+    model.tick(clock.advance(DONE_HOLD - 0.05))
+    assert model.state == "done"
+    model.tick(clock.advance(0.1))
+    assert model.state == "hidden"
+
+
+def test_done_without_a_transcription_has_no_completion(model, clock):
+    model.set_state("recording")
+    model.set_state("done", now=clock.advance(1.0))
+    assert model.finishing is False
+    model.tick(clock.advance(POP_IN))
+    assert model.check_pop[1] == pytest.approx(1.0)
+
+
+def test_reduced_motion_has_no_completion(clock):
+    m = OverlayModel(reduced_motion=True, clock=clock)
+    m.set_state("transcribing")
+    m.tick(clock.advance(1.0))
+    m.set_state("done", now=clock.t)
+    assert m.finishing is False
+    m.tick(clock.advance(POP_IN))
+    assert m.check_pop[1] == pytest.approx(1.0), "straight to the checkmark"
+
+
+def test_the_clipboard_wording_gets_the_same_completion(model, clock):
+    """However the dictation ends - inserted or only copied - the fill finishes."""
+    _mid_sweep(model, clock)
+    model.set_state("done", text="Copied · Ctrl+V", now=clock.t)
+    assert model.finishing is True
+    assert model.text == "Copied · Ctrl+V"
+
+
+def test_a_notice_does_not_replay_the_completion(model, clock):
+    _mid_sweep(model, clock)
+    model.set_state("done", now=clock.t)
+    model.tick(clock.advance(FINISH + 0.25))
+    model.set_state("notice", now=clock.t)
+    model.tick(clock.advance(NOTICE_TTL + 0.01))
+    assert model.state == "done" and model.finishing is False
+    assert model.check_draw > 0.0, "the checkmark comes back, not the fill line"

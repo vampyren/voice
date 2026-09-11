@@ -463,26 +463,8 @@ def render_surface(model: OverlayModel, width: int | None = None,
     """
     if width is None:
         width = natural_width(model, height)
-    return render_window_surface(model, (width, height), (width, height), (0, 0))
-
-
-def render_window_surface(model: OverlayModel, window: tuple[int, int],
-                          pill: tuple[int, int],
-                          origin: tuple[int, int] = (0, 0)) -> cairo.ImageSurface:
-    """The pill, drawn at `origin` inside a `window`-sized surface.
-
-    Where the compositor places the window itself (no layer shell) the helper
-    asks for a window bigger than the pill and puts the pill against the edge
-    the placement names; the rest of the surface is left untouched, which on a
-    fresh ARGB32 surface means fully transparent. The pill is drawn exactly as
-    it is drawn on its own - same capsule, same size, same content - only
-    translated, so `window == pill` at `(0, 0)` is the old behaviour byte for
-    byte.
-    """
-    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, int(window[0]), int(window[1]))
-    ctx = cairo.Context(surface)
-    ctx.translate(int(origin[0]), int(origin[1]))
-    draw(ctx, int(pill[0]), int(pill[1]), model)
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, int(width), int(height))
+    draw(cairo.Context(surface), int(width), int(height), model)
     surface.flush()
     return surface
 

@@ -39,7 +39,7 @@ import threading
 from voice.ui.overlay_model import OverlayModel
 from voice.ui.placement import (DEFAULT_MARGIN_X, DEFAULT_MARGIN_Y, DEFAULT_POSITION,
                                 LEGACY_POSITIONS, POSITIONS, anchors, normalise_position,
-                                pill_origin, placement_note)
+                                placement_note)
 
 log = logging.getLogger(__name__)
 
@@ -48,18 +48,6 @@ FRAME_MS = 33
 
 #: Set to 1 to stop the breathing dot and the transcribing sweep.
 REDUCED_MOTION_ENV = "VOICE_OVERLAY_REDUCED_MOTION"
-
-#: Most of one screen axis a padded window may take. The padding is transparent
-#: but, where the input region cannot be set (below), it still takes clicks, so
-#: this is deliberately a half and not the whole screen: at 0.5 a `bottom-*`
-#: pill sits about a quarter-screen below centre, which is what the placement
-#: was asking for, without covering the desktop.
-PAD_SCREEN_FRACTION = 0.5
-
-#: Assumed screen when GDK will not say how big the monitor is. Conservative on
-#: purpose: too small only means less padding, while too large would put the
-#: pill's edge off the screen.
-FALLBACK_SCREEN = (1280, 720)
 
 
 def parse_line(line: str) -> dict | None:
@@ -137,10 +125,6 @@ def build_parser() -> argparse.ArgumentParser:
                              "half has no anchored side and ignores this")
     parser.add_argument("--margin-y", type=int, default=DEFAULT_MARGIN_Y,
                         help="the same, vertically (layer-shell only)")
-    parser.add_argument("--pad-to-place", action="store_true",
-                        help="where there is no layer shell, pad the window out and draw "
-                             "the pill at the edge the placement names; off by default "
-                             "because the padding takes clicks meant for what is behind it")
     parser.add_argument("--require-layer-shell", action="store_true",
                         help="exit 2 instead of falling back to a focus-stealing "
                              "plain window when no layer surface is available")
@@ -181,72 +165,6 @@ def warn_about_placement(position: str, margin_x: int, margin_y: int) -> None:
         log.warning("%s", note)
 
 
-def padded_window(position: str, margin_x: int, margin_y: int, screen: tuple[int, int],
-                  pill: tuple[int, int],
-                  fraction: float = PAD_SCREEN_FRACTION) -> tuple[tuple[int, int],
-                                                                  tuple[int, int]]:
-    """Window size, and the pill's top-left inside it, for a compositor that centres us.
-
-    A plain Wayland window cannot choose where it appears - but the compositor
-    centres the *window*, not the pill drawn inside it. So ask for a window
-    bigger than the pill and put the pill against the edge the placement names:
-    the window's centre is still the screen's centre, so the pill ends up as far
-    off centre as the padding is deep, and the rest of the window is left
-    transparent.
-
-    Exact where it can be: a window `2d` bigger than the pill moves it `d` px
-    off centre, so the padding a placement needs is however far off centre it
-    asks for. `fraction` caps the window at that much of each screen axis;
-    beyond the cap the pill rests against the window's edge, as near the
-    placement as the cap allows. A centred half (`middle`, `center`) asks for
-    nothing and gets a window the size of the pill, exactly as before.
-    """
-    screen_w, screen_h = max(1, int(screen[0])), max(1, int(screen[1]))
-    pill_w, pill_h = int(pill[0]), int(pill[1])
-    want_x, want_y = pill_origin(position, margin_x, margin_y,
-                                 (screen_w, screen_h), (pill_w, pill_h))
-    width, x = _padded_axis(want_x, screen_w, pill_w, fraction)
-    height, y = _padded_axis(want_y, screen_h, pill_h, fraction)
-    return (width, height), (x, y)
-
-
-def _padded_axis(want: int, extent: int, size: int, fraction: float) -> tuple[int, int]:
-    """One axis of `padded_window`: window length, and the pill's offset in it.
-
-    A window of length `L` is centred at `(extent - L) // 2` - the compositor's
-    floor, so this stays in whole pixels - and the pill can then sit anywhere
-    from there to `L - size` further on. The smallest `L` that reaches `want` is
-    therefore the larger of what the near side needs (`L >= extent - 2*want - 1`)
-    and what the far side does (`L >= 2*(want + size) - extent`); the padding is
-    not symmetric when the screen's leftover pixel is odd, and it does not need
-    to be. Capped at `room`, the pill rests against that end of the window, and
-    the clamp is also what keeps it on screen when `want` is off it (a negative
-    margin, which only a layer surface can really honour).
-    """
-    room = max(size, min(extent, int(extent * fraction)))
-    length = min(room, max(size, extent - 2 * want - 1, 2 * (want + size) - extent))
-    left = (extent - length) // 2
-    return length, max(0, min(length - size, want - left))
-
-
-def monitor_size(gdk, fallback: tuple[int, int] = FALLBACK_SCREEN) -> tuple[int, int]:
-    """The first monitor's size in logical pixels, or a conservative guess.
-
-    Only the padding needs this, and being wrong about it is never fatal: it
-    decides how far off centre the pill can be pushed, not whether there is one.
-    """
-    try:
-        monitor = gdk.Display.get_default().get_monitors().get_item(0)
-        geometry = monitor.get_geometry()
-        width, height = int(geometry.width), int(geometry.height)
-    except Exception:
-        log.debug("overlay: cannot read the monitor geometry", exc_info=True)
-        return fallback
-    if width <= 0 or height <= 0:
-        return fallback
-    return width, height
-
-
 class _Pill:
     """The GTK side: one undecorated window holding one drawing area."""
 
@@ -259,14 +177,6 @@ class _Pill:
         self._loop = glib.MainLoop()
         self._timer = None
         self._width = 0
-        self._geometry: tuple[tuple[int, int], tuple[int, int]] | None = None
-        #: Only a plain window needs padding: a layer surface is anchored where
-        #: the placement says, and padding it would only move the pill away.
-        self._pad = layer_shell is None and bool(getattr(args, "pad_to_place", False))
-        self._screen = monitor_size(gdk) if self._pad else None
-        #: Set once the region binding has been found unusable, so the helper
-        #: says so a single time rather than on every frame.
-        self._no_input_region = False
         settings = gtk.Settings.get_default()
         animations = settings.get_property("gtk-enable-animations") if settings else None
         self.model = OverlayModel(lang=args.lang, reduced_motion=reduced_motion(animations))
@@ -304,29 +214,18 @@ class _Pill:
 
     # -- drawing ----------------------------------------------------------
 
-    def _window_for(self, width: int, height: int) -> tuple[tuple[int, int],
-                                                            tuple[int, int]]:
-        """The window to ask for, and where the pill goes in it."""
-        if not self._pad:
-            return (width, height), (0, 0)
-        return padded_window(self._args.position, self._args.margin_x,
-                             self._args.margin_y, self._screen, (width, height))
-
     def _render(self) -> None:
         """Draw one frame with cairo and hand GDK the pixels as a texture."""
         height = self._args.height
         width = self._draw.natural_width(self.model, height)
-        window, origin = self._window_for(width, height)
-        surface = self._draw.render_window_surface(self.model, window, (width, height), origin)
+        surface = self._draw.render_surface(self.model, width, height)
         texture = self._gdk.MemoryTexture.new(
-            window[0], window[1], self._gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED,
+            width, height, self._gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED,
             self._glib.Bytes.new(bytes(surface.get_data())), surface.get_stride())
         self.view.set_paintable(texture)
-        self._width = width                     # the counter and badge set the width
-        if (window, origin) != self._geometry:
-            self._geometry = (window, origin)
-            self.view.set_size_request(window[0], window[1])
-            self._set_input_region()
+        if width != self._width:                # the counter and badge set the width
+            self._width = width
+            self.view.set_size_request(width, height)
 
     def _on_frame(self) -> bool:
         self.model.tick()
@@ -348,41 +247,11 @@ class _Pill:
         if self._timer is None:
             self._timer = self._glib.timeout_add(FRAME_MS, self._on_frame)
 
-    def _set_input_region(self) -> None:
-        """Keep the padding from taking clicks meant for what is behind it.
-
-        The pill itself is never clickable, so the region it does claim changes
-        nothing; everything around it becomes input-transparent. `Gdk.Surface`
-        wants a `cairo.Region`, which PyGObject can only convert where its cairo
-        foreign-struct support is installed (Debian's `python3-gi-cairo`) - the
-        same reason the pill is drawn to a texture rather than into a draw
-        handler. Without it the padding takes clicks it does not use, which is
-        a trade for the placement, not a reason to fail or to stop drawing.
-        """
-        if not self._pad or self._no_input_region or self._geometry is None:
-            return
-        surface = self.window.get_surface()
-        if surface is None or not hasattr(surface, "set_input_region"):
-            return
-        (_, _), (x, y) = self._geometry
-        try:
-            import cairo
-
-            surface.set_input_region(
-                cairo.Region(cairo.RectangleInt(x, y, self._width, self._args.height)))
-        except Exception as exc:
-            self._no_input_region = True
-            log.info("overlay: cannot set the pill's input region (%s); the padding "
-                     "around it will take clicks - install python3-gi-cairo, or set "
-                     "ui.overlay_pad_to_place = false", exc)
-
     def _log_mapped(self) -> bool:
         """Once per appearance, say whether the compositor really gave us a surface."""
-        self._set_input_region()                # the surface exists only now
-        window = self._geometry[0] if self._geometry else (self._width, self._args.height)
-        log.debug("overlay: %s %dx%d in a %dx%d window mapped=%s surface=%s",
-                  self.model.state, self._width, self._args.height, window[0], window[1],
-                  self.window.get_mapped(), self.window.get_surface() is not None)
+        log.debug("overlay: %s %dx%d mapped=%s surface=%s", self.model.state,
+                  self._width, self._args.height, self.window.get_mapped(),
+                  self.window.get_surface() is not None)
         return self._glib.SOURCE_REMOVE
 
     # -- input ------------------------------------------------------------
@@ -451,19 +320,6 @@ def _layer_shell_supported(shell) -> bool:
         return True
 
 
-def _note_the_padding(position: str) -> None:
-    """Say what the window is doing instead of being placed - once, at INFO.
-
-    Not the warning above it: with the padding on, the placement is not being
-    ignored, it is being approximated, and an owner reading "does nothing here"
-    would go looking for a fault in a setting that just worked.
-    """
-    log.info("overlay: this compositor centres the window itself, so the window is "
-             "padded out and the pill drawn at its %s edge - near, not at, the "
-             "placement. Set ui.overlay_pad_to_place = false for a pill-sized "
-             "window wherever the compositor puts it.", normalise_position(position))
-
-
 def _warn_about_focus() -> None:
     """Said once, only when we really are about to show a plain window."""
     log.warning(
@@ -492,10 +348,7 @@ def main(argv: list[str] | None = None) -> int:
         return refused
     if layer_shell is None:
         _warn_about_focus()
-        if args.pad_to_place:
-            _note_the_padding(args.position)
-        else:
-            warn_about_placement(args.position, args.margin_x, args.margin_y)
+        warn_about_placement(args.position, args.margin_x, args.margin_y)
     return _Pill(args, gtk, gdk, glib, layer_shell).run()
 
 

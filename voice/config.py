@@ -58,11 +58,6 @@ overlay_position = "bottom-center"   # top|middle|bottom with left|center|right,
                                      # e.g. "bottom-right"; needs gtk4-layer-shell
 overlay_margin_x = 0       # pixels in from the anchored side; a "center" or
 overlay_margin_y = 48      # "middle" half is centred and ignores its margin
-overlay_pad_to_place = false     # where the desktop places the window itself (GNOME): make the
-                                 # window bigger than the pill and draw the pill at the edge you
-                                 # asked for, so overlay_position moves it. Off because the
-                                 # padding, though invisible, still takes clicks meant for the
-                                 # window behind it
 overlay_allow_fallback = false   # show the pill without gtk4-layer-shell, accepting
                                  # that it takes keyboard focus when it appears
 
@@ -351,9 +346,6 @@ class Config:
             if margin is not None and not is_margin(margin):
                 errs.append(f"{key} must be a whole number of pixels between "
                             f"-{MARGIN_LIMIT} and {MARGIN_LIMIT}, got {margin!r}")
-        pad = self.get("ui.overlay_pad_to_place")
-        if pad is not None and not isinstance(pad, bool):
-            errs.append(f"ui.overlay_pad_to_place must be true or false, got {pad!r}")
         return errs
 
     def _language_profile_errors(self, profiles: dict) -> list[str]:

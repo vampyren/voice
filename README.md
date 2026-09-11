@@ -141,26 +141,9 @@ past the edge, and the range is -2000 to 2000. A half that is `center` or
 it ignores its margin: with the shipped `bottom-center` only `overlay_margin_y`
 (48 by default) does anything.
 
-Changing any of them takes effect on `voice reload` and on Save in the
+Changing any of the three takes effect on `voice reload` and on Save in the
 settings window - the daemon restarts the pill helper - without restarting the
 daemon itself.
-
-**On a desktop that places the pill itself.** GNOME gives the pill a plain
-Wayland window and centres it, and nothing inside the window can argue with
-that: the pill appears in the middle of the screen whatever `ui.overlay_position`
-says.
-
-`ui.overlay_pad_to_place = true` argues with the *size* instead: the helper asks
-for a window bigger than the pill and draws the pill against the edge you asked
-for, leaving the rest of it transparent. The compositor still centres the
-window, so `bottom-center` puts the pill about a quarter-screen below centre,
-`top-*` the same above it, and `left`/`right` work the same way across - near,
-not exact, and capped at half the screen. **It is off by default, and it is a
-trade, not a fix:** the padding is invisible but it is still part of the window,
-so clicks in it stop at the pill's window instead of reaching what is behind it,
-unless PyGObject can set an input region (Debian/Ubuntu: `python3-gi-cairo`;
-without that package it cannot). Turn it on if you would rather have the pill
-low than have that quarter-screen clickable.
 
 **Drag it where you want it.** The settings window's General tab shows this
 screen in miniature with the pill in it: drag the pill, and the drop is saved as
@@ -183,8 +166,7 @@ stealing focus mid-dictation - and a layer-shell surface has no position to
 drag, only anchors and margins. That is why the dragging happens in the
 preview, and why what is stored is an anchor and a margin. Where there is no
 layer-shell (GNOME, see below) not even that applies: the compositor places the
-window, and the placement is approximated by padding it (above) rather than
-honoured. The settings window says so under the placer — *"Your desktop places
+window. The settings window says so under the placer — *"Your desktop places
 this window itself, so this only takes effect on KDE/wlroots"* — and `voice
 doctor`'s **pill placement** line says the same, so the setting is never
 silently ignored. The control stays live either way: the placement is recorded
@@ -330,11 +312,6 @@ overlay_position = "bottom-center"   # top|middle|bottom with left|center|right,
                                      # e.g. "bottom-right"; needs gtk4-layer-shell
 overlay_margin_x = 0       # pixels in from the anchored side; a "center" or
 overlay_margin_y = 48      # "middle" half is centred and ignores its margin
-overlay_pad_to_place = false     # where the desktop places the window itself (GNOME): make the
-                                 # window bigger than the pill and draw the pill at the edge you
-                                 # asked for, so overlay_position moves it. Off because the
-                                 # padding, though invisible, still takes clicks meant for the
-                                 # window behind it
 overlay_allow_fallback = false   # show the pill without gtk4-layer-shell, accepting
                                  # that it takes keyboard focus when it appears
 

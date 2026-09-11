@@ -281,9 +281,6 @@ def test_defaults_carry_the_language_cycle_and_the_overlay(isolated_xdg):
     assert cfg.get("ui.overlay_margin_x") == 0
     assert cfg.get("ui.overlay_margin_y") == 48
     assert cfg.get("ui.overlay_allow_fallback") is False
-    # Off by default: it moves the pill where the compositor would not, and
-    # charges for it in clicks that land on the padding around it.
-    assert cfg.get("ui.overlay_pad_to_place") is False
     assert cfg.get("hotkeys.language_toggle") == ""
     assert cfg.portal_trigger("language_toggle") == ""
     assert cfg.errors() == []
@@ -468,26 +465,11 @@ def test_a_margin_inside_the_range_is_accepted(isolated_xdg, key, value):
     assert [e for e in cfg.errors() if key in e] == []
 
 
-@pytest.mark.parametrize("junk", ["true", 1, 0, "yes", [True]])
-def test_the_padding_switch_must_be_a_boolean(isolated_xdg, junk):
-    cfg = Config.load()
-    cfg.set("ui.overlay_pad_to_place", junk)
-    assert any("ui.overlay_pad_to_place" in e for e in cfg.errors()), cfg.errors()
-
-
-@pytest.mark.parametrize("value", [True, False])
-def test_the_padding_switch_takes_either_boolean(isolated_xdg, value):
-    cfg = Config.load()
-    cfg.set("ui.overlay_pad_to_place", value)
-    assert [e for e in cfg.errors() if "overlay_pad_to_place" in e] == []
-
-
 def test_a_file_with_no_placement_keys_leaves_the_pill_where_it_was(isolated_xdg):
     """An upgraded install keeps the pill exactly where it was."""
     paths.config_file().write_text(LEGACY_CONFIG)
     cfg = Config.load()
     assert cfg.get("ui.overlay_position") is None
-    assert cfg.get("ui.overlay_pad_to_place") is None
     assert cfg.overlay_placement() == ("bottom-center", 0, 48)
     assert [e for e in cfg.errors() if "overlay_" in e] == []
 

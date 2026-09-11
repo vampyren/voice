@@ -375,11 +375,9 @@ class Daemon:
         self._overlay_settings = self._overlay_snapshot()
         verbose = log.isEnabledFor(logging.DEBUG)
         allow_fallback = bool(self.config.get("ui.overlay_allow_fallback", False))
-        pad_to_place = bool(self.config.get("ui.overlay_pad_to_place", False))
         return OverlayClient(enabled, launcher=lambda: default_launcher(
             position=position, margin_x=margin_x, margin_y=margin_y,
-            lang=self._overlay_language, verbose=verbose, allow_fallback=allow_fallback,
-            pad_to_place=pad_to_place))
+            lang=self._overlay_language, verbose=verbose, allow_fallback=allow_fallback))
 
     def _preview_pill(self, position: str, margin_x: int, margin_y: int) -> None:
         """Qt thread: show the real pill at `position` for a few seconds.
@@ -414,11 +412,10 @@ class Daemon:
         """
         verbose = log.isEnabledFor(logging.DEBUG)
         allow_fallback = bool(self.config.get("ui.overlay_allow_fallback", False))
-        pad_to_place = bool(self.config.get("ui.overlay_pad_to_place", False))
         self._overlay_language = language
         return OverlayClient(True, launcher=lambda: default_launcher(
             position=position, margin_x=margin_x, margin_y=margin_y, lang=language,
-            verbose=verbose, allow_fallback=allow_fallback, pad_to_place=pad_to_place))
+            verbose=verbose, allow_fallback=allow_fallback))
 
     def _end_pill_preview(self) -> None:
         """Take the preview off the screen and give the real pill its helper back.

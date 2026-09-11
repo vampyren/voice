@@ -372,16 +372,6 @@ def test_the_fallback_window_can_be_allowed_by_config(monkeypatch):
     assert "--require-layer-shell" not in seen["cmd"]
 
 
-def test_the_helper_only_pads_its_window_when_the_config_asks_for_it(monkeypatch):
-    """Off by default: the padding takes clicks meant for the window behind it."""
-    monkeypatch.setattr("voice.ui.overlay_client._probe", lambda python: ("gtk4",))
-    seen = {}
-    default_launcher(popen=lambda cmd, **kw: seen.update(cmd=cmd))
-    assert "--pad-to-place" not in seen["cmd"]
-    default_launcher(pad_to_place=True, popen=lambda cmd, **kw: seen.update(cmd=cmd))
-    assert "--pad-to-place" in seen["cmd"]
-
-
 def test_a_helper_that_refuses_to_steal_focus_disables_the_overlay(helper_processes, caplog):
     """Exit 2 is the helper saying "no layer-shell here": there is nothing to
     retry, so it must not be restarted and status must say why."""

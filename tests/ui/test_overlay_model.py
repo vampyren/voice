@@ -922,3 +922,24 @@ def test_a_notice_over_a_finishing_fill_still_comes_back_to_it(model, clock):
     assert model.state == "transcribing"
     assert model.sweep == pytest.approx((1.0, 1.0)), "the fill landed under the notice"
     assert caught < 1.0
+
+
+def test_the_fill_crosses_the_track_in_the_time_a_transcription_takes(clock):
+    """Tuned for the seconds a real transcription lasts, not for ten of them.
+
+    The first tuning reached 55% at two seconds and the owner reported it as
+    stopping halfway - which, for their transcriptions, it did.
+    """
+    model = OverlayModel(clock=clock)
+    started = clock.t
+    model.set_state("transcribing", now=started)
+
+    def width_at(seconds):
+        clock.t = started + seconds
+        model.tick(clock.t)
+        return model.sweep[0]
+
+    assert width_at(1.0) >= 0.60, "a one-second conversion must look well under way"
+    assert width_at(2.0) >= 0.80, "two seconds is most of a dictation; the bar must be near the end"
+    assert width_at(3.0) >= 0.90
+    assert width_at(30.0) <= SWEEP_CEILING, "the end belongs to the completion, never to the sweep"

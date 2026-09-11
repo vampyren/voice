@@ -55,19 +55,20 @@ COLLAPSE = 0.2               # bars melting into the track when transcribing sta
 #: reach the end of the track on its own - the end belongs to `finish_fill`,
 #: which is the one thing that means the transcript exists.
 #:
-#: SWEEP_TAU 2.2 s is set by how long a transcription actually takes. On this
-#: machine's GPU a sentence is over in one to three seconds, so the fill has
-#: to be well across the track by then: a third of it in the first second,
-#: half at 1.7 s, 80% of the ceiling at 3.5 s. A slow CPU takes tens of
-#: seconds, and the fill is still visibly moving for about ten of them - the
-#: track is 132 px wide, so a pixel is 0.0076 of it and the remaining
-#: distance stays over a pixel until ~10.5 s. After that it holds.
+#: SWEEP_TAU 0.9 s is set by how long a transcription actually takes here, not
+#: by how long one could take. A sentence is over in one to three seconds on
+#: any machine we target, so that is the window the fill has to cross: 64% of
+#: the ceiling at one second, 85% at two, 92% at three. The first tuning used
+#: 2.2 s, which put the bar at 55% at two seconds - the owner read exactly
+#: that as "it stops halfway", because for their transcriptions it does.
+#: A minute-long conversion still creeps: the remaining distance stays over a
+#: pixel of the 132 px track until ~4.5 s, and the bar never goes backwards.
 #:
-#: SWEEP_CEILING 0.92 leaves ~11 px of grey track at 1x (21 px at 2x): enough
+#: SWEEP_CEILING 0.95 leaves ~7 px of grey track at 1x (13 px at 2x): enough
 #: that the bar plainly has not finished, close enough to the counter that the
 #: completion reads as arriving rather than as a jump.
-SWEEP_TAU = 2.2
-SWEEP_CEILING = 0.92
+SWEEP_TAU = 0.9
+SWEEP_CEILING = 0.95
 
 #: The fill stops short of the end of the track on its own (SWEEP_CEILING),
 #: so without this the checkmark would replace a half-drawn line - an operation

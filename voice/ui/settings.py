@@ -96,6 +96,30 @@ HOTKEY_HELP = {
 PREVIEW_DELAY_MS = 600
 #: What the window says while the real pill is on screen at the new placement.
 PREVIEW_SHOWING = "Showing the pill there on your desktop…"
+#: The same, where the compositor ignores placement: the pill does appear, just
+#: not where it was dropped. Saying "there" beside the note explaining that the
+#: desktop chooses is a contradiction the owner has to resolve on their own.
+PREVIEW_SHOWING_ANYWHERE = "Showing the pill now - your desktop chooses where."
+#: The daemon's refusals, in words that say what to do about it. The owner drags,
+#: drops, sees nothing and concludes the feature is broken; the daemon knew why
+#: all along and told the window, which threw it away.
+PREVIEW_REFUSALS = {
+    "not while a dictation is running": "Not while you are dictating - try again in a moment.",
+}
+#: Anything else it refuses with is shown as it comes rather than swallowed: the
+#: other refusal names a setting ("ui.overlay = false") and is worth reading.
+PREVIEW_REFUSED = "Not showing it: {error}"
+#: And a refusal with nothing to say for itself.
+PREVIEW_CANNOT = "Cannot show it here."
+#: How long a refusal stays before it clears itself. A note left on screen is
+#: read as the state of things now, so none of them may outlive what it describes:
+#: the "showing" line goes when the pill does, the reason after long enough to
+#: read it twice.
+REFUSAL_NOTE_MS = 6000
+#: How long to assume a preview lasts when the daemon's reply does not say, or
+#: says something that is not a number. The daemon has its own PREVIEW_SECONDS
+#: and normally tells us; this is only what to do when it has not.
+ASSUMED_PREVIEW_SECONDS = 5.0
 #: The one-liner beside each backend's fields; the rest is behind the "?".
 HOTKEY_HINTS = {
     "evdev": "Type an evdev key name, or press \"Capture key\".",
@@ -369,6 +393,23 @@ def _as_rich(text: str) -> str:
     return f"<div style='max-width:{HELP_WIDTH}px'>{body}</div>"
 
 
+def _preview_seconds(reply: dict) -> float:
+    """How long the note about `reply` should stay up.
+
+    A line about a pill on screen goes when the pill does, so it takes the
+    daemon's own number; a reason stays long enough to be read twice. Whatever
+    the reply holds, this returns a number: the note is set from a Qt slot, and
+    a daemon a version ahead must not be able to raise out of one.
+    """
+    if not reply.get("ok"):
+        return REFUSAL_NOTE_MS / 1000
+    try:
+        seconds = float(reply.get("seconds"))
+    except (TypeError, ValueError):
+        return ASSUMED_PREVIEW_SECONDS
+    return seconds if seconds > 0 else ASSUMED_PREVIEW_SECONDS
+
+
 def _spawn(command: list[str]) -> None:
     """Start the desktop's settings app detached: it outlives this dialog."""
     subprocess.Popen(command, start_new_session=True,
@@ -509,7 +550,7 @@ class SettingsDialog(QDialog):
         self._inject_mode_changed = False
         self._pill_placement_changed = False
         self.preview_timer.stop()          # an abandoned gesture shows nothing
-        self.preview_note.setText("")
+        self._say_about_preview("")
         self.profile_form = {}
         self._device_choice = None
         self.error_label.setText("")
@@ -547,6 +588,12 @@ class SettingsDialog(QDialog):
         self.preview_timer = QTimer(self)
         self.preview_timer.setSingleShot(True)
         self.preview_timer.timeout.connect(self._request_pill_preview)
+        #: And what takes the note off again. A note describes what is happening
+        #: now - a pill on screen, or a refusal a moment old - so none of them
+        #: may outlive that and be read as still true.
+        self.preview_note_timer = QTimer(self)
+        self.preview_note_timer.setSingleShot(True)
+        self.preview_note_timer.timeout.connect(lambda: self.preview_note.setText(""))
         self.pill_placement_label = _caption()
         self.placement_warning = _caption(NO_LAYER_SHELL_NOTE)
         self.placement_warning.setVisible(False)
@@ -892,8 +939,33 @@ class SettingsDialog(QDialog):
         """The owner dragged or nudged the pill in the preview."""
         self._pill_placement_changed = True
         self.pill_placement_label.setText(placement_summary(*self.pill_placer.placement()))
+        # Whatever the note said was about the placement that has just been left
+        # behind, so it is not true of this one even where it will be again.
+        self._say_about_preview("")
         if self._preview_pill is not None:
             self.preview_timer.start(PREVIEW_DELAY_MS)
+
+    def _say_about_preview(self, note: str, seconds: float = 0.0) -> None:
+        """Put one line about the preview beside the placer, for `seconds`.
+
+        Its own line, under the note about what this desktop does with a
+        placement: the two answer different questions - "will this setting be
+        honoured here" and "did anything happen just now" - and an owner on
+        GNOME needs both at once.
+        """
+        self.preview_note_timer.stop()
+        self.preview_note.setText(note)
+        if note:
+            self.preview_note_timer.start(int(seconds * 1000))
+
+    def preview_message(self, reply: dict) -> str:
+        """What a reply from the daemon says, in words for this window."""
+        if reply.get("ok"):
+            return PREVIEW_SHOWING if self._layer_shell is not False else PREVIEW_SHOWING_ANYWHERE
+        error = str(reply.get("error") or "").strip()
+        if not error:
+            return PREVIEW_CANNOT
+        return PREVIEW_REFUSALS.get(error.lower(), PREVIEW_REFUSED.format(error=error))
 
     def _request_pill_preview(self) -> None:
         """Ask the daemon to put the real pill where the placer says, briefly.
@@ -902,6 +974,10 @@ class SettingsDialog(QDialog):
         dictation in flight) has a reason worth reading, and a daemon that has
         gone away is worth saying once - but neither belongs in the red label
         beside Save, and neither may stop the placement being saved.
+
+        What it may not do is say nothing at all, which is what it used to do:
+        the owner dragged the pill while dictating, saw nothing happen, and
+        reported the feature as broken. The daemon had said why the whole time.
         """
         if self._preview_pill is None:
             return
@@ -909,10 +985,10 @@ class SettingsDialog(QDialog):
             reply = self._preview_pill(*self.pill_placer.placement()) or {}
         except Exception as exc:
             log.debug("the pill preview could not be started: %s", exc)
-            self.preview_note.setText(f"Cannot show it here: {exc}")
+            self._say_about_preview(PREVIEW_REFUSED.format(error=exc),
+                                    REFUSAL_NOTE_MS / 1000)
             return
-        self.preview_note.setText(PREVIEW_SHOWING if reply.get("ok")
-                                  else str(reply.get("error") or "Cannot show it here."))
+        self._say_about_preview(self.preview_message(reply), _preview_seconds(reply))
 
     def set_replacement_row(self, row: int, src: str, dst: str, flags: str = "") -> None:
         for col, val in enumerate((src, dst, flags)):

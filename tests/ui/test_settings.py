@@ -1036,7 +1036,7 @@ def test_a_refused_preview_says_why_without_alarming_anyone(qapp):
     dlg, asked = _previewing(qapp, reply={"ok": False, "error": "not while a dictation is running"})
     _drag_pill_to(dlg, "top-left", 0, 0)
     dlg.preview_timer.timeout.emit()
-    assert "dictation" in dlg.preview_note.text()
+    assert "dictating" in dlg.preview_note.text()
     assert dlg.error_label.text() == ""
 
 
@@ -1289,3 +1289,115 @@ def test_a_theme_change_while_the_window_is_open_is_followed(qapp, themed):
     behind = dark.color(QPalette.ColorRole.Window)
     caption = dlg.pill_placement_label.palette().color(QPalette.ColorRole.WindowText)
     assert contrast_ratio(caption, behind) >= MIN_CONTRAST
+
+
+# -- and saying what the preview actually did -----------------------------------
+def test_a_refusal_says_what_the_owner_can_do_about_it(qapp):
+    """"not while a dictation is running" is the daemon's wording, not words to
+    read in a settings window while wondering why nothing happened."""
+    from voice.ui.settings import PREVIEW_REFUSALS
+
+    dlg, asked = _previewing(qapp, reply={"ok": False,
+                                          "error": "not while a dictation is running"})
+    _drag_pill_to(dlg, "top-left", 0, 0)
+    dlg.preview_timer.timeout.emit()
+    assert dlg.preview_note.text() == PREVIEW_REFUSALS["not while a dictation is running"]
+    assert "dictating" in dlg.preview_note.text()
+    assert "try again" in dlg.preview_note.text()
+
+
+def test_a_refusal_nobody_wrote_words_for_is_still_shown(qapp):
+    """The other refusal - no pill to show - must not vanish into a log line."""
+    dlg, asked = _previewing(qapp, reply={"ok": False,
+                                          "error": "the recording pill is off (ui.overlay = false)"})
+    _drag_pill_to(dlg, "top-left", 0, 0)
+    dlg.preview_timer.timeout.emit()
+    assert "ui.overlay = false" in dlg.preview_note.text()
+
+
+@pytest.mark.parametrize("reply", [{"ok": True, "seconds": 5.0},
+                                   {"ok": False, "error": "not while a dictation is running"}])
+def test_the_note_clears_itself_so_nothing_stale_lingers(qapp, reply):
+    """The pill is gone after five seconds; a line still saying it is showing is
+    a line the owner will act on."""
+    dlg, asked = _previewing(qapp, reply=reply)
+    _drag_pill_to(dlg, "top-left", 0, 0)
+    dlg.preview_timer.timeout.emit()
+    assert dlg.preview_note.text() != ""
+    assert dlg.preview_note_timer.isActive() is True
+    dlg.preview_note_timer.timeout.emit()
+    assert dlg.preview_note.text() == ""
+
+
+def test_a_new_drag_drops_the_note_left_by_the_last_one(qapp):
+    """The note describes a placement; the moment that placement changes it is
+    about something that is no longer on screen."""
+    dlg, asked = _previewing(qapp)
+    _drag_pill_to(dlg, "top-left", 0, 0)
+    dlg.preview_timer.timeout.emit()
+    assert dlg.preview_note.text() != ""
+    _drag_pill_to(dlg, "bottom-right", 4, 4)
+    assert dlg.preview_note.text() == ""
+
+
+def test_both_notes_show_at_once_without_contradicting_each_other(qapp):
+    """On GNOME the pill does appear - just not where it was dropped. Saying
+    "showing it there" beside "your desktop places it itself" is worse than
+    saying nothing."""
+    from voice.ui.placement import NO_LAYER_SHELL_NOTE
+    from voice.ui.settings import PREVIEW_SHOWING_ANYWHERE
+
+    dlg, asked = _previewing(qapp)
+    dlg.set_layer_shell(False)
+    _drag_pill_to(dlg, "top-left", 0, 0)
+    dlg.preview_timer.timeout.emit()
+    assert dlg.placement_warning.text() == NO_LAYER_SHELL_NOTE
+    assert dlg.placement_warning.isVisibleTo(dlg) is True
+    assert dlg.preview_note.text() == PREVIEW_SHOWING_ANYWHERE
+    assert "there" not in dlg.preview_note.text()
+
+
+def test_every_note_under_the_placer_fits_its_line(qapp):
+    """Three notes that each wrap to three lines is the wall of text this window
+    was just dug out of - and the owner's desktop font is bigger than this one's,
+    so a note that only just fits here does not fit there."""
+    from PySide6.QtGui import QFontMetrics
+
+    from voice.ui.placement import NO_LAYER_SHELL_NOTE, placement_summary
+    from voice.ui.settings import (PREVIEW_CANNOT, PREVIEW_REFUSALS, PREVIEW_REFUSED,
+                                   PREVIEW_SHOWING, PREVIEW_SHOWING_ANYWHERE)
+
+    from voice.ui.settings import MARGIN
+
+    cfg, dlg, _ = make(qapp)
+    label = dlg.placement_warning
+    # The narrowest the window is allowed to be, less the dialog's margins and
+    # the group box's - measured, not laid out, so it does not turn on whatever
+    # the widest tab happens to want today. A fifth is left over for the larger
+    # font the owner runs: a note that only just fits here wraps there.
+    room = (dlg.minimumWidth() - 4 * MARGIN) * 0.8
+    metrics = QFontMetrics(label.font())
+    notes = [NO_LAYER_SHELL_NOTE, PREVIEW_SHOWING, PREVIEW_SHOWING_ANYWHERE, PREVIEW_CANNOT,
+             placement_summary("bottom-right", 2000, 2000),
+             PREVIEW_REFUSED.format(error="the recording pill is off (ui.overlay = false)"),
+             *PREVIEW_REFUSALS.values()]
+    too_wide = [(n, metrics.horizontalAdvance(n)) for n in notes
+                if metrics.horizontalAdvance(n) > room]
+    assert too_wide == [], f"{room:.0f}px of line: {too_wide}"
+
+
+@pytest.mark.parametrize("reply", [{"ok": True},                       # says nothing
+                                   {"ok": True, "seconds": "soon"},    # says nonsense
+                                   {"ok": True, "seconds": 0}])        # says nothing useful
+def test_a_reply_that_will_not_say_how_long_still_clears_the_note(qapp, reply):
+    """The note is set from a Qt slot: a daemon a version ahead may not be able
+    to raise out of one, and may not leave a line up for ever either."""
+    from voice.ui.settings import ASSUMED_PREVIEW_SECONDS
+
+    dlg, asked = _previewing(qapp, reply=reply)
+    _drag_pill_to(dlg, "top-left", 0, 0)
+    dlg.preview_timer.timeout.emit()
+    assert dlg.preview_note.text() != ""
+    assert dlg.preview_note_timer.interval() == int(ASSUMED_PREVIEW_SECONDS * 1000)
+    dlg.preview_note_timer.timeout.emit()
+    assert dlg.preview_note.text() == ""

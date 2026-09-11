@@ -119,6 +119,11 @@ SAVED_TO_DESKTOP = "Your shortcuts have been handed to your desktop."
 #: asks, which is why that is what this says to do.
 NOT_OFFERED = "Your desktop has not been offered this shortcut yet - press Save, then Change… again."
 CHANGE_UNUSABLE = "That key cannot be used as a shortcut - try another one."
+#: And when the store refuses without a word of its own to show.
+CHANGE_REFUSED = "Your desktop did not take that key."
+#: What a listener that cannot hand back a key answers with instead: a sentence
+#: about the mechanism it is. This is that sentence, for the person reading it.
+CAPTURE_NOT_POSSIBLE = "This desktop handles the shortcuts itself - set the key in its own keyboard settings."
 #: What the desktop's own window being open reads as, in place of the portal's
 #: own sentence, which is written for whoever wrote the portal.
 DESKTOP_DIALOG_OPEN = "Your desktop has opened its own window - set the key there."
@@ -1577,16 +1582,27 @@ class SettingsDialog(QDialog):
         self._capture_key(self._captured.emit)
 
     def _on_captured(self, key: str) -> None:
-        """A key name from the listener - or a sentence, where it cannot say one."""
-        name = self._changing if self._changing in self.key_edits else "dictate"
+        """A key name from the listener - or a sentence, where it cannot say one.
+
+        An answer to a change nobody is waiting for any more is dropped: the
+        listener is asked once and answers whenever the user presses something,
+        which can be after the button was pressed again to give up. Writing that
+        key into a row the user has stopped editing is how a hotkey changes
+        itself.
+        """
+        name = self._changing
+        if name is None or name not in self.key_edits:
+            log.debug("a captured key arrived after the change was given up: %s", key)
+            return
         if key.startswith(("KEY_", "BTN_")):
             self.key_edits[name].setText(key)    # the row follows the field
             self._stop_change("")
             return
-        # The portal backend cannot hand back a key name - the compositor keeps
-        # the keystroke - so it answers with a sentence for the user instead.
-        self.error_label.setText(key)
-        self._stop_change("")
+        # A listener that cannot hand back a key name - the desktop keeps the
+        # keystroke - answers with a sentence about itself instead. What it
+        # means for the user is the same every time, so that is what is shown.
+        log.info("the listener could not capture a key: %s", key)
+        self._stop_change(CAPTURE_NOT_POSSIBLE)
 
     # -- the next combination, read here and handed to the desktop -------------
     def _start_chord(self, name: str) -> None:
@@ -1658,6 +1674,11 @@ class SettingsDialog(QDialog):
         if not self._apply_desktop_shortcuts(CHANGED_ON_DESKTOP.format(
                 key=pretty_trigger(trigger), what=ACTION_LABELS[name].lower())):
             self.refresh_effective_triggers()
+            if not self.error_label.text():
+                # A store that went away between the probe and the write says
+                # nothing at all, and a button that does nothing and says
+                # nothing is the whole complaint this tab was rebuilt over.
+                self._say_about_hotkeys(CHANGE_REFUSED)
             return
         self.key_labels[name].setText(pretty_trigger(trigger))
         self.shortcuts_rebound.emit()

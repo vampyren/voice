@@ -196,8 +196,14 @@ def test_a_captured_message_is_shown_instead_of_being_typed_into_the_field(qapp)
     dlg.capture_button.click()
     captures[0]("portal: change the shortcut in your desktop's settings")
     qapp.processEvents()
+    from voice.ui.settings import CAPTURE_NOT_POSSIBLE
+
     assert dlg.hotkey_edit.text() == "KEY_F13"               # untouched
-    assert "portal" in dlg.error_label.text()
+    # The listener's own sentence names the mechanism it is; what it means for
+    # whoever pressed the button is the same every time, and that is shown.
+    assert dlg.hotkey_status.text() == CAPTURE_NOT_POSSIBLE
+    assert "portal" not in dlg.hotkey_status.text()
+    assert dlg.error_label.text() == ""
     assert dlg.capture_button.text() == CHANGE
 
 
@@ -1879,3 +1885,34 @@ def test_a_shortcut_the_desktop_has_never_heard_of_says_what_to_do(qapp):
     assert dlg.portal_edits["language_toggle"].text() == "CTRL+SHIFT+L"
     dlg.save_button.click()                        # which is what asking for it is
     assert Config.load().get("hotkeys.portal_language_toggle") == "CTRL+SHIFT+L"
+
+
+def test_a_key_that_arrives_after_the_change_was_given_up_is_dropped(qapp):
+    """The listener answers whenever the user presses something, which can be
+    long after the button was pressed again to stop waiting."""
+    captures = []
+    cfg, dlg = _hotkeys_dialog(qapp, "capture", capture=captures.append)
+    dlg.change_buttons["cancel"].click()
+    dlg.change_buttons["cancel"].click()             # stopped waiting
+    assert dlg.hotkey_status.text() == CHANGE_STOPPED
+    captures[0]("KEY_F14")                           # and only then a key
+    qapp.processEvents()
+    assert dlg.cancel_edit.text() == "KEY_ESC"       # untouched
+    assert dlg.key_labels["cancel"].text() == "Escape"
+
+
+def test_a_desktop_store_that_vanished_still_says_something(qapp):
+    """A button that does nothing and says nothing is the whole complaint."""
+    from PySide6.QtCore import Qt
+
+    from voice.ui.settings import CHANGE_REFUSED
+
+    stores = [FakeStore(), None]                 # gone by the time it is written
+    cfg = Config.load()
+    dlg = SettingsDialog(cfg, capture_key=lambda cb: None, sources=lambda: [],
+                         backend="portal", triggers=lambda: {"dictate": "CTRL+space"},
+                         shortcut_store=lambda: stores.pop(0))
+    dlg.change_buttons["dictate"].click()
+    _press(qapp, dlg, Qt.Key.Key_D, Qt.KeyboardModifier.ControlModifier)
+    assert dlg.hotkey_status.text() == CHANGE_REFUSED
+    assert dlg.key_labels["dictate"].text() == "Ctrl+Space"

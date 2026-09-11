@@ -8,11 +8,12 @@ from typing import Callable, Iterable
 
 from html import escape
 
-from PySide6.QtCore import QPoint, Qt, QTimer, Signal
-from PySide6.QtWidgets import (QComboBox, QDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
-                               QLineEdit, QListWidget, QPushButton, QSizePolicy, QSpinBox,
-                               QTableWidget, QTableWidgetItem, QTabWidget, QToolButton,
-                               QToolTip, QVBoxLayout, QWidget)
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPalette
+from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFormLayout, QGroupBox,
+                               QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
+                               QSizePolicy, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget,
+                               QToolButton, QToolTip, QVBoxLayout, QWidget)
 
 from voice import APP_ID
 from voice.audio.capture import Source
@@ -128,19 +129,33 @@ MAX_INLINE_TEXT = 160
 #: The circled "?" itself, and how wide its answer is allowed to be.
 HELP_SIZE = 18
 HELP_WIDTH = 320
-HELP_STYLE = f"""
+#: The circled "?", with its one colour left to be filled in per theme: a
+#: colour written in here is a colour that cannot follow the desktop.
+HELP_STYLE = """
 QToolButton {{
-    border: 1px solid palette(mid); border-radius: {HELP_SIZE // 2}px;
-    color: palette(mid); font-weight: bold; padding: 0px;
+    border: 1px solid {colour}; border-radius: {radius}px;
+    color: {colour}; font-weight: bold; padding: 0px;
 }}
 QToolButton:hover {{ border-color: palette(highlight); color: palette(highlight); }}
 """
-#: Dim, one line, under the control it belongs to.
+#: Layout only. What the dim captions are coloured with is taken from the
+#: palette per widget - see `secondary_text_colour`.
 DIALOG_STYLE = """
-QLabel[caption="true"] { color: palette(mid); }
 QGroupBox { font-weight: bold; margin-top: 8px; }
 QGroupBox::title { subcontrol-origin: margin; left: 2px; padding: 0 3px; }
 """
+#: The least contrast a colour of ours may have against what is behind it.
+#: Below about 3:1 dim text is not quiet, it is gone - which is what a dark
+#: desktop did to `palette(mid)`, and what the owner reported as "the help text
+#: is invisible now". 3:1 is the WCAG AA floor for incidental and large text.
+MIN_CONTRAST = 3.0
+#: How far the theme's own text colour is faded when the palette offers nothing
+#: dim that can be read: enough to read as secondary, not enough to disappear.
+DIM_ALPHA = 0.65
+#: An error is a signal, not a theme colour, so the hue stays put on every
+#: desktop - but `error_text_colour` lightens or darkens it until it can be
+#: read, because a red the window swallows is not a signal at all.
+ERROR_HUE = "#e5484d"
 #: The one spacing the whole window uses, so no two tabs breathe differently.
 ROW_SPACING = 8
 COLUMN_SPACING = 12
@@ -169,6 +184,120 @@ def effective_trigger_text(triggers: dict[str, str] | None, name: str) -> str:
     return triggers[name] or NO_TRIGGER
 
 
+def _luminance(colour: QColor) -> float:
+    """The WCAG relative luminance of an opaque colour, 0.0 to 1.0."""
+    def channel(value: int) -> float:
+        part = value / 255.0
+        return part / 12.92 if part <= 0.03928 else ((part + 0.055) / 1.055) ** 2.4
+    return (0.2126 * channel(colour.red()) + 0.7152 * channel(colour.green())
+            + 0.0722 * channel(colour.blue()))
+
+
+def contrast_ratio(one: QColor, other: QColor) -> float:
+    """How far apart two opaque colours are: 1.0 identical, 21.0 black on white."""
+    high, low = sorted((_luminance(one), _luminance(other)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def _over(colour: QColor, behind: QColor) -> QColor:
+    """`colour` composited onto `behind`: a palette colour may be translucent.
+
+    `PlaceholderText` usually is - it is the theme's own text at half alpha -
+    and half of an invisible colour is still invisible, so it has to be flattened
+    before anything is measured.
+    """
+    alpha = colour.alphaF()
+    return QColor.fromRgbF(*(colour.redF() * alpha + behind.redF() * (1 - alpha),
+                             colour.greenF() * alpha + behind.greenF() * (1 - alpha),
+                             colour.blueF() * alpha + behind.blueF() * (1 - alpha)))
+
+
+def _legible(colour: QColor, behind: QColor) -> QColor:
+    """`colour`, moved towards white or black until it can be read on `behind`."""
+    towards = QColor("white") if _luminance(behind) < 0.5 else QColor("black")
+    mixed = colour
+    for step in range(21):
+        mixed = _over(QColor(towards.red(), towards.green(), towards.blue(),
+                             round(255 * step / 20)), colour)
+        if contrast_ratio(mixed, behind) >= MIN_CONTRAST:
+            break
+    return mixed
+
+
+def secondary_text_colour(palette: QPalette) -> QColor:
+    """Dim text the running theme can actually show, taken from its own palette.
+
+    `PlaceholderText` is the role meant for exactly this and most themes fill it
+    in; a palette built by hand leaves it black, which a dark window swallows.
+    The disabled `WindowText` is the usual second best, and on a light theme it
+    is a grey too pale to read. So neither is trusted on its own: whichever the
+    theme can show against its own window wins, and if neither can, the theme's
+    own text colour faded is - it contrasts by definition.
+
+    Measured against `Window` rather than against whatever the style happens to
+    paint behind a particular widget: that is the colour the theme guarantees,
+    and every panel a caption sits on is within a shade or two of it.
+    """
+    behind = palette.color(QPalette.ColorRole.Window)
+    for group, role in ((QPalette.ColorGroup.Active, QPalette.ColorRole.PlaceholderText),
+                        (QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText)):
+        candidate = _over(palette.color(group, role), behind)
+        if contrast_ratio(candidate, behind) >= MIN_CONTRAST:
+            return candidate
+    faded = QColor(palette.color(QPalette.ColorRole.WindowText))
+    faded.setAlphaF(DIM_ALPHA)
+    return _over(faded, behind)
+
+
+def error_text_colour(palette: QPalette) -> QColor:
+    """The red beside Save, lightened or darkened until this theme can show it."""
+    return _legible(QColor(ERROR_HUE), palette.color(QPalette.ColorRole.Window))
+
+
+class TintedLabel(QLabel):
+    """A wrapping label whose colour is taken from the palette, never written down.
+
+    A grey written into a stylesheet suits one desktop and vanishes on the next;
+    this asks the theme instead, and asks again whenever the theme changes, so a
+    desktop that switches to dark while the window is open is followed.
+
+    The colour is derived from the *parent's* palette rather than from its own,
+    which this class overwrites - deriving from a colour it had already dimmed
+    would fade a shade further on every palette change.
+    """
+
+    def __init__(self, text: str = "", tint: Callable[[QPalette], QColor] = secondary_text_colour,
+                 parent=None):
+        super().__init__(text, parent)
+        self.setWordWrap(True)
+        self._tint = tint
+        self._tinting = False
+        self.retint()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ParentChange):
+            self.retint()
+
+    def theme(self) -> QPalette:
+        """The palette this label should take its colour from."""
+        parent = self.parentWidget()
+        return parent.palette() if parent is not None else QApplication.palette()
+
+    def retint(self) -> None:
+        if self._tinting:                    # setPalette comes back through changeEvent
+            return
+        self._tinting = True
+        try:
+            colour = self._tint(self.theme())
+            palette = self.palette()
+            palette.setColor(QPalette.ColorRole.WindowText, colour)
+            palette.setColor(QPalette.ColorRole.Text, colour)
+            self.setPalette(palette)
+        finally:
+            self._tinting = False
+
+
 def _wrapped(text: str) -> QLabel:
     """A label that wraps: these hold sentences, not words."""
     label = QLabel(text)
@@ -176,9 +305,9 @@ def _wrapped(text: str) -> QLabel:
     return label
 
 
-def _caption(text: str = "") -> QLabel:
+def _caption(text: str = "") -> TintedLabel:
     """A dim one-line note under a control. Never a paragraph - see HELP."""
-    label = _wrapped(text)
+    label = TintedLabel(text)
     label.setProperty("caption", True)
     return label
 
@@ -190,19 +319,44 @@ class HelpButton(QToolButton):
     read as a wall of text. The words are unchanged; they are simply not on
     screen until they are asked for - and they are the tooltip as well, so
     hovering answers the question without a click.
+
+    The circle and the glyph take the same theme-derived colour as the captions:
+    a "?" nobody can see is a paragraph nobody can reach.
     """
 
     def __init__(self, text: str, parent=None):
         super().__init__(parent)
         self.help_text = text
+        #: The colour the circle and the "?" are drawn in, per theme.
+        self.glyph_colour = QColor()
+        self._tinting = False
         self.setText("?")
         self.setAccessibleName("More information")
         self.setToolTip(_as_rich(text))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         self.setFixedSize(HELP_SIZE, HELP_SIZE)
-        self.setStyleSheet(HELP_STYLE)
+        self.retint()
         self.clicked.connect(self._show)
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ParentChange):
+            self.retint()
+
+    def retint(self) -> None:
+        """Take the glyph's colour from whatever theme is running now."""
+        if self._tinting:                    # applying a stylesheet re-enters here
+            return
+        self._tinting = True
+        try:
+            parent = self.parentWidget()
+            palette = parent.palette() if parent is not None else QApplication.palette()
+            self.glyph_colour = secondary_text_colour(palette)
+            self.setStyleSheet(HELP_STYLE.format(colour=self.glyph_colour.name(),
+                                                 radius=HELP_SIZE // 2))
+        finally:
+            self._tinting = False
 
     def _show(self) -> None:
         QToolTip.showText(self.mapToGlobal(QPoint(0, self.height())), _as_rich(self.help_text),
@@ -280,8 +434,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._audio_tab(), "Audio")
         tabs.addTab(self._transcription_tab(), "Transcription")
         tabs.addTab(self._dictionary_tab(), "Dictionary")
-        self.error_label = _wrapped("")
-        self.error_label.setStyleSheet("color: #e5484d")
+        self.error_label = TintedLabel("", tint=error_text_colour)
         self.save_button = QPushButton("Save")
         self.save_button.setDefault(True)
         self.save_button.clicked.connect(self._save)

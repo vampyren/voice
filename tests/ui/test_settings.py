@@ -1158,3 +1158,134 @@ def test_the_profile_table_shows_every_language_without_scrolling(qapp, isolated
     assert table.height() >= needed, (
         f"table is {table.height()}px for {needed}px of header and rows")
     assert table.horizontalScrollBar().isVisibleTo(table) is False
+
+
+# -- legible on whatever theme the desktop is running ---------------------------
+def dark_palette(derive: bool = True):
+    """A dark theme, as a palette.
+
+    `derive` fills in the shade roles (Mid, Dark, Midlight...) the way a real
+    dark theme does - which is what made `palette(mid)` dark grey on dark grey
+    and started this. The flat one is a palette built by hand: it leaves those
+    roles light and `PlaceholderText` black, so a fix that trusts either role
+    blindly is caught by one of the two.
+    """
+    from PySide6.QtGui import QColor, QPalette
+
+    palette = QPalette(QColor("#353535")) if derive else QPalette()
+    for role, colour in ((QPalette.ColorRole.Window, "#2b2b2b"),
+                         (QPalette.ColorRole.Base, "#2b2b2b"),
+                         (QPalette.ColorRole.WindowText, "#dcdcdc"),
+                         (QPalette.ColorRole.Text, "#dcdcdc"),
+                         (QPalette.ColorRole.Button, "#353535"),
+                         (QPalette.ColorRole.ButtonText, "#dcdcdc"),
+                         (QPalette.ColorRole.Highlight, "#3584e4"),
+                         (QPalette.ColorRole.HighlightedText, "#ffffff")):
+        palette.setColor(role, QColor(colour))
+    return palette
+
+
+def palettes(qapp):
+    """The three themes every piece of dim text has to survive."""
+    from PySide6.QtGui import QPalette
+
+    return {"light": QPalette(qapp.palette()),
+            "dark": dark_palette(derive=True),
+            "flat dark": dark_palette(derive=False)}
+
+
+@pytest.fixture
+def themed(qapp):
+    """Builds the window under a given palette, and puts the old one back."""
+    from PySide6.QtGui import QPalette
+
+    original = QPalette(qapp.palette())
+    built = []
+
+    def build(palette):
+        qapp.setPalette(palette)
+        dlg = SettingsDialog(Config.load(), capture_key=lambda cb: None, sources=lambda: [])
+        dlg.setPalette(palette)
+        built.append(dlg)
+        return dlg
+
+    yield build
+    for dlg in built:
+        dlg.close()
+    qapp.setPalette(original)
+
+
+@pytest.mark.parametrize("theme", ["light", "dark", "flat dark"])
+def test_dim_text_is_legible_on_every_theme(qapp, theme):
+    """The owner runs a dark desktop and reported "the help text is invisible
+    now": a grey taken from `palette(mid)` is dark grey on a dark window."""
+    from PySide6.QtGui import QPalette
+
+    from voice.ui.settings import MIN_CONTRAST, contrast_ratio, secondary_text_colour
+
+    palette = palettes(qapp)[theme]
+    behind = palette.color(QPalette.ColorRole.Window)
+    ratio = contrast_ratio(secondary_text_colour(palette), behind)
+    assert ratio >= MIN_CONTRAST, f"{theme}: dim text at {ratio:.2f}:1 against {behind.name()}"
+
+
+@pytest.mark.parametrize("theme", ["light", "dark", "flat dark"])
+def test_the_error_line_is_legible_on_every_theme(qapp, theme):
+    """Red on a mid-grey window is a signal nobody can see."""
+    from PySide6.QtGui import QPalette
+
+    from voice.ui.settings import MIN_CONTRAST, contrast_ratio, error_text_colour
+
+    palette = palettes(qapp)[theme]
+    behind = palette.color(QPalette.ColorRole.Window)
+    ratio = contrast_ratio(error_text_colour(palette), behind)
+    assert ratio >= MIN_CONTRAST, f"{theme}: the error line at {ratio:.2f}:1"
+
+
+def test_the_captions_and_the_question_marks_follow_the_theme(qapp, themed):
+    """Not one fixed grey that happens to suit one desktop: two themes, two
+    colours, each readable on the window it is painted on."""
+    from PySide6.QtGui import QPalette
+
+    from voice.ui.settings import MIN_CONTRAST, contrast_ratio
+
+    seen = {}
+    for theme in ("light", "dark"):
+        palette = palettes(qapp)[theme]
+        dlg = themed(palette)
+        behind = palette.color(QPalette.ColorRole.Window)
+        caption = dlg.pill_placement_label.palette().color(QPalette.ColorRole.WindowText)
+        glyph = dlg.help_buttons["pill_position"].glyph_colour
+        for what, colour in (("caption", caption), ("?", glyph)):
+            ratio = contrast_ratio(colour, behind)
+            assert ratio >= MIN_CONTRAST, f"{theme} {what} at {ratio:.2f}:1"
+        seen[theme] = (caption.name(), glyph.name())
+    assert seen["light"] != seen["dark"], f"the same colour on both themes: {seen}"
+
+
+def test_the_window_writes_no_colour_of_its_own(qapp):
+    """A colour written into a stylesheet cannot follow a theme; that is the
+    whole defect. What is left in the static styles is layout, not colour."""
+    import re
+
+    from voice.ui.settings import DIALOG_STYLE
+
+    assert not re.search(r"#[0-9a-fA-F]{3,8}\b", DIALOG_STYLE)
+    assert "color" not in DIALOG_STYLE
+
+
+def test_a_theme_change_while_the_window_is_open_is_followed(qapp, themed):
+    """A desktop that switches to dark at sunset must not leave the window's
+    dim text in yesterday's colour."""
+    from PySide6.QtGui import QPalette
+
+    from voice.ui.settings import MIN_CONTRAST, contrast_ratio
+
+    dlg = themed(palettes(qapp)["light"])
+    dark = palettes(qapp)["dark"]
+    qapp.setPalette(dark)
+    dlg.setPalette(dark)
+    qapp.processEvents()
+    behind = dark.color(QPalette.ColorRole.Window)
+    caption = dlg.pill_placement_label.palette().color(QPalette.ColorRole.WindowText)
+    assert contrast_ratio(caption, behind) >= MIN_CONTRAST

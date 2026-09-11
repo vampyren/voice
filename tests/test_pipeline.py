@@ -476,3 +476,19 @@ def test_the_focus_stealing_pill_explains_itself_once_and_only_once():
     d.start(); d.stop()
     assert len(calls) == 1, f"said it again: {calls}"
     assert sv.injector.texts == ["hello world", "hello world"]
+
+
+def test_the_idle_detail_names_the_method_readably():
+    """The daemon reads the method back out of this line to decide what the pill
+    says, so the two have to agree about its shape."""
+    from voice.pipeline import detail_method
+
+    d, sv, states, _ = make(inj=FakeInjector(method="clipboard"))
+    details = []
+    d.on_state = lambda s, detail: details.append((s, detail))
+    d.start(); d.stop()
+    idle = [detail for state, detail in details if state is State.IDLE][-1]
+    assert detail_method(idle) == "clipboard"
+    assert detail_method("11 chars via portal in 0.9s") == "portal"
+    assert detail_method("cancelled") == ""
+    assert detail_method("") == ""

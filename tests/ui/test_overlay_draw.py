@@ -528,3 +528,20 @@ def test_bars_are_drawn_taller_than_the_model_says_but_never_past_the_well():
     assert lifted(0.5) > 0.5 * well, "ordinary speech must gain height"
     assert lifted(1.0) == pytest.approx(well), "a crest is clamped to the well"
     assert lifted(0.0) == 0.0, "silence is untouched"
+
+
+def test_a_done_state_with_its_own_words_draws_those_words(tmp_path):
+    """"Inserted" is a lie for a copy-only insertion, so the daemon sends the
+    wording with the state - and it has to fit inside the well."""
+    from voice.ui.overlay_draw import natural_width
+
+    model = _model("done", age=0.95)
+    model.text = "Copied · Ctrl+V"
+    img = Image(render_png(model, tmp_path / "done-copied.png"))
+    plain = Image(render_png(_model("done", age=0.95), tmp_path / "done-plain.png"))
+    label = dict(x0=36 + 60, x1=36 + 132)
+    lit = lambda p: p[3] > 60 and max(p[:3]) > 90
+    assert img.count(lit, **label) > 20                      # something was drawn
+    assert img.count(lit, **label) != plain.count(lit, **label)   # and it is not "Inserted"
+    # Inside the pill: a label wider than the well would be clipped by the capsule.
+    assert img.count(lit, x0=natural_width(model) - 4, x1=natural_width(model)) == 0

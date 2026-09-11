@@ -266,8 +266,12 @@ def _check_path(ctx, x: float, y: float, s: float, progress: float) -> None:
 
 
 def _done_well(ctx, model: OverlayModel, x: float, cy: float, s: float) -> None:
-    """Checkmark popping in, then the label rising in beside it."""
-    label = "Inserted"
+    """Checkmark popping in, then the label rising in beside it.
+
+    The daemon may send its own wording with the state: a copy-only insertion
+    ends in the same `done`, and "Inserted" is not true of it.
+    """
+    label = model.text or "Inserted"
     label_w = text_width(ctx, label, LABEL_SIZE * s, LABEL_TRACK)
     box = CHECK_BOX * s
     group_w = box + LABEL_GAP * s + label_w

@@ -2107,3 +2107,25 @@ def test_the_settings_window_rebind_request_reaches_the_daemon(isolated_xdg, qap
     assert d.listener is not first
     d._settings.close()
     d.shutdown()
+
+
+# -- the pill must not claim an insertion that did not happen ------------------
+@pytest.mark.parametrize("method", ["clipboard", "clipboard-only", "clipboard-pill"])
+def test_the_pill_says_copied_when_the_text_was_only_copied(method):
+    """The owner runs inject.mode = "clipboard" on purpose: the pill flashed
+    "Inserted" and then they still had to press Ctrl+V themselves."""
+    from voice.daemon import DONE_COPIED, overlay_messages
+    from voice.pipeline import State
+
+    messages = overlay_messages(State.IDLE, f"11 chars via {method} in 0.9s", "en")
+    assert messages == [{"state": "done", "text": DONE_COPIED}]
+    assert "Ctrl+V" in DONE_COPIED
+
+
+@pytest.mark.parametrize("method", ["portal", "wtype", "ydotool"])
+def test_a_real_paste_still_says_inserted(method):
+    from voice.daemon import overlay_messages
+    from voice.pipeline import State
+
+    assert overlay_messages(State.IDLE, f"11 chars via {method} in 0.9s", "en") == [
+        {"state": "done"}]

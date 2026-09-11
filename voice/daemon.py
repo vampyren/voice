@@ -24,7 +24,7 @@ from voice.inject.injector import (Injector, insertion_status, pill_policy,
                                    pill_settle_s, run_window_command)
 from voice.ipc import (NEXT_LANGUAGE, PENDING_LANGUAGE, IPCError, Server, is_running,
                        send)
-from voice.pipeline import Dictation, Services, State
+from voice.pipeline import Dictation, Services, State, detail_method
 from voice.stt import make_transcriber
 from voice.stt.base import TranscriptionError
 from voice.ui.notify import Notifier
@@ -145,6 +145,15 @@ NOTHING_TO_SHOW = ("cancelled", "too short", "empty")
 #: replace a two-second explanation with nothing.
 AFTER_ERROR = "after error"
 
+#: Insertion methods that leave the text on the clipboard rather than in the
+#: window: `inject.mode = "clipboard"` (asked for), a paste that failed, and a
+#: pill that would have taken the chord. All three end in an IDLE the pill used
+#: to celebrate with a checkmark and "Inserted", while the user still had to
+#: press Ctrl+V themselves.
+CLIPBOARD_METHODS = ("clipboard", "clipboard-only", "clipboard-pill")
+#: What the pill says instead. Short: it is drawn inside the 132 px well.
+DONE_COPIED = "Copied · Ctrl+V"
+
 
 def overlay_messages(state: State, detail: str, language: str) -> list[dict]:
     """The pill protocol for one pipeline transition, in order.
@@ -167,7 +176,11 @@ def overlay_messages(state: State, detail: str, language: str) -> list[dict]:
         if detail in NOTHING_TO_SHOW:
             return [{"state": "hidden"}]
         if detail and detail != AFTER_ERROR:
-            return [{"state": "done"}]        # insertion finished; helper hides itself
+            # Insertion finished; the helper hides itself. What it says depends
+            # on whether anything was actually inserted.
+            if detail_method(detail) in CLIPBOARD_METHODS:
+                return [{"state": "done", "text": DONE_COPIED}]
+            return [{"state": "done"}]
     return []
 
 

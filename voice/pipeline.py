@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -98,6 +99,22 @@ class Worker:
             except queue.Empty:
                 break
         jobs.put(None)
+
+
+#: The IDLE detail a finished dictation carries: how much text, how it reached
+#: the window, and how long it took. The daemon reads the method back out of it
+#: to decide what the pill says, so the two halves live together here.
+_METHOD_RE = re.compile(r"\bvia\s+(\S+)\s+in\b")
+
+
+def idle_detail(chars: int, method: str, elapsed_s: float) -> str:
+    return f"{chars} chars via {method} in {elapsed_s:.1f}s"
+
+
+def detail_method(detail: str) -> str:
+    """The insertion method named in an IDLE detail, or "" if it names none."""
+    found = _METHOD_RE.search(detail or "")
+    return found.group(1) if found else ""
 
 
 class Dictation:
@@ -308,7 +325,7 @@ class Dictation:
                 self._pill_notice_shown = True
                 self.sv.notify("Text copied", PILL_FOCUS_NOTICE, "normal")
             self.last_error = None
-            self._set(State.IDLE, f"{len(text)} chars via {res.method} in {entry.elapsed_s:.1f}s")
+            self._set(State.IDLE, idle_detail(len(text), res.method, entry.elapsed_s))
         except Exception as exc:  # never leave the daemon stuck in INJECTING - mirrors _process's net
             log.exception("inject failure")
             self._fail(f"unexpected error: {exc}")

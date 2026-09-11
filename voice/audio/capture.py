@@ -35,17 +35,32 @@ class Source:
 
 
 def list_sources(run: Callable = subprocess.run) -> list[Source]:
+    """Every capture source, with "none" and "could not ask" flattened to []."""
+    return capture_sources(run) or []
+
+
+def capture_sources(run: Callable = subprocess.run) -> list[Source] | None:
+    """Every capture source PipeWire knows about, or None if it could not be asked.
+
+    The two empty answers mean different things and one caller has to tell them
+    apart: `[]` is PipeWire saying this machine has no microphone, which is
+    worth refusing to record for, while None is pw-dump missing, failing or
+    talking nonsense - refusing there would break dictation on a machine whose
+    capture works perfectly well.
+    """
     try:
         cp = run(["pw-dump"], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError) as exc:
         log.warning("pw-dump failed: %s", exc)
-        return []
+        return None
     if cp.returncode != 0:
-        return []
+        log.warning("pw-dump exited with %s", cp.returncode)
+        return None
     try:
         objects = json.loads(cp.stdout)
     except json.JSONDecodeError:
-        return []
+        log.warning("pw-dump printed something that is not JSON")
+        return None
     default = None
     for obj in objects:
         if obj.get("type") == "PipeWire:Interface:Metadata":

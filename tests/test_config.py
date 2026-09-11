@@ -403,6 +403,26 @@ def test_errors_rejects_a_settle_that_is_not_a_time(isolated_xdg):
     assert [e for e in cfg.errors() if "inject.pill_settle_ms" in e] == []
 
 
+def test_the_shipped_transcription_timeout_is_generous(isolated_xdg):
+    """A bound on a transcription, so a wedged one cannot hang the daemon for
+    ever - long enough that a slow CPU is never cut off mid-recording."""
+    cfg = Config.load()
+    assert cfg.get("stt.timeout_seconds") == 300
+
+
+def test_errors_rejects_a_transcription_timeout_that_is_not_a_time(isolated_xdg):
+    cfg = Config.load()
+    for bad in ("soon", 0, -5, True):
+        cfg.set("stt.timeout_seconds", bad)
+        assert any("stt.timeout_seconds" in e for e in cfg.errors()), bad
+    for good in (60, 12.5):
+        cfg.set("stt.timeout_seconds", good)
+        assert [e for e in cfg.errors() if "stt.timeout_seconds" in e] == [], good
+    # A config written before the timeout existed has no key, and stays valid.
+    del cfg._doc["stt"]["timeout_seconds"]
+    assert [e for e in cfg.errors() if "stt.timeout_seconds" in e] == []
+
+
 def test_default_inject_mode_is_paste(isolated_xdg):
     assert Config.load().get("inject.mode") == "paste"
 

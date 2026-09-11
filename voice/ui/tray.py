@@ -20,7 +20,12 @@ class Tray(QObject):
         self.icon = QSystemTrayIcon(icon_for("idle"))
         self.menu = QMenu()
         self._actions: dict[str, QAction] = {}
-        for key, label in (("recall", "Recall last dictation"), ("retry", "Retry last recording")):
+        # Cancel first, and never disabled: it is the way out of a recording or
+        # of a conversion that is taking too long, for anyone with no cancel key
+        # bound. From idle the pipeline ignores it.
+        for key, label in (("cancel", "Cancel dictation"),
+                           ("recall", "Recall last dictation"),
+                           ("retry", "Retry last recording")):
             self._add(key, label)
         self.menu.addSeparator()
         self.profile_menu = self.menu.addMenu("Transcription profile")

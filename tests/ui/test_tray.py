@@ -33,6 +33,17 @@ def test_tray_state_updates_tooltip_and_actions_flow(qapp):
     assert "error" in tray.icon.toolTip()
 
 
+def test_the_tray_can_cancel_a_dictation(qapp):
+    """Not only the cancel shortcut: the tray is the way out of a conversion
+    that is taking too long for anyone who has no cancel key bound."""
+    got = []
+    tray = Tray(on_action=got.append)
+    labels = [a.text() for a in tray.menu.actions()]
+    assert "Cancel dictation" in labels
+    tray.action("cancel").trigger()
+    assert got == ["cancel"]
+
+
 def test_tray_language_submenu_is_a_radio_list_of_codes(qapp):
     got = []
     tray = Tray(on_action=got.append)

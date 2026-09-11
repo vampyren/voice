@@ -75,7 +75,8 @@ voice                  # start the daemon, or raise the settings window if one i
 voice daemon           # run the daemon in the foreground (exits and raises the settings window if one is already running)
 voice start|stop       # begin/end recording explicitly (useful with toggle mode)
 voice toggle           # alternate recording on/off
-voice cancel           # discard the current recording
+voice cancel           # discard the current recording, or abandon a transcription
+                       # that is taking too long
 voice recall           # re-insert the last dictation
 voice retry            # re-send the last recording's audio (e.g. after a transient cloud error)
 voice status           # state, active profile, backend, language, overlay, last error, and
@@ -317,6 +318,8 @@ overlay_allow_fallback = false   # show the pill without gtk4-layer-shell, accep
 
 [stt]
 active = "local"           # name of a [stt.profiles.*] table
+timeout_seconds = 300      # give up on a transcription still running after this long;
+                           # the recording is kept for "Retry last recording"
 
 [stt.profiles.local]
 backend = "local"
@@ -563,6 +566,21 @@ Two more common issues doctor doesn't cover directly:
   key assigned` is that state — or `voice doctor`'s **portal shortcuts** line, then set the
   key in **Settings → Keyboard → Keyboard Shortcuts**. See
   [The desktop owns the trigger](#the-desktop-owns-the-trigger).
+- **A dictation never finishes: the tray stays amber and `voice status` says
+  `transcribing`.** A transcription is bounded by `stt.timeout_seconds` (5 minutes by
+  default): past that the attempt is abandoned, a notification says so, the state goes
+  back to idle and the recording is kept — `voice retry` runs it again, on another
+  profile if the local model is the problem. You don't have to wait for the bound:
+  `voice cancel` (or the cancel shortcut, or the tray's **Cancel**) abandons it at once,
+  and the recording is still kept for a retry. The abandoned conversion keeps running on
+  its own thread until it finishes — a local model cannot be interrupted safely — but
+  nothing waits for it and its result is discarded.
+- **"No microphone found".** PipeWire has no capture device, so there is nothing to
+  record and the dictation is refused before it starts. `pw-record` does not report this
+  itself: with no source to link to it produces no audio at all, and where it can fall
+  back to a monitor it records silence — which is how a dictation with the microphone
+  unplugged used to end up transcribing half a minute of nothing. `voice doctor`'s
+  **microphones** line lists what PipeWire can see.
 - **A clipboard manager is recording every dictation.** Klipper (and similar) keeps a
   history entry per dictation, since `voice` pastes via the clipboard. Exclude
   `voice`-owned changes in Klipper's settings, or live with the history.

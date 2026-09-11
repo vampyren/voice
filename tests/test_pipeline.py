@@ -5,9 +5,11 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pytest
 
+from voice.audio.capture import Source
 from voice.history import Entry, History
 from voice.inject.injector import InjectResult
-from voice.pipeline import Dictation, Services, State
+from voice.pipeline import (DEFAULT_STT_TIMEOUT, INJECT_BOUND, NO_MICROPHONE, STUCK_GRACE,
+                            Dictation, Services, State)
 from voice.stt.base import Transcript, TranscriptionError
 
 
@@ -84,14 +86,19 @@ class FakeTimer:
     def fire(self): self.fn()
 
 
-def make(cfg=None, rec=None, stt=None, inj=None, executor=None, notify=None):
+#: What `make()` says PipeWire is holding: one working microphone.
+A_MICROPHONE = [Source("mic", "Some Microphone", True)]
+
+
+def make(cfg=None, rec=None, stt=None, inj=None, executor=None, notify=None, sources=None):
     cfg = {"hotkeys.dictate_mode": "hold", "audio.device": "", "audio.max_seconds": 120,
            "general.language": "en", "dictionary.replacements": [["cachy os", "CachyOS", "icase"]], **(cfg or {})}
     notes = []
     services = Services(
         recorder=rec or FakeRecorder(), transcriber=stt or FakeTranscriber(), injector=inj or FakeInjector(),
         history=History(), notify=notify or (lambda t, b, u="normal": notes.append((t, b))),
-        trim=lambda pcm: pcm, config_getter=lambda k, d=None: cfg.get(k, d), prompt_getter=lambda: "CachyOS")
+        trim=lambda pcm: pcm, config_getter=lambda k, d=None: cfg.get(k, d), prompt_getter=lambda: "CachyOS",
+        sources=sources if sources is not None else (lambda: list(A_MICROPHONE)))
     states = []
     d = Dictation(services, executor=executor or (lambda fn: fn()), timer_factory=FakeTimer)
     d.on_state = lambda s, detail: states.append(s)
@@ -150,15 +157,21 @@ def test_cancel_discards_recording():
     assert sv.recorder.cancelled == 1 and d.state == State.IDLE and sv.transcriber.calls == []
 
 
+def _timer(seconds):
+    """The one armed timer with this bound - start() also arms a state guard."""
+    found = [t for t in FakeTimer.instances if t.seconds == seconds and not t.cancelled]
+    assert len(found) == 1, f"expected one live {seconds}s timer, got {found}"
+    return found[0]
+
+
 def test_max_seconds_timer_stops_recording():
     d, sv, states, _ = make({"audio.max_seconds": 7})
     d.start()
-    timer = FakeTimer.instances[-1]
-    assert timer.seconds == 7
+    timer = _timer(7)
     timer.fire()
     assert d.state == State.IDLE and sv.injector.texts == ["hello world"]
     d.start()
-    second_timer = FakeTimer.instances[-1]
+    second_timer = _timer(7)
     assert second_timer is not timer and not second_timer.cancelled
     d.stop()
     assert second_timer.cancelled
@@ -492,3 +505,184 @@ def test_the_idle_detail_names_the_method_readably():
     assert detail_method("11 chars via portal in 0.9s") == "portal"
     assert detail_method("cancelled") == ""
     assert detail_method("") == ""
+
+
+# -- a dictation that hangs -----------------------------------------------
+#: The owner started a recording with no microphone connected, the daemon went
+#: to `transcribing` and stayed there: the tray stuck amber, `voice status`
+#: still saying transcribing many minutes later, and only a restart cleared it.
+#: Nothing bounded a transcription, nothing could abandon one, and a missing
+#: capture device was never reported at all.
+
+
+def _pooled(**kw):
+    """A dictation whose worker really is another thread, with its futures."""
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-dictation")
+    futures = []
+    d, sv, states, notes = make(executor=lambda fn: futures.append(pool.submit(fn)), **kw)
+    return pool, futures, d, sv, states, notes
+
+
+def _wait(predicate, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert predicate(), "timed out waiting for the worker thread"
+
+
+def test_a_transcription_that_never_returns_is_abandoned_and_kept_for_retry():
+    """The watchdog: the attempt is dropped, the audio stays retryable, the
+    owner is told why, and the state is idle again."""
+    stt = BlockingTranscriber()
+    pool, futures, d, sv, states, notes = _pooled(stt=stt)
+    try:
+        d.start(); d.stop()
+        _wait(lambda: stt.calls)                       # it is inside transcribe()
+
+        _timer(DEFAULT_STT_TIMEOUT).fire()             # the watchdog goes off
+
+        assert d.state == State.IDLE
+        assert State.ERROR in states
+        assert notes and "Retry" in notes[-1][1]
+        assert d.last_error and d.last_error.startswith("transcription timed out")
+        assert "abandoned" in d.last_error
+
+        stt.release.set()                              # the late result lands
+        futures[0].result(5)
+        assert sv.injector.texts == [], "a late transcript must not be injected"
+        assert sv.history.last() is None
+        assert states == [State.RECORDING, State.TRANSCRIBING, State.ERROR, State.IDLE]
+        kept = sv.history.take_audio()
+        assert kept is not None and kept.size == 16000
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_the_transcription_watchdog_bound_is_configurable():
+    d, sv, states, _ = make({"stt.timeout_seconds": 45}, executor=lambda fn: None)
+    d.start(); d.stop()
+    assert d.state == State.TRANSCRIBING
+    assert _timer(45) is not None
+
+
+def test_a_retry_after_a_timeout_still_runs_its_own_dictation():
+    """The abandoned worker thread must not take the queue with it."""
+    stt = BlockingTranscriber()
+    pool, futures, d, sv, states, notes = _pooled(stt=stt)
+    try:
+        d.start(); d.stop()
+        _wait(lambda: stt.calls)
+        _timer(DEFAULT_STT_TIMEOUT).fire()
+        stt.release.set()
+        futures[0].result(5)
+
+        d.retry()
+        futures[-1].result(5)
+        assert sv.injector.texts == ["hello world"]
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_cancel_abandons_a_transcription_that_has_not_started_yet():
+    pending = []
+    d, sv, states, _ = make(executor=pending.append)
+    d.start(); d.stop()
+    assert d.state == State.TRANSCRIBING
+
+    d.on_hotkey("cancel", "press")
+
+    assert d.state == State.IDLE
+    assert states == [State.RECORDING, State.TRANSCRIBING, State.IDLE]
+    pending.pop(0)()                       # the worker finally gets to it
+    assert sv.transcriber.calls == [] and sv.injector.texts == []
+
+
+def test_cancel_during_a_running_transcription_returns_to_idle():
+    """The owner's way out of a stuck conversion: the cancel shortcut."""
+    stt = BlockingTranscriber()
+    pool, futures, d, sv, states, notes = _pooled(stt=stt)
+    try:
+        d.start(); d.stop()
+        _wait(lambda: stt.calls)
+
+        d.on_hotkey("cancel", "press")
+
+        assert d.state == State.IDLE
+        stt.release.set()
+        futures[0].result(5)
+        assert sv.injector.texts == [], "the late transcript is discarded"
+        assert sv.history.last() is None
+        assert sv.history.take_audio() is not None, "the recording stays retryable"
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_no_microphone_refuses_to_record_and_says_so():
+    """pw-record does not fail without a capture device - it records nothing,
+    or silence, and says nothing. So the check has to happen before it runs."""
+    d, sv, states, notes = make(sources=lambda: [])
+
+    d.start()
+
+    assert d.state == State.IDLE
+    assert sv.recorder.started_with == [], "pw-record must not be spawned"
+    assert states == [], "and this is not an error flash either"
+    assert notes and notes[-1][0] == NO_MICROPHONE
+    assert "microphone" in notes[-1][1].lower()
+
+
+def test_an_unanswerable_probe_never_blocks_a_recording():
+    """pw-dump missing or broken is not the same answer as "no microphone":
+    refusing there would break dictation on a machine that records perfectly."""
+    for probe in (lambda: None, _raises):
+        d, sv, states, notes = make(sources=probe)
+        d.start()
+        assert d.state == State.RECORDING and sv.recorder.started_with == [None]
+        assert notes == []
+
+
+def _raises():
+    raise RuntimeError("pw-dump is not installed")
+
+
+def test_a_recording_that_outlives_its_bound_returns_to_idle():
+    d, sv, states, notes = make()
+    d.start()
+
+    _timer(120 + STUCK_GRACE).fire()
+
+    assert d.state == State.IDLE
+    assert sv.recorder.cancelled == 1, "pw-record must not be left running"
+    assert notes and "recording" in notes[-1][1]
+
+
+def test_an_injection_that_outlives_its_bound_returns_to_idle():
+    pending = []
+    d, sv, states, notes = make(executor=pending.append)
+    sv.history.add(Entry("hello world", time.time(), "fake", 1.0, 0.1))
+    d.recall()
+    assert d.state == State.INJECTING
+
+    _timer(INJECT_BOUND).fire()
+
+    assert d.state == State.IDLE
+    assert notes and "injecting" in notes[-1][1]
+
+
+def test_a_guard_belonging_to_a_state_already_left_does_nothing():
+    d, sv, states, notes = make()
+    d.start()
+    guard = _timer(120 + STUCK_GRACE)
+    d.stop()                                  # recording is over; so is its guard
+    assert guard.cancelled
+
+    guard.fire()                              # a timer that was already running
+
+    assert d.state == State.IDLE and states[-1] == State.IDLE
+    assert notes == []
+
+
+def test_idle_is_allowed_to_wait_for_ever():
+    d, sv, states, notes = make()
+    assert d.state == State.IDLE
+    assert [t for t in FakeTimer.instances if not t.cancelled] == []

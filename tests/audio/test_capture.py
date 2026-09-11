@@ -6,7 +6,8 @@ import threading
 import numpy as np
 import pytest
 
-from voice.audio.capture import Recorder, RecorderError, list_sources, pw_record_command
+from voice.audio.capture import (Recorder, RecorderError, capture_sources, list_sources,
+                                 pw_record_command)
 
 
 def test_command_shape():
@@ -258,3 +259,33 @@ def test_recorder_without_a_level_callback_still_records():
     rec = Recorder(popen=lambda *a, **k: proc)
     rec.start(None)
     assert np.array_equal(rec.stop(), pcm)
+
+
+def test_capture_sources_tells_no_microphone_apart_from_no_answer():
+    """Two different answers that `list_sources` has to flatten into one.
+
+    An empty list means PipeWire answered and has no capture device - worth
+    refusing to record for. None means it could not be asked at all, and
+    refusing there would break dictation on a machine that captures fine.
+    """
+    dump = json.dumps([{"type": "PipeWire:Interface:Node",
+                        "info": {"props": {"media.class": "Audio/Sink",
+                                           "node.name": "auto_null"}}}])
+
+    def answered(*a, **kw):
+        return subprocess.CompletedProcess(a, 0, stdout=dump, stderr="")
+
+    def missing(*a, **kw):
+        raise FileNotFoundError("pw-dump")
+
+    def failed(*a, **kw):
+        return subprocess.CompletedProcess(a, 1, stdout="", stderr="no pipewire")
+
+    def garbage(*a, **kw):
+        return subprocess.CompletedProcess(a, 0, stdout="not json", stderr="")
+
+    assert capture_sources(run=answered) == []
+    assert capture_sources(run=missing) is None
+    assert capture_sources(run=failed) is None
+    assert capture_sources(run=garbage) is None
+    assert list_sources(run=missing) == [], "the old shape still flattens both"

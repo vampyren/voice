@@ -63,6 +63,8 @@ overlay_allow_fallback = false   # show the pill without gtk4-layer-shell, accep
 
 [stt]
 active = "local"           # name of a [stt.profiles.*] table
+timeout_seconds = 300      # give up on a transcription still running after this long;
+                           # the recording is kept for "Retry last recording"
 
 [stt.profiles.local]
 backend = "local"
@@ -320,6 +322,13 @@ class Config:
         if not isinstance(settle, (int, float)) or isinstance(settle, bool) or settle < 0:
             errs.append("inject.pill_settle_ms must be a non-negative number of milliseconds, "
                         f"got {settle!r}")
+        # Absent in a config written before a transcription could time out;
+        # such a file gets the shipped default, which is what it had before.
+        timeout = self.get("stt.timeout_seconds")
+        if timeout is not None and (not isinstance(timeout, (int, float))
+                                    or isinstance(timeout, bool) or timeout <= 0):
+            errs.append("stt.timeout_seconds must be a positive number of seconds, "
+                        f"got {timeout!r}")
         errs += self._placement_errors()
         for key in ("inject.paste_chord", "inject.terminal_chord"):
             chord = self.get(key)

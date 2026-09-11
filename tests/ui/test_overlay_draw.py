@@ -327,15 +327,27 @@ def test_the_transcribing_fill_sweeps_from_the_left(tmp_path):
     assert reach(late)[1] > reach(early)[1] + 20                     # and it grows
 
 
-def test_a_long_transcription_holds_short_of_the_end_of_the_track(tmp_path):
-    """Only the completion reaches the end. However long the conversion runs,
-    there is grey track left between the fill and the counter - which is what
-    keeps a full bar meaning "done"."""
+def test_a_long_transcription_holds_short_of_the_end_and_never_snaps_back(tmp_path):
+    """Two frames two seconds apart, two minutes into a slow conversion.
+
+    The old loop had restarted between them - it was back at the left edge at
+    122.2 s - which is the bar "stopping in the middle" the owner photographed.
+    The fill now stands still just short of the end of the track, with grey
+    left between it and the counter: only the completion reaches the end, which
+    is what keeps a full bar meaning "done".
+    """
     well_x, well_right = 36, 36 + 132
-    late = Image(render_png(_model("transcribing", age=120.0), tmp_path / "long.png"))
-    lit = [x for x in range(well_x, well_right) for y in (21, 22) if wave(late(x, y))]
-    assert max(lit) < well_right - 6, "the fill holds short of the end of the track"
-    assert max(lit) > well_x + 100, "and it has crept most of the way there"
+
+    def reach(age, name):
+        img = Image(render_png(_model("transcribing", age=age), tmp_path / name))
+        return max(x for x in range(well_x, well_right)
+                   for y in (21, 22) if wave(img(x, y)))
+
+    late, later = reach(120.0, "long.png"), reach(122.2, "longer.png")
+    assert later >= late, "the fill must never fall back"
+    assert later - late <= 1, "and two minutes in it is not moving either"
+    assert late < well_right - 6, "it holds short of the end of the track"
+    assert late > well_x + 100, "having crept most of the way there"
 
 
 def test_the_transcribing_counter_is_dimmed(tmp_path):

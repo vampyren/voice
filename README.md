@@ -416,6 +416,14 @@ reload or restart.
 
 To set the key, or change one:
 
+- **From the settings window, on GNOME** — type the trigger in the Hotkeys tab
+  (`CTRL+space`, `F13`, `CTRL+SHIFT+l`) and press **Save**. `voice` writes it into GNOME's
+  own store — the `global-shortcuts` dconf key below, which its Settings app does not
+  surface usefully — and rebinds the listener, so the new key works at once without a
+  restart. Only the shortcut ids `voice` owns are touched, an entry that cannot be parsed
+  is refused rather than overwritten, and the result (or the refusal) is shown in the tab.
+  On desktops that do not keep shortcuts there — KDE — nothing is written and the two
+  routes below apply instead.
 - **GNOME** — open **Settings → Keyboard → Keyboard Shortcuts**, where `voice` appears
   under its own name, and set the key there. It takes effect immediately; nothing needs
   restarting, and `voice status` follows the change as the desktop makes it. The desktop's
@@ -462,9 +470,9 @@ On the portal backend there is no key to capture — the compositor consumes the
 before anything else sees it — so the Hotkeys tab shows the four triggers themselves
 (`portal_dictate`, `portal_recall`, `portal_cancel`, `portal_language_toggle`) as text
 fields in the desktop's own syntax: `F14`, `CTRL+space`, `CTRL+SHIFT+l`. They are what
-`voice` asks for the first time the desktop meets each shortcut and nothing after that —
-see [The desktop owns the trigger](#the-desktop-owns-the-trigger) — and the tab says so
-above them.
+`voice` asks for the first time the desktop meets each shortcut — see
+[The desktop owns the trigger](#the-desktop-owns-the-trigger) — and, on GNOME, what Save
+writes into the desktop's own store so the change takes effect straight away.
 
 Beside each field is the key the desktop **actually** holds for that shortcut, re-read
 every time the window opens: the trigger itself, `no key assigned` for a shortcut the

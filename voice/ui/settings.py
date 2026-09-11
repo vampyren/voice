@@ -11,8 +11,11 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QFormLayout, QHBoxLayout, QLa
                                QListWidget, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
                                QTabWidget, QVBoxLayout, QWidget)
 
+from voice import APP_ID
 from voice.audio.capture import Source
 from voice.config import INJECT_MODES, Config, is_language_code
+from voice.hotkey.desktop_shortcuts import (GNOME_KEY_TEMPLATE, ShortcutStoreError,
+                                            desktop_shortcut_store)
 from voice.hotkey.keyspec import parse_keyspec
 from voice.hotkey.portal_listener import DIALOG_MESSAGE, NO_TRIGGER
 from voice.ui.pill_placer import PillPlacer
@@ -57,20 +60,31 @@ SHORTCUT_SETTINGS_PATH = "Settings → Keyboard → Keyboard Shortcuts"
 EFFECTIVE_PREFIX = "desktop: "
 NOT_REGISTERED = "not registered"
 UNKNOWN_TRIGGER = "waiting for an answer"
-#: Above the trigger fields: what they are, and what they are not.
-PORTAL_FIRST_RUN_NOTE = (
-    "These are a first-run preference, not a setting. Once your desktop knows a shortcut the "
-    "key belongs to the desktop - it is shown beside each field - and editing here changes "
-    "nothing. On GNOME that is always so: its portal cannot tell us whether it has met a "
-    "shortcut before, so we never ask for a key at all. Set it with the button below.")
+#: Where GNOME really keeps the key, named in full because the whole complaint
+#: was "I can't find CTRL+space anywhere in GNOME's keyboard settings".
+GNOME_SHORTCUTS_KEY = GNOME_KEY_TEMPLATE.format(app_id=APP_ID)
+#: Above the trigger fields. One line: the detail is behind the "?" beside it.
+PORTAL_NOTE = ("Hold Dictate to talk. Your desktop owns these keys - Save writes them to "
+               "it and rebinds, so the change takes effect at once.")
+#: Behind the "?" on the Hotkeys tab: the detail a first-time reader needs once.
+HOTKEY_HELP = {
+    "evdev": ("voice reads the key straight from the keyboard device. \"Capture key\" fills "
+              "the field in with the name of the key you press; combinations are typed by "
+              "hand, e.g. KEY_LEFTMETA+KEY_SPACE."),
+    "portal": (
+        "Type a trigger the way your desktop spells it: CTRL+space, F13, CTRL+SHIFT+l. "
+        "A bare modifier on its own will not bind.\n\n"
+        f"GNOME keeps the key in its own store, not in voice's config: dconf, under "
+        f"{GNOME_SHORTCUTS_KEY}. Its Settings app does not show that usefully, which is why "
+        "Save writes it there for you and then rebinds. Beside each field is the key the "
+        "desktop actually holds right now.\n\n"
+        "On KDE the desktop's own dialog owns the key: use \"Open shortcut settings\". "
+        "The evdev key fields below apply again if you switch hotkeys.backend to evdev."),
+}
+#: The one-liner beside each backend's fields; the rest is behind the "?".
 HOTKEY_HINTS = {
-    "evdev": "Combinations: type KEY_LEFTMETA+KEY_SPACE. Names are evdev key names.",
-    "portal": ("This session binds its shortcuts through the desktop, so there is no key to "
-               "capture here - the fields above are the trigger we ask for the first time the "
-               "desktop meets each shortcut, in its own syntax: F14, CTRL+space, CTRL+SHIFT+l. "
-               "A bare modifier will not bind. Saving asks the desktop to bind them again, "
-               "which may show its permission dialog, and never moves a key it already holds. "
-               "The evdev key fields below apply again if you switch hotkeys.backend to evdev."),
+    "evdev": "Type an evdev key name, or press \"Capture key\".",
+    "portal": "These evdev keys apply only if hotkeys.backend goes back to evdev.",
 }
 
 
@@ -111,6 +125,10 @@ def _spawn(command: list[str]) -> None:
 
 class SettingsDialog(QDialog):
     saved = Signal()
+    #: The desktop's own shortcut store took a new trigger, so whatever is
+    #: listening has to bind again - otherwise the old key stays live until the
+    #: daemon is restarted, which is exactly the surprise this feature removes.
+    shortcuts_rebound = Signal()
     _captured = Signal(str)
     #: The portal answers capture_next from the listener thread; both of these
     #: hop back onto the Qt thread before a widget is touched.
@@ -118,9 +136,13 @@ class SettingsDialog(QDialog):
 
     def __init__(self, config: Config, capture_key: Callable[[Callable[[str], None]], None],
                  sources: Callable[[], list[Source]], parent=None, backend: str = "evdev",
-                 triggers: Callable[[], dict[str, str]] | None = None):
+                 triggers: Callable[[], dict[str, str]] | None = None,
+                 shortcut_store: Callable[[], object | None] = desktop_shortcut_store):
         super().__init__(parent)
         self._backend = backend
+        #: Where this desktop keeps its global shortcuts, or None where it keeps
+        #: them somewhere we must not touch (KDE, which has its own dialog).
+        self._shortcut_store = shortcut_store
         #: Reads back what the desktop actually holds per shortcut id. The
         #: portal_* fields can only ever ask for a trigger - on GNOME not even
         #: that - so this is the only truthful thing the tab can show.
@@ -250,7 +272,7 @@ class SettingsDialog(QDialog):
             # nothing to capture: these are the triggers we ask it to bind -
             # once, and only where the desktop admits it has never seen them.
             self.capture_button.setVisible(False)
-            self.portal_note = _wrapped(PORTAL_FIRST_RUN_NOTE)
+            self.portal_note = _wrapped(PORTAL_NOTE)
             form.addRow(self.portal_note)
             for name, label in PORTAL_TRIGGERS:
                 edit = QLineEdit()
@@ -537,6 +559,45 @@ class SettingsDialog(QDialog):
         for name, label in self.portal_effective.items():
             label.setText(EFFECTIVE_PREFIX + effective_trigger_text(triggers, name))
 
+    def hotkey_help_text(self) -> str:
+        """The detail behind the Hotkeys tab's "?", for this backend."""
+        return HOTKEY_HELP.get(self._backend, HOTKEY_HELP["evdev"])
+
+    def _apply_desktop_shortcuts(self) -> bool:
+        """Put the saved triggers into the desktop's own store, and say so.
+
+        Only the portal backend has any: on evdev the key is ours to read from
+        /dev/input and no desktop is involved. A desktop that keeps its
+        shortcuts somewhere we must not touch answers None and is left alone -
+        the trigger is still saved, and KDE's own dialog applies it.
+
+        Returns whether the listener now needs to bind again.
+        """
+        if self._backend != "portal" or not self.portal_edits:
+            return False
+        try:
+            store = self._shortcut_store()
+        except Exception as exc:
+            log.debug("cannot reach this desktop's shortcut store: %s", exc)
+            return False
+        if store is None:
+            return False
+        triggers = {name: edit.text().strip() for name, edit in self.portal_edits.items()}
+        try:
+            message = store.write(triggers)
+        except ShortcutStoreError as exc:
+            # A refusal is the store protecting the user's other shortcuts, and
+            # the one thing they have to see: it is why the key did not move.
+            self.error_label.setText(str(exc))
+            return False
+        except Exception as exc:
+            log.exception("writing the desktop's shortcut store failed")
+            self.error_label.setText(f"Could not change this desktop's shortcuts: {exc}")
+            return False
+        if self.shortcut_note is not None:
+            self.shortcut_note.setText(message)
+        return True
+
     def _open_shortcut_settings(self) -> None:
         """Take the user to wherever this desktop really keeps the key.
 
@@ -761,6 +822,10 @@ class SettingsDialog(QDialog):
             return
         c.save()
         self.error_label.setText("")
+        # After the file, and only after it: the desktop's store is the other
+        # half of a portal trigger, and a rebind to a key the config does not
+        # hold is a key that disappears on the next reload.
+        rebind = self._apply_desktop_shortcuts()
         # Save leaves the window open, so the "the user decided this here" flags
         # must not outlive the save they belong to: a second language switch has
         # to move its profile too, and an external switch made after this save
@@ -769,4 +834,8 @@ class SettingsDialog(QDialog):
         self._language_changed = False
         self._inject_mode_changed = False
         self._pill_placement_changed = False
+        if rebind:
+            # Before `saved`: the daemon reloads and rebinds in one pass, so the
+            # desktop's permission dialog cannot be asked for twice.
+            self.shortcuts_rebound.emit()
         self.saved.emit()

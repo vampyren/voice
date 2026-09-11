@@ -249,6 +249,9 @@ class Daemon:
         self._pill_policy = "none"
         #: One background refresh of each kind at a time; see _refresh_off_thread.
         self._refreshers: dict[str, threading.Thread] = {}
+        #: Set by rebind_hotkeys(): the desktop's own shortcut store moved under
+        #: us, which no config snapshot can see. Cleared by the rebind it asks for.
+        self._force_rebind = False
         self._bridge = _Bridge()
 
     # -- construction -------------------------------------------------------
@@ -396,13 +399,29 @@ class Daemon:
         triggers = portal_shortcuts(self.config) if self.hotkey_backend == "portal" else {}
         return (backend, triggers)
 
+    def rebind_hotkeys(self) -> None:
+        """Bind again at the next apply_config, whatever the config says.
+
+        The settings window calls this after it has written the desktop's own
+        shortcut store (see `voice.hotkey.desktop_shortcuts`): the key that
+        moved is the *desktop's*, so `_hotkey_snapshot` sees nothing at all, and
+        without this the listener keeps the old binding until a restart. Asked
+        for before `saved`, so one apply_config does both.
+        """
+        self._force_rebind = True
+
     def _rebind_hotkeys_if_needed(self) -> None:
         """Rebuild the listener when the backend or a portal trigger changed.
 
         The desktop may show its permission dialog again; that is the price of
         applying a new trigger without restarting the daemon.
         """
-        if self._hotkey_settings is None or self._hotkey_snapshot() == self._hotkey_settings:
+        if self._hotkey_settings is None:
+            return
+        # Read once and cleared either way: a request that survived its own
+        # rebind would rebuild the listener on every later reload as well.
+        forced, self._force_rebind = self._force_rebind, False
+        if not forced and self._hotkey_snapshot() == self._hotkey_settings:
             return
         log.info("hotkey bindings changed; rebuilding the listener")
         try:
@@ -861,6 +880,9 @@ class Daemon:
                                                 backend=self.hotkey_backend,
                                                 triggers=self.effective_triggers)
                 self._settings.saved.connect(self.apply_config)
+                # Emitted before `saved`, so the rebind it asks for happens in
+                # the same apply_config as the rest of the save.
+                self._settings.shortcuts_rebound.connect(self.rebind_hotkeys)
             elif not self._settings.isVisible():
                 # The dialog holds its own Config; refresh it so a reopen shows what
                 # is actually in force rather than edits abandoned last time. Only

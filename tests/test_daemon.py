@@ -2069,3 +2069,41 @@ def test_status_and_the_tray_say_which_language_chose_the_profile(isolated_xdg, 
     assert status["profile"] == "groq" and status["profile_language"] is None
     assert d.tray.profile_hints[-1] == "groq"
     d.shutdown()
+
+
+# -- the settings window wrote the desktop's own shortcut store -----------------
+def test_a_desktop_shortcut_write_rebinds_even_when_the_config_did_not_move(
+        isolated_xdg, qapp, monkeypatch):
+    """Writing GNOME's dconf key changes the key the *desktop* holds, which no
+    config snapshot can notice - and without a rebind the old one stays live
+    until the daemon is restarted."""
+    d = _portal_daemon(monkeypatch)
+    first = d.listener
+    d.rebind_hotkeys()                                  # what the window asks for
+    d.apply_config()
+    assert d.listener is not first
+    assert len(FakePortalListener.made) == 2
+    assert first.started is False and d.listener.started is True
+    d.shutdown()
+
+
+def test_nothing_rebinds_when_no_one_asked_and_nothing_changed(isolated_xdg, qapp, monkeypatch):
+    """The rebind shows the desktop's permission dialog, so it must not happen
+    on every Save."""
+    d = _portal_daemon(monkeypatch)
+    first = d.listener
+    d.apply_config()
+    assert d.listener is first and len(FakePortalListener.made) == 1
+    d.shutdown()
+
+
+def test_the_settings_window_rebind_request_reaches_the_daemon(isolated_xdg, qapp, monkeypatch):
+    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    d = _portal_daemon(monkeypatch)
+    d.open_settings()
+    first = d.listener
+    d._settings.shortcuts_rebound.emit()                # the store took a new key
+    d._settings.saved.emit()                            # and the file was written
+    assert d.listener is not first
+    d._settings.close()
+    d.shutdown()

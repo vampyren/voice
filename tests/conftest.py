@@ -118,3 +118,25 @@ def helper_processes():
 
     launcher.made = made
     return launcher
+
+
+@pytest.fixture(autouse=True)
+def no_real_dconf(monkeypatch):
+    """Nothing in the suite may write the owner's live desktop configuration.
+
+    `dconf write` on the GNOME shortcut key is how the settings window makes an
+    edited trigger take effect; every test of it injects a fake runner, and this
+    says so loudly if one ever does not.
+    """
+    import subprocess
+
+    real_run = subprocess.run
+
+    def guard(argv, *args, **kwargs):
+        # The attribute lives on the shared subprocess module, so everything
+        # else that runs a command comes through here too and must pass on.
+        if argv and str(argv[0]).endswith("dconf"):
+            raise AssertionError(f"a test tried to run dconf for real: {list(argv)}")
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr("voice.hotkey.desktop_shortcuts.subprocess.run", guard)

@@ -2,6 +2,7 @@ import pytest
 
 from voice.audio.capture import Source
 from voice.config import Config
+from voice.hotkey.desktop_shortcuts import ShortcutStoreError
 from voice.hotkey.portal_listener import DIALOG_MESSAGE, NO_CAPTURE_MESSAGE, NO_TRIGGER
 from voice.ui.settings import (NOT_REGISTERED, PROFILE_TEMPLATES, SHORTCUT_SETTINGS_PATH,
                                UNKNOWN_TRIGGER, SettingsDialog)
@@ -178,9 +179,9 @@ def test_portal_backend_explains_where_shortcuts_are_chosen(qapp):
     dlg = SettingsDialog(cfg, capture_key=lambda cb: None,
                          sources=lambda: [Source("alsa_input.obsbot", "OBSBOT Tiny 3", True)],
                          backend="portal")
-    assert "desktop" in dlg.hotkey_hint.text().lower()
+    assert "desktop" in (dlg.portal_note.text() + dlg.hotkey_help_text()).lower()
     plain = SettingsDialog(cfg, capture_key=lambda cb: None, sources=lambda: [])
-    assert "evdev" in plain.hotkey_hint.text().lower()
+    assert "evdev" in (plain.hotkey_hint.text() + plain.hotkey_help_text()).lower()
 
 
 def test_a_captured_message_is_shown_instead_of_being_typed_into_the_field(qapp):
@@ -236,10 +237,15 @@ def test_reload_from_disk_clears_the_language_flag(qapp):
 
 # -- the portal backend has no keys to capture ---------------------------------
 def portal_dialog(qapp, triggers=None, capture=lambda cb: None):
+    """A portal dialog on a desktop whose shortcut store is not ours to write.
+
+    The store is exercised on its own below; every other portal test would
+    otherwise reach the real dconf on a GNOME machine.
+    """
     cfg = Config.load()
     dlg = SettingsDialog(cfg, capture_key=capture,
                          sources=lambda: [Source("alsa_input.obsbot", "OBSBOT Tiny 3", True)],
-                         backend="portal", triggers=triggers)
+                         backend="portal", triggers=triggers, shortcut_store=lambda: None)
     return cfg, dlg
 
 
@@ -250,8 +256,8 @@ def test_the_portal_backend_edits_its_triggers_instead_of_capturing_keys(qapp):
     assert set(dlg.portal_edits) == {"dictate", "recall", "cancel", "language_toggle"}
     assert dlg.portal_edits["dictate"].text() == "CTRL+space"
     assert dlg.capture_button.isHidden() is True
-    assert dlg.error_label.text() == ""                 # the explanation is a hint,
-    assert "desktop" in dlg.hotkey_hint.text()          # not an error
+    assert dlg.error_label.text() == ""                 # the explanation is a note,
+    assert "desktop" in dlg.portal_note.text()          # not an error
 
 
 def test_the_evdev_backend_still_captures_keys(qapp):
@@ -308,11 +314,13 @@ def test_the_effective_triggers_are_re_read_when_the_window_is_reopened(qapp):
     assert "F13" in dlg.portal_effective["dictate"].text()
 
 
-def test_the_portal_fields_say_they_are_only_a_first_run_preference(qapp):
+def test_the_portal_fields_say_who_owns_the_key_and_what_save_does(qapp):
+    """They used to say "first-run preference, editing here changes nothing",
+    which was true and useless; Save now writes the desktop's own store."""
     cfg, dlg = portal_dialog(qapp, triggers=lambda: {"dictate": "F13"})
     note = dlg.portal_note.text().lower()
-    assert "first-run preference" in note and "desktop" in note
-    assert "gnome" in note                            # where it is never applied at all
+    assert "desktop" in note and "save" in note
+    assert "gnome" in dlg.hotkey_help_text().lower()   # where the key really lives
 
 
 def test_the_shortcut_settings_button_opens_the_desktops_own_dialog(qapp, monkeypatch):
@@ -821,3 +829,120 @@ def test_a_nonsense_placement_on_disk_does_not_block_a_save(qapp):
     dlg.save_button.click()
     assert dlg.error_label.text() == ""
     assert Config.load().get("ui.overlay_position") == "bottom-center"
+
+
+# -- the trigger fields write the desktop's own store --------------------------
+class FakeStore:
+    """Stands in for the GNOME shortcut store: records, never runs dconf."""
+
+    name = "GNOME"
+
+    def __init__(self, fail: str = ""):
+        self.writes: list[dict] = []
+        self._fail = fail
+
+    def write(self, triggers: dict) -> str:
+        self.writes.append(dict(triggers))
+        if self._fail:
+            raise ShortcutStoreError(self._fail)
+        return f"Saved to {self.name}'s own shortcut store: dictate = <Control>d."
+
+
+def portal_dialog_with_store(qapp, store, triggers=None):
+    cfg = Config.load()
+    dlg = SettingsDialog(cfg, capture_key=lambda cb: None,
+                         sources=lambda: [], backend="portal", triggers=triggers,
+                         shortcut_store=lambda: store)
+    return cfg, dlg
+
+
+def test_saving_a_trigger_writes_it_to_the_desktops_own_store(qapp):
+    """The whole point of item 1: an edited field has to reach the desktop, or
+    it changes nothing at all on GNOME."""
+    store = FakeStore()
+    cfg, dlg = portal_dialog_with_store(qapp, store)
+    dlg.portal_edits["dictate"].setText("CTRL+ALT+d")
+    dlg.save_button.click()
+    assert store.writes == [{"dictate": "CTRL+ALT+d", "recall": "", "cancel": "",
+                             "language_toggle": ""}]
+    assert Config.load().get("hotkeys.portal_dictate") == "CTRL+ALT+d"
+    assert dlg.error_label.text() == ""                  # success is not an error
+    assert "GNOME" in dlg.shortcut_note.text()
+
+
+def test_a_successful_write_asks_for_a_rebind(qapp):
+    """Without a rebind the listener keeps the old key until the daemon restarts."""
+    store = FakeStore()
+    cfg, dlg = portal_dialog_with_store(qapp, store)
+    rebound = []
+    dlg.shortcuts_rebound.connect(lambda: rebound.append(True))
+    dlg.portal_edits["dictate"].setText("CTRL+ALT+d")
+    dlg.save_button.click()
+    assert rebound == [True]
+
+
+def test_a_refused_write_lands_in_the_red_label_and_asks_for_no_rebind(qapp):
+    store = FakeStore(fail="/org/gnome/... is not stored yet")
+    cfg, dlg = portal_dialog_with_store(qapp, store)
+    rebound = []
+    dlg.shortcuts_rebound.connect(lambda: rebound.append(True))
+    dlg.portal_edits["dictate"].setText("CTRL+ALT+d")
+    dlg.save_button.click()
+    assert "not stored yet" in dlg.error_label.text()
+    assert rebound == []
+    # The config was still saved: the preference is ours to keep either way.
+    assert Config.load().get("hotkeys.portal_dictate") == "CTRL+ALT+d"
+
+
+def test_a_desktop_with_no_such_store_is_left_alone(qapp):
+    """KDE keeps its shortcuts elsewhere and has its own dialog for them."""
+    cfg, dlg = portal_dialog_with_store(qapp, None)
+    dlg.portal_edits["dictate"].setText("CTRL+ALT+d")
+    dlg.save_button.click()
+    assert dlg.error_label.text() == ""
+    assert Config.load().get("hotkeys.portal_dictate") == "CTRL+ALT+d"
+
+
+def test_the_evdev_backend_never_writes_the_desktops_store(qapp):
+    store = FakeStore()
+    cfg = Config.load()
+    dlg = SettingsDialog(cfg, capture_key=lambda cb: None, sources=lambda: [],
+                         shortcut_store=lambda: store)
+    dlg.hotkey_edit.setText("KEY_F14")
+    dlg.save_button.click()
+    assert store.writes == []
+
+
+def test_a_save_that_is_refused_never_reaches_the_desktop(qapp):
+    """A config the daemon would reject must not leave the desktop rebound to a
+    key nothing listens for."""
+    store = FakeStore()
+    cfg, dlg = portal_dialog_with_store(qapp, store)
+    dlg.portal_edits["dictate"].setText("   ")           # errors() refuses an empty one
+    dlg.save_button.click()
+    assert store.writes == []
+    assert "portal_dictate" in dlg.error_label.text()
+
+
+def test_a_store_that_blows_up_is_reported_rather_than_crashing_the_window(qapp):
+    class Exploding:
+        name = "GNOME"
+
+        def write(self, triggers):
+            raise RuntimeError("dconf went away")
+
+    cfg, dlg = portal_dialog_with_store(qapp, Exploding())
+    dlg.portal_edits["dictate"].setText("CTRL+ALT+d")
+    dlg.save_button.click()
+    assert "dconf went away" in dlg.error_label.text()
+
+
+def test_the_hotkeys_tab_says_what_the_key_does_and_where_it_lives(qapp):
+    """The owner could not find CTRL+space in GNOME's settings; the tab has to
+    say what the key is for, where the desktop keeps it, and how to type one."""
+    cfg, dlg = portal_dialog_with_store(qapp, FakeStore())
+    words = (dlg.portal_note.text() + " " + dlg.hotkey_help_text()).lower()
+    assert "dictate" in words or "dictation" in words     # what it does
+    assert "global-shortcuts" in words                    # where it is stored
+    assert "ctrl+space" in words                          # what to press
+    assert "save" in words                                # and that saving applies it

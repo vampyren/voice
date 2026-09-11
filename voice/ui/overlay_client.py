@@ -394,12 +394,6 @@ class OverlayClient:
         except Exception:
             log.debug("closing the overlay helper's stdin failed", exc_info=True)
         try:
-            stdout = getattr(proc, "stdout", None)
-            if stdout is not None:
-                stdout.close()          # and with it the reader thread parked on it
-        except Exception:
-            log.debug("closing the overlay helper's stdout failed", exc_info=True)
-        try:
             proc.wait(timeout=STOP_WAIT_S)
         except subprocess.TimeoutExpired:
             log.warning("overlay helper did not exit; terminating it")
@@ -429,8 +423,14 @@ class OverlayClient:
         self._status = "running"
         stdout = getattr(proc, "stdout", None)
         if stdout is not None:
-            # One reader per helper, ending when its pipe does. A helper that
-            # never writes a line simply parks this thread until it exits.
+            # One reader per helper, ending when its pipe does - which is the
+            # only thing that ever ends it. Nothing closes that pipe from
+            # another thread: `close()` takes the buffer's own lock, which a
+            # parked `readline` is holding, so closing it under this thread
+            # would block until the helper wrote a line or died - the same
+            # deadlock the writer side above is built to avoid. Losing the
+            # helper (it exits, or is signalled) is an EOF, and the thread
+            # ends on it.
             threading.Thread(target=self._listen, args=(stdout, self._generation),
                              name="overlay-reader", daemon=True).start()
         if self._writer is None or not self._writer.is_alive():

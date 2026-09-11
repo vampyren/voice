@@ -813,10 +813,24 @@ class _Pipe:
         #: one means the line before it has been dealt with, which is the only
         #: sync point a test has with that thread.
         self.reads = 0
+        self._handed = threading.Event()
 
     def readline(self):
         self.reads += 1
-        return self._lines.get()
+        line = self._lines.get()
+        self._handed.set()
+        return line
+
+    def close(self):
+        """Like a real pipe: blocks while a reader is parked in readline().
+
+        Measured, not assumed - `BufferedReader.close()` takes the buffer's own
+        lock, which the parked read is holding, so it returns only when that
+        read does. Anything closing this from another thread hangs until the
+        helper says something or dies.
+        """
+        self._handed.wait()
+        self.closed = True
 
     def say(self, message):
         self._lines.put((json.dumps(message) + "\n").encode())
@@ -824,9 +838,9 @@ class _Pipe:
     def say_raw(self, blob: bytes):
         self._lines.put(blob)
 
-    def close(self):
-        self.closed = True
-        self._lines.put(b"")             # end of file: the reader thread ends
+    def eof(self):
+        """The helper exited: what really releases a parked reader."""
+        self._lines.put(b"")
 
 
 def _answering_client(clock=None):
@@ -920,3 +934,17 @@ def test_the_helper_is_spawned_with_somewhere_to_answer(monkeypatch):
     default_launcher(lang="", popen=lambda cmd, **kw: seen.update(kw) or "proc")
     assert seen["stdout"] is subprocess.PIPE
     assert seen["stdin"] is subprocess.PIPE
+
+
+def test_stop_does_not_close_a_pipe_a_reader_is_parked_on():
+    """Closing a pipe another thread is parked reading blocks until that read
+    returns - the same deadlock the writer side is so careful about. The reader
+    ends on the helper's own EOF, so nothing here may close its stdout."""
+    client, proc = _answering_client()
+    _read_again(proc.stdout, 1)                     # the reader thread is parked
+
+    stopped = threading.Event()
+    threading.Thread(target=lambda: (client.stop(), stopped.set()),
+                     name="stopper", daemon=True).start()
+    assert stopped.wait(5.0), "stop() hung on the helper's stdout"
+    assert proc.stdout.closed is False

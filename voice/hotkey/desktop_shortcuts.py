@@ -42,13 +42,26 @@ MODIFIERS = {"SHIFT": "<Shift>", "CTRL": "<Control>", "CONTROL": "<Control>",
              "ALT": "<Alt>", "SUPER": "<Super>", "META": "<Super>", "LOGO": "<Super>"}
 _MODIFIER_ORDER = ("<Shift>", "<Control>", "<Alt>", "<Super>")
 #: X keysym names whose spelling is not simply the word the user typed.
+#:
+#: Both spellings of every key are in here, because two different writers feed
+#: this: a person typing in the Advanced fields, and the settings dialog, which
+#: reads a key press through `QKeySequence(key).toString()` and gets Qt's own
+#: abbreviations - `Ins`, `PgUp`, `PgDown`, `Del`, `Esc`, `Space`, `Backspace`,
+#: `Enter`, `Backtab`, `SysReq`. `Gtk.accelerator_parse` refuses every one of
+#: those, so passing them through wrote a shortcut that could never fire while
+#: the window said it had worked. Measured against GTK 4, not assumed.
 _KEYSYMS = {"space": "space", "return": "Return", "enter": "Return", "tab": "Tab",
             "escape": "Escape", "esc": "Escape", "backspace": "BackSpace",
-            "delete": "Delete", "del": "Delete", "insert": "Insert", "home": "Home",
-            "end": "End", "pageup": "Page_Up", "page_up": "Page_Up",
-            "pagedown": "Page_Down", "page_down": "Page_Down", "up": "Up",
-            "down": "Down", "left": "Left", "right": "Right", "print": "Print",
-            "menu": "Menu", "pause": "Pause"}
+            "delete": "Delete", "del": "Delete", "insert": "Insert", "ins": "Insert",
+            "home": "Home", "end": "End", "pageup": "Page_Up", "page_up": "Page_Up",
+            "pgup": "Page_Up", "pagedown": "Page_Down", "page_down": "Page_Down",
+            "pgdown": "Page_Down", "up": "Up", "down": "Down", "left": "Left",
+            "right": "Right", "print": "Print", "menu": "Menu", "pause": "Pause",
+            "backtab": "ISO_Left_Tab", "iso_left_tab": "ISO_Left_Tab",
+            "sysreq": "Sys_Req", "sys_req": "Sys_Req", "clear": "Clear",
+            "help": "Help", "cancel": "Cancel"}
+#: The last function key X has a name for: F36 and up are not keysyms at all.
+_LAST_FUNCTION_KEY = 35
 #: An empty GVariant array of strings needs its type: `<[]>` alone is not valid.
 EMPTY_SHORTCUTS = "@as []"
 #: The member of each entry's vardict that holds the key itself.
@@ -88,13 +101,28 @@ def to_accelerator(trigger: str) -> str:
 
 
 def _keysym(key: str) -> str:
-    """One key name in the spelling GTK parses back."""
+    """One key name in the spelling GTK parses back, or a refusal.
+
+    Nothing is passed through on hope. An accelerator GTK cannot parse is
+    dropped by the compositor in silence, which is a shortcut that never fires
+    under a window that said it had been set - so a key we cannot spell is a
+    failure to report, here, before anything is written.
+    """
     lowered = key.lower()
     if lowered in _KEYSYMS:
         return _KEYSYMS[lowered]
     if len(lowered) > 1 and lowered[0] == "f" and lowered[1:].isdigit():
+        if not 1 <= int(lowered[1:]) <= _LAST_FUNCTION_KEY:
+            raise ValueError(f"there is no {key.upper()} key on this desktop")
         return "F" + lowered[1:]
-    return lowered if len(key) == 1 else key
+    if len(key) == 1 and key.isascii() and key.isalnum():
+        return lowered           # a letter or a digit is its own keysym name
+    if key.startswith("XF86") and key[4:].isalnum():
+        # The media keys, which have no other spelling and can only be typed
+        # by hand: Qt writes them with a space ("Volume Up") and never gets here.
+        return key
+    raise ValueError(f"{key!r} is not a key this desktop can be given; "
+                     "try another one, or a combination with Ctrl, Alt or Super")
 
 
 def desktop_shortcut_store(env: dict | None = None, app_id: str = APP_ID,

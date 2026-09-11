@@ -67,6 +67,52 @@ def test_a_chord_with_no_key_in_it_is_refused(bad):
         to_accelerator(bad)
 
 
+#: Every key the settings dialog can hand us in Qt's own spelling
+#: (`QKeySequence(key).toString()`), with the keysym name GTK parses back.
+#: Measured, both halves: the left column is what PySide6 emits, the right one
+#: is what `Gtk.accelerator_parse` accepts - `Ins`, `PgUp`, `PgDown`, `Del`,
+#: `Esc`, `Space` and `Backspace` are all refused by GTK as they stand.
+@pytest.mark.parametrize("qt,keysym", [
+    ("Ins", "Insert"), ("PgUp", "Page_Up"), ("PgDown", "Page_Down"),
+    ("Del", "Delete"), ("Esc", "Escape"), ("Space", "space"),
+    ("Backspace", "BackSpace"), ("Enter", "Return"), ("Backtab", "ISO_Left_Tab"),
+    ("SysReq", "Sys_Req"),
+    # And the ones Qt already spells the way GTK wants, which must not move.
+    ("Return", "Return"), ("Tab", "Tab"), ("Home", "Home"), ("End", "End"),
+    ("Up", "Up"), ("Down", "Down"), ("Left", "Left"), ("Right", "Right"),
+    ("Print", "Print"), ("Menu", "Menu"), ("Pause", "Pause"), ("Clear", "Clear"),
+    ("Help", "Help"), ("Cancel", "Cancel"), ("F13", "F13"), ("A", "a"), ("1", "1"),
+])
+def test_qts_own_spelling_of_a_key_becomes_one_gtk_can_parse(qt, keysym):
+    assert to_accelerator(f"CTRL+{qt}") == f"<Control>{keysym}"
+
+
+#: Not a keysym and not spellable as one, so the write would go through and the
+#: shortcut would never fire. `/`, `,` and `-` are Qt's spelling of those keys
+#: and GTK refuses all three; F36 is past the last function key there is.
+@pytest.mark.parametrize("bad", ["CTRL+/", "CTRL+,", "CTRL+-", "CTRL+banana",
+                                 "CTRL+F36", "CTRL+Volume"])
+def test_a_key_that_cannot_be_spelled_for_the_desktop_is_refused(bad):
+    """A write that cannot work has to report failure, not success: the dialog
+    said "Your desktop now uses Ctrl+Ins" over an accelerator GTK drops."""
+    with pytest.raises(ValueError):
+        to_accelerator(bad)
+
+
+def test_the_media_keys_are_still_passed_through():
+    """The XF86* family is what a media key really is called, GTK parses it,
+    and it can only ever be typed by hand - so it must survive the refusal."""
+    assert to_accelerator("SUPER+XF86AudioPlay") == "<Super>XF86AudioPlay"
+
+
+def test_a_key_that_cannot_be_spelled_is_refused_before_anything_is_written():
+    runner = FakeRunner()
+    with pytest.raises(ShortcutStoreError) as exc:
+        store(runner).write({"dictate": "CTRL+/"})
+    assert runner.calls == []
+    assert "dictate" in str(exc.value)
+
+
 # -- which desktop this is ---------------------------------------------------
 def test_gnome_gets_a_store_and_other_desktops_get_none():
     gnome = desktop_shortcut_store(env={"XDG_CURRENT_DESKTOP": "GNOME"}, app_id=APP_ID)

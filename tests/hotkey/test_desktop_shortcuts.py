@@ -256,6 +256,16 @@ def test_a_trigger_that_is_not_a_chord_is_refused_before_anything_is_written():
     assert runner.calls == []
 
 
+def test_writing_no_triggers_at_all_is_not_a_refusal_without_a_reason():
+    """Nothing to spell is not the same as nothing spellable: the all-refused
+    path raises with the reasons, and with no triggers there are none, so it
+    would have raised an empty sentence."""
+    runner = FakeRunner()
+    message = store(runner).write({})
+    assert [c[:2] for c in runner.calls] == [["dconf", "read"]]
+    assert "nothing to change" in message
+
+
 def test_a_runner_that_blows_up_becomes_a_refusal_not_a_traceback():
     def boom(argv, **kwargs):
         raise OSError("no dconf here")

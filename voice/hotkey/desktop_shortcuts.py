@@ -193,7 +193,7 @@ class GnomeShortcutStore:
         reason, rather than writing anything it is not sure of.
         """
         accelerators, self.refused = self._converted(triggers)
-        if not accelerators:
+        if self.refused and not accelerators:
             # Nothing could be spelled, so there is nothing to write and the
             # whole call is the failure - which is also the only shape a
             # single-key "Change..." can take.

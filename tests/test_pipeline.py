@@ -402,6 +402,15 @@ def test_a_recording_kept_by_a_cancel_is_still_trimmed_when_it_is_retried():
     assert sv.transcriber.calls == [(8000, "en", "CachyOS")]
 
 
+def test_a_recording_too_short_to_transcribe_is_not_held_on_to():
+    """The attempt is over, so the pipeline must not go on holding its audio -
+    it is handed over at `stop()` now, so nothing downstream releases it."""
+    d, sv, states, _ = make(rec=FakeRecorder(np.ones(1000, dtype=np.int16)))
+    d.start(); d.stop()
+    assert states[-1] == State.IDLE and sv.transcriber.calls == []
+    assert d._audio is None, "up to two minutes of PCM, kept for nothing"
+
+
 def test_cancelling_a_retry_before_its_worker_runs_keeps_the_recording():
     """retry() takes the audio out of history, so a cancel in the same window
     lost it altogether: nothing left to retry a second time."""

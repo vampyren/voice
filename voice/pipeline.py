@@ -549,6 +549,12 @@ class Dictation:
                 self.sv.history.clear_audio()
             audio = pcm if trimmed else self.sv.trim(pcm)
             if duration_s(audio) * 1000 < MIN_SPEECH_MS:
+                with self._lock:
+                    if self._current(attempt):
+                        # The attempt is over and nothing below will release it:
+                        # the recording is handed over at stop() now, so this is
+                        # the one end that has to let go of it itself.
+                        self._audio, self._audio_trimmed = None, False
                 self._set(State.IDLE, "too short")
                 return
             language = self.sv.config_getter("general.language", "en")

@@ -188,9 +188,13 @@ class Dictation:
         #: on, which is how a result that lands afterwards is recognised as
         #: belonging to nobody and dropped.
         self._attempt = 0
-        #: The trimmed audio of the attempt in flight, so whatever abandons it
-        #: can hand it back to history for "Retry last recording".
+        #: The audio of the attempt in flight, so whatever abandons it can hand
+        #: it back to history for "Retry last recording". Set under the lock by
+        #: whichever command started the attempt, so there is no window in which
+        #: a cancel finds nothing to keep; the worker swaps in the trimmed form
+        #: once it has one, and `_audio_trimmed` says which of the two it is.
         self._audio: np.ndarray | None = None
+        self._audio_trimmed = False
         #: The backstop timer for the state on screen, and its generation: a
         #: guard that fires after its state has moved on must do nothing.
         self._guard = None
@@ -309,10 +313,19 @@ class Dictation:
             self._fail(f"stuck in {state.value} for more than {bound:.0f}s; back to idle")
 
     # -- the transcription in flight ------------------------------------------
-    def _next_attempt(self) -> int:
-        """Number the attempt that is about to start. Caller holds the lock."""
+    def _next_attempt(self, audio: np.ndarray, trimmed: bool) -> int:
+        """Number the attempt that is about to start. Caller holds the lock.
+
+        The recording comes with it. It used to be handed over inside the
+        worker instead, after the VAD pass, which left a window between here
+        and there in which a cancel found `self._audio` at None: the recording
+        just made was dropped, and whatever history was still holding - a
+        recording from hours ago - became what "Retry last recording" would
+        re-run. The VAD pass itself stays in the worker; it is far too slow to
+        run here, on the listener thread, with the lock held.
+        """
         self._attempt += 1
-        self._audio = None
+        self._audio, self._audio_trimmed = audio, trimmed
         return self._attempt
 
     def _current(self, attempt: int) -> bool:
@@ -332,7 +345,7 @@ class Dictation:
             if attempt != self._attempt or self._state is not State.TRANSCRIBING:
                 return False
             self._attempt += 1
-            self._audio = None
+            self._audio, self._audio_trimmed = None, False
             self._disarm_guard()
             return True
 
@@ -346,9 +359,10 @@ class Dictation:
         back to history so "Retry last recording" can have another go at it.
         """
         self._attempt += 1
-        audio, self._audio = self._audio, None
+        audio, trimmed = self._audio, self._audio_trimmed
+        self._audio, self._audio_trimmed = None, False
         if audio is not None:
-            self.sv.history.keep_audio(audio)
+            self.sv.history.keep_audio(audio, trimmed=trimmed)
         self._worker.abandon()
 
     def set_transcriber(self, t) -> None:
@@ -461,7 +475,7 @@ class Dictation:
             if self.sv.recorder.error:
                 self.sv.notify("Microphone problem", self.sv.recorder.error, "critical")
             self._set(State.TRANSCRIBING)
-            attempt = self._next_attempt()
+            attempt = self._next_attempt(pcm, trimmed=False)
         self._executor(lambda: self._process(pcm, attempt))
 
     def toggle(self) -> None:
@@ -506,12 +520,13 @@ class Dictation:
         with self._lock:
             if self._state != State.IDLE:
                 return
+            trimmed = self.sv.history.audio_trimmed
             pcm = self.sv.history.take_audio()
             if pcm is None:
                 return
             self._set(State.TRANSCRIBING, "retry")
-            attempt = self._next_attempt()
-        self._executor(lambda: self._process(pcm, attempt, trimmed=True))
+            attempt = self._next_attempt(pcm, trimmed=trimmed)
+        self._executor(lambda: self._process(pcm, attempt, trimmed=trimmed))
 
     # -- worker ---------------------------------------------------------------
     def _process(self, pcm: np.ndarray, attempt: int, trimmed: bool = False) -> None:
@@ -541,8 +556,10 @@ class Dictation:
                 if not self._current(attempt):
                     log.info("dropping a transcription nobody is waiting for")
                     return
-                # What an abandoned attempt leaves behind for the retry.
-                self._audio = audio
+                # What an abandoned attempt leaves behind for the retry. The
+                # untrimmed form has been there since stop()/retry(); this is
+                # the upgrade to the trimmed one, not its first appearance.
+                self._audio, self._audio_trimmed = audio, True
             try:
                 result = self.sv.transcriber.transcribe(audio, language, self.sv.prompt_getter(),
                                                         hotwords=self.sv.hotwords_getter())

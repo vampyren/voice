@@ -28,6 +28,11 @@ class History:
         self._limit = limit
         self._entries: list[Entry] = self._load()
         self._audio: np.ndarray | None = None
+        #: Whether the kept recording has already been through the VAD. A
+        #: cancel can hand one over before the worker has trimmed it, and
+        #: trimming an already-trimmed recording cuts into the speech the pad
+        #: was there to protect - so the retry has to be told which it has.
+        self._audio_trimmed = True
 
     def _load(self) -> list[Entry]:
         if not self._path.exists():
@@ -54,11 +59,16 @@ class History:
     def entries(self) -> list[Entry]:
         return list(self._entries)
 
-    def keep_audio(self, pcm: np.ndarray) -> None:
-        self._audio = pcm
+    def keep_audio(self, pcm: np.ndarray, trimmed: bool = True) -> None:
+        self._audio, self._audio_trimmed = pcm, trimmed
+
+    @property
+    def audio_trimmed(self) -> bool:
+        """Whether the recording `take_audio` would hand back is trimmed."""
+        return self._audio_trimmed
 
     def clear_audio(self) -> None:
-        self._audio = None
+        self._audio, self._audio_trimmed = None, True
 
     def take_audio(self) -> np.ndarray | None:
         pcm, self._audio = self._audio, None

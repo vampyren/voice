@@ -91,14 +91,16 @@ class FakeTimer:
 A_MICROPHONE = [Source("mic", "Some Microphone", True)]
 
 
-def make(cfg=None, rec=None, stt=None, inj=None, executor=None, notify=None, sources=None):
+def make(cfg=None, rec=None, stt=None, inj=None, executor=None, notify=None, sources=None,
+         trim=None):
     cfg = {"hotkeys.dictate_mode": "hold", "audio.device": "", "audio.max_seconds": 120,
            "general.language": "en", "dictionary.replacements": [["cachy os", "CachyOS", "icase"]], **(cfg or {})}
     notes = []
     services = Services(
         recorder=rec or FakeRecorder(), transcriber=stt or FakeTranscriber(), injector=inj or FakeInjector(),
         history=History(), notify=notify or (lambda t, b, u="normal": notes.append((t, b))),
-        trim=lambda pcm: pcm, config_getter=lambda k, d=None: cfg.get(k, d), prompt_getter=lambda: "CachyOS",
+        trim=trim or (lambda pcm: pcm),
+        config_getter=lambda k, d=None: cfg.get(k, d), prompt_getter=lambda: "CachyOS",
         hotwords_getter=lambda: "CachyOS, OBSBOT",
         sources=sources if sources is not None else (lambda: list(A_MICROPHONE)))
     states = []
@@ -352,6 +354,83 @@ def test_a_later_dictation_clears_the_previous_failures_retry_audio():
     assert sv.injector.texts == ["hello world"]    # nothing re-pasted
     assert len(stt.calls) == 2                     # and nothing re-transcribed
     assert sv.history.take_audio() is None
+
+
+def test_cancelling_before_the_worker_runs_keeps_this_recording_not_an_older_one():
+    """The audio used to be handed over inside the worker, after `trim`, so a
+    cancel in the window between `stop()` releasing the lock and `_process`
+    reaching that line found `self._audio` at None: `keep_audio` was skipped and
+    `Worker.abandon()` drained the job, leaving whatever history happened to be
+    holding as the thing "Retry last recording" would re-run. That is exactly
+    the stale re-paste `_process`'s own comment exists to prevent."""
+    pending = []
+    d, sv, states, _ = make(executor=pending.append)
+    stale = np.full(5, 7, dtype=np.int16)          # a recording from hours ago
+    sv.history.keep_audio(stale)
+    fresh = np.full(16000, 3, dtype=np.int16)
+    sv.recorder.pcm = fresh
+
+    d.start(); d.stop()
+    assert d.state == State.TRANSCRIBING and len(pending) == 1
+    d.cancel()                                     # in the window, before _process
+    assert d.state == State.IDLE
+
+    kept = sv.history.take_audio()
+    assert kept is not None, "the recording just made must stay retryable"
+    assert not np.array_equal(kept, stale), "an older recording must never come back"
+    assert np.array_equal(kept, fresh)
+
+
+def test_a_recording_kept_by_a_cancel_is_still_trimmed_when_it_is_retried():
+    """It is handed over untrimmed - trimming is a VAD pass and may not run on
+    the listener thread under the lock - so the retry has to do the trimming."""
+    trims = []
+
+    def trim(pcm):
+        trims.append(pcm.size)
+        return pcm[: pcm.size // 2]
+
+    pending = []
+    d, sv, states, _ = make(executor=pending.append, trim=trim)
+    d.start(); d.stop()
+    d.cancel()
+    assert trims == [], "nothing may be trimmed on the cancel path"
+
+    d.retry()
+    pending.pop()()
+    assert trims == [16000]
+    assert sv.transcriber.calls == [(8000, "en", "CachyOS")]
+
+
+def test_cancelling_a_retry_before_its_worker_runs_keeps_the_recording():
+    """retry() takes the audio out of history, so a cancel in the same window
+    lost it altogether: nothing left to retry a second time."""
+    pending = []
+    d, sv, states, _ = make(executor=pending.append)
+    kept = np.full(16000, 5, dtype=np.int16)
+    sv.history.keep_audio(kept)
+
+    d.retry()
+    assert d.state == State.TRANSCRIBING and len(pending) == 1
+    d.cancel()
+    assert d.state == State.IDLE
+
+    back = sv.history.take_audio()
+    assert back is not None and np.array_equal(back, kept)
+
+
+def test_a_recording_kept_by_a_cancelled_retry_is_not_trimmed_again():
+    """It went into history trimmed, so re-trimming it would cut into speech."""
+    trims = []
+    pending = []
+    d, sv, states, _ = make(executor=pending.append, trim=lambda pcm: trims.append(pcm) or pcm)
+    sv.history.keep_audio(np.full(16000, 5, dtype=np.int16))
+    d.retry()
+    d.cancel()
+    d.retry()
+    pending.pop()()
+    assert trims == []
+    assert sv.transcriber.calls == [(16000, "en", "CachyOS")]
 
 
 class ExplodingStopRecorder(FakeRecorder):

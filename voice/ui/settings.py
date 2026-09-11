@@ -9,19 +9,17 @@ from typing import Callable, Iterable
 from html import escape
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPalette, QRegion
+from PySide6.QtGui import QColor, QImage, QKeySequence, QPalette, QRegion
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFormLayout, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
                                QSizePolicy, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget,
                                QToolButton, QToolTip, QVBoxLayout, QWidget)
 
-from voice import APP_ID
 from voice.audio.capture import Source
 from voice.config import INJECT_MODES, Config, is_language_code
-from voice.hotkey.desktop_shortcuts import (GNOME_KEY_TEMPLATE, ShortcutStoreError,
-                                            desktop_shortcut_store)
+from voice.hotkey.desktop_shortcuts import ShortcutStoreError, desktop_shortcut_store
 from voice.hotkey.keyspec import parse_keyspec
-from voice.hotkey.portal_listener import DIALOG_MESSAGE, NO_TRIGGER
+from voice.hotkey.portal_listener import DIALOG_MESSAGE
 from voice.ui.pill_placer import PillPlacer
 from voice.ui.placement import NO_LAYER_SHELL_NOTE, placement_summary
 
@@ -38,58 +36,140 @@ PROFILE_TEMPLATES: dict[str, dict] = {
 _LOCAL_FIELDS = ["model", "device", "compute_type", "beam_size", "prompt"]
 #: The profile form reads as a form, not as a config file: the keys stay the
 #: keys (they are what is written), only what the user reads changes.
-_FIELD_LABELS = {"backend": "Backend", "base_url": "Base URL", "model": "Model",
-                 "api_key": "API key", "api_key_env": "API key variable",
-                 "prompt": "Vocabulary hint", "device": "Device",
-                 "compute_type": "Compute type", "beam_size": "Beam size"}
+_FIELD_LABELS = {"backend": "Where it runs", "base_url": "Service address",
+                 "model": "Model", "api_key": "API key",
+                 "api_key_env": "API key variable", "prompt": "Vocabulary hint",
+                 "device": "Processor", "compute_type": "Number format",
+                 "beam_size": "Search width"}
+#: How a profile's kind reads on the tab. The value written to the file is
+#: unchanged; what a person is shown is where the work happens.
+_BACKEND_LABELS = {"local": "On this computer", "openai_compatible": "On an online service"}
 _CLOUD_FIELDS = ["base_url", "model", "api_key", "api_key_env", "prompt"]
 _LANGUAGES = [("English", "en"), ("Swedish", "sv"), ("Auto-detect", "auto")]
+#: The same names, for the per-language table: "en" is a code, not a language.
+_LANGUAGE_NAMES = {code: label for label, code in _LANGUAGES}
 #: inject.mode, in the order the combo shows it; the data is the config value.
 _INJECT_MODE_LABELS = {"paste": "Paste automatically",
                        "clipboard": "Copy only (press Ctrl+V yourself)"}
+#: What the dictation key does, in the order the combo shows it; the data is
+#: what is stored. "hold" and "toggle" say nothing to anyone who has not read
+#: the config file, and this row is the one that decides how the key feels.
+_DICTATE_MODES = (("Hold it down while you talk", "hold"),
+                  ("Press once to start, again to stop", "toggle"))
+#: Notifications, same idea: a value the file keeps as true or false.
+_NOTIFICATION_LABELS = (("On", True), ("Off", False))
 #: Under the preview: what dragging it there can and cannot do.
 PILL_PLACEMENT_NOTE = (
     "Drag the pill to where it should appear; arrow keys nudge it a pixel at a time, "
-    "Shift+arrow ten. Dropping it near one of the nine anchors takes that anchor exactly. "
-    "It is the anchor and the gap that are saved, not a free position, because that is "
-    "what a compositor can be asked for - and it needs gtk4-layer-shell: without one the "
-    "compositor decides where the pill goes and this setting does nothing.")
+    "Shift+arrow ten. Dropping it near one of the nine anchor points takes that point "
+    "exactly. What is saved is the corner or edge it sits against and the gap from it, "
+    "not a free position - that is all a desktop can be asked for.\n\n"
+    "Some desktops place small windows themselves and ignore what they are asked for. "
+    "Where that happens the line under the preview says so, and the pill still appears - "
+    "just wherever your desktop decides.")
 #: The "leave stt.active alone for this language" row of the profile table.
 KEEP_CURRENT = "(keep current)"
-#: The portal shortcuts, in the order they are shown, with their labels.
-PORTAL_TRIGGERS = [("dictate", "Dictate"), ("recall", "Recall last"),
-                   ("cancel", "Cancel recording"), ("language_toggle", "Switch language")]
+#: The four things a key can do, in the order the Hotkeys tab lists them, named
+#: for what they do rather than for the setting they are kept in. The owner: "I
+#: need to know how to use it without deep tech understanding".
+ACTIONS = (("dictate", "Start and stop dictation"),
+           ("cancel", "Cancel the current recording"),
+           ("language_toggle", "Switch language"),
+           ("recall", "Insert the last dictation again"))
+ACTION_LABELS = dict(ACTIONS)
+#: What "Change…" has to do on this machine. Only one of the three is ever in
+#: force, and the window shows only that one - which of them it is is decided
+#: once, from the running backend and whether this desktop's shortcut store is
+#: ours to write.
+CAPTURE = "capture"                  # voice reads the keyboard: take the next key
+DESKTOP_STORE = "desktop-store"      # the desktop's store is ours to write (GNOME)
+DESKTOP_DIALOG = "desktop-dialog"    # the desktop insists on its own window (KDE)
+#: The one sentence at the top of the tab: who owns these keys here. No
+#: mechanism, no setting name - just who the user has to argue with.
+WHO_MANAGES = {
+    CAPTURE: "voice reads your keyboard directly, so you can set any key here.",
+    DESKTOP_STORE: "Your desktop manages these shortcuts, and voice can change them for you.",
+    DESKTOP_DIALOG: "Your desktop manages these shortcuts, and only its own window can "
+                    "change them.",
+}
+#: One button per key, the same on every route. What it says while it waits.
+CHANGE = "Change…"
+CHANGE_BUSY = {CAPTURE: "Press a key…", DESKTOP_STORE: "Press the keys…",
+               DESKTOP_DIALOG: "Opening…"}
+#: And the line under the list, which says the same thing in full.
+CHANGE_PROMPT = {
+    CAPTURE: "Press the key you want to use.",
+    DESKTOP_STORE: "Press the keys you want to use, or Escape to leave it as it is.",
+    DESKTOP_DIALOG: "Opening your desktop's shortcut settings…",
+}
+#: How a change that came to nothing reads, and a key nothing can be made of.
+CHANGE_STOPPED = "Left as it was."
+#: How a change that reached the desktop reads, and a save of the whole set.
+#: The store answers with a sentence of its own - the key it wrote, in the
+#: desktop's own spelling, and the ids it skipped - which is a sentence for
+#: whoever wrote the store. It goes to the log; this goes on screen.
+CHANGED_ON_DESKTOP = "Your desktop now uses {key} for: {what}."
+SAVED_TO_DESKTOP = "Your shortcuts have been handed to your desktop."
+#: And the one case where nothing can be handed over: a shortcut this desktop
+#: has never been told about, because voice has never asked it for one. Saving
+#: asks, which is why that is what this says to do.
+NOT_OFFERED = "Your desktop has not been offered this shortcut yet - press Save, then Change… again."
+CHANGE_UNUSABLE = "That key cannot be used as a shortcut - try another one."
+#: What the desktop's own window being open reads as, in place of the portal's
+#: own sentence, which is written for whoever wrote the portal.
+DESKTOP_DIALOG_OPEN = "Your desktop has opened its own window - set the key there."
 #: The desktop's own shortcut editor, tried in PATH order: GNOME has no portal
 #: reconfigure dialog, so its Keyboard panel is the next best thing.
 SHORTCUT_SETTINGS_COMMANDS = (("gnome-control-center", "keyboard"),
                               ("systemsettings", "kcm_keys"))
 #: Where to click when neither is installed, and the button's own subject.
 SHORTCUT_SETTINGS_PATH = "Settings → Keyboard → Keyboard Shortcuts"
-#: How the effective trigger reads beside a field. An id the desktop never
-#: mentioned is one we never asked it to bind (an empty hotkeys.portal_* key).
-EFFECTIVE_PREFIX = "desktop: "
-NOT_REGISTERED = "not registered"
-UNKNOWN_TRIGGER = "waiting for an answer"
-#: Where GNOME really keeps the key, named in full because the whole complaint
-#: was "I can't find CTRL+space anywhere in GNOME's keyboard settings".
-GNOME_SHORTCUTS_KEY = GNOME_KEY_TEMPLATE.format(app_id=APP_ID)
-#: Above the trigger fields. One line: the detail is behind the "?" beside it.
-PORTAL_NOTE = ("Hold Dictate to talk. Your desktop owns these keys - Save writes them to "
-               "it and rebinds, so the change takes effect at once.")
-#: Behind the "?" on the Hotkeys tab: the detail a first-time reader needs once.
+#: What the desktop's settings app being open - or refusing to open - reads as.
+SETTINGS_APP_OPENED = f"Your desktop's settings are open: look under {SHORTCUT_SETTINGS_PATH}."
+SETTINGS_APP_MISSING = ("This desktop has no settings app we can start - open "
+                        f"{SHORTCUT_SETTINGS_PATH} yourself.")
+SETTINGS_APP_FAILED = ("Your desktop's settings would not start ({error}) - open "
+                       f"{SHORTCUT_SETTINGS_PATH} yourself.")
+#: How a key that is not set reads, and how one nobody has answered for yet
+#: does. Both are what the row shows instead of a key, so both are sentences a
+#: person can act on rather than a state name.
+NOT_SET = "Not set"
+UNKNOWN_TRIGGER = "Checking with your desktop…"
+#: The button inside "Advanced" that goes to the desktop's own keyboard panel.
+SHORTCUT_SETTINGS_BUTTON = "Open your desktop's keyboard settings"
+#: The collapsed section at the bottom, and the one line above each half of it.
+ADVANCED = "Advanced"
+ADVANCED_DESKTOP_NOTE = "What voice asks your desktop for, the way your desktop writes it."
+ADVANCED_DEVICE_NOTE = {
+    CAPTURE: "The exact key names voice reads. Join two with a plus for a combination.",
+    DESKTOP_STORE: "Keys for the case where voice reads the keyboard itself instead.",
+    DESKTOP_DIALOG: "Keys for the case where voice reads the keyboard itself instead.",
+}
+#: Behind the "?" on the Hotkeys tab: the detail a first-time reader needs once,
+#: per route, in words that name no mechanism and no file.
 HOTKEY_HELP = {
-    "evdev": ("voice reads the key straight from the keyboard device. \"Capture key\" fills "
-              "the field in with the name of the key you press; combinations are typed by "
-              "hand, e.g. KEY_LEFTMETA+KEY_SPACE."),
-    "portal": (
-        "Type a trigger the way your desktop spells it: CTRL+space, F13, CTRL+SHIFT+l. "
-        "A bare modifier on its own will not bind.\n\n"
-        f"GNOME keeps the key in its own store, not in voice's config: dconf, under "
-        f"{GNOME_SHORTCUTS_KEY}. Its Settings app does not show that usefully, which is why "
-        "Save writes it there for you and then rebinds. Beside each field is the key the "
-        "desktop actually holds right now.\n\n"
-        "On KDE the desktop's own dialog owns the key: use \"Open shortcut settings\". "
-        "The evdev key fields below apply again if you switch hotkeys.backend to evdev."),
+    CAPTURE: (
+        "voice watches the keyboard itself, so any key you press can be a shortcut: press "
+        "\"Change…\", then press the key.\n\n"
+        "For two keys at once - say Super and Space - open \"Advanced\" and type both names "
+        "with a plus between them.\n\n"
+        "\"Dictation key\" decides whether you hold that key down while you talk or press it "
+        "once to start and once to stop."),
+    DESKTOP_STORE: (
+        "Your desktop keeps the list of shortcuts, not voice. \"Change…\" asks you for the "
+        "new keys and hands them straight to your desktop, so the new key works at once.\n\n"
+        "Each row shows what your desktop holds right now, which is why a key you set in your "
+        "desktop's own keyboard settings shows up here too.\n\n"
+        "If a new shortcut does nothing, something else on this computer is probably already "
+        "using it - try another combination."),
+    DESKTOP_DIALOG: (
+        "Your desktop keeps the list of shortcuts and only lets you change them in its own "
+        "window, so \"Change…\" opens that window: find voice in the list there and set the "
+        "key.\n\n"
+        "Each row shows what your desktop holds right now, so a key set over there shows up "
+        "here as soon as your desktop says so.\n\n"
+        "If a new shortcut does nothing, something else on this computer is probably already "
+        "using it - try another combination."),
 }
 #: How long after the last drag or nudge the pill is shown on the desktop. Long
 #: enough that a run of arrow keys is one preview, short enough to feel immediate.
@@ -120,32 +200,30 @@ REFUSAL_NOTE_MS = 6000
 #: says something that is not a number. The daemon has its own PREVIEW_SECONDS
 #: and normally tells us; this is only what to do when it has not.
 ASSUMED_PREVIEW_SECONDS = 5.0
-#: The one-liner beside each backend's fields; the rest is behind the "?".
-HOTKEY_HINTS = {
-    "evdev": "Type an evdev key name, or press \"Capture key\".",
-    "portal": "These evdev keys apply only if hotkeys.backend goes back to evdev.",
-}
 #: Behind the other "?" buttons, one paragraph each.
 HELP = {
     "pill_position": PILL_PLACEMENT_NOTE,
     "profile_per_language": (
-        "Switching to one of these languages also activates the profile beside it, so a "
-        "Swedish dictation uses a Swedish model without a second switch. \"(keep current)\" "
-        "leaves the profile alone. Add the profile first on the Transcription tab."),
+        "Switching to one of these languages also switches to the profile beside it, so a "
+        "Swedish dictation uses a Swedish model without a second change. \"(keep current)\" "
+        "leaves the profile alone. Add the profile first, on the Transcription tab."),
     "text_insertion": (
-        "\"Paste automatically\" copies the text and sends the paste chord for you. "
-        "\"Copy only\" leaves it on the clipboard and tells you to press Ctrl+V - which is "
-        "what to use on a desktop that refuses synthetic keystrokes, or where the pill would "
-        "take the keyboard."),
-    "max_seconds": ("A recording stops itself after this many seconds, so a hotkey left held "
-                    "by accident cannot record all afternoon."),
-    "profiles": ("A profile is one transcription backend and its settings - a local model, or "
-                 "a cloud API. \"Use this profile\" makes the selected one active; "
-                 "\"Add from template\" fills in a known service, and you add the API key."),
+        "\"Paste automatically\" copies the text and presses Ctrl+V for you.\n\n"
+        "\"Copy only\" leaves the text on the clipboard and tells you to press Ctrl+V "
+        "yourself. Use that if the text never arrives on its own - some desktops refuse to "
+        "let one program press keys in another."),
+    "max_seconds": ("A recording stops itself after this many seconds, so a key left held "
+                    "down by accident cannot record all afternoon."),
+    "profiles": (
+        "A profile is one way of turning speech into text, with its settings: a model that "
+        "runs on this computer, or an online service you have an account with.\n\n"
+        "\"Use this profile\" makes the selected one the one that transcribes; \"Add from "
+        "template\" fills in a known service for you, and you paste in your API key."),
     "dictionary": (
         "Every replacement is applied to the text before it is inserted, in order: names and "
-        "jargon the model hears wrong, fixed once here. Flags are optional: \"icase\" matches "
-        "any capitalisation, \"regex\" treats the left column as a regular expression."),
+        "words the model hears wrong, fixed once here.\n\n"
+        "The options column can be left empty. Type \"icase\" to match a word however it is "
+        "capitalised, or \"regex\" if you know what a regular expression is and want one."),
 }
 #: The longest run of text allowed to sit on a tab. Anything above this belongs
 #: behind a "?": the window is a form, not a manual.
@@ -207,17 +285,99 @@ def shortcut_settings_command(which: Callable[[str], str | None] | None = None) 
     return None
 
 
-def effective_trigger_text(triggers: dict[str, str] | None, name: str) -> str:
-    """What the desktop holds for `name`, in words.
+def desktop_key_text(triggers: dict[str, str] | None, name: str) -> str:
+    """The key the desktop holds for `name`, the way a person writes it.
 
-    An empty answer is "we have not been told yet", which is not the same as
-    "no key assigned" - the portal has not answered before the first bind.
+    No answer at all is "we have not been told yet", which is not the same as
+    "no key": the desktop has not replied before the first bind, and a row that
+    said "Not set" then would be a row that lies for a second or two.
     """
     if not triggers:
         return UNKNOWN_TRIGGER
-    if name not in triggers:
-        return NOT_REGISTERED
-    return triggers[name] or NO_TRIGGER
+    return pretty_trigger(triggers.get(name, "")) or NOT_SET
+
+
+#: Our trigger syntax, and the keyboard's own key names, as a person writes
+#: them. Nothing here changes what is stored - this is the reading of it.
+_MODIFIER_WORDS = {"CTRL": "Ctrl", "CONTROL": "Ctrl", "SHIFT": "Shift", "ALT": "Alt",
+                   "ALTGR": "Alt Gr", "SUPER": "Super", "META": "Super", "LOGO": "Super"}
+_DEVICE_MODIFIERS = {"LEFTCTRL": "Ctrl", "RIGHTCTRL": "Right Ctrl", "LEFTSHIFT": "Shift",
+                     "RIGHTSHIFT": "Right Shift", "LEFTALT": "Alt", "RIGHTALT": "Alt Gr",
+                     "LEFTMETA": "Super", "RIGHTMETA": "Right Super"}
+_KEY_WORDS = {"SPACE": "Space", "ESC": "Escape", "ESCAPE": "Escape", "RETURN": "Enter",
+              "ENTER": "Enter", "KPENTER": "Enter", "TAB": "Tab", "BACKSPACE": "Backspace",
+              "DELETE": "Delete", "DEL": "Delete", "INSERT": "Insert", "HOME": "Home",
+              "END": "End", "PAGEUP": "Page Up", "PAGE_UP": "Page Up",
+              "PAGEDOWN": "Page Down", "PAGE_DOWN": "Page Down", "UP": "Up", "DOWN": "Down",
+              "LEFT": "Left", "RIGHT": "Right", "CAPSLOCK": "Caps Lock", "MENU": "Menu",
+              "PRINT": "Print Screen", "SYSRQ": "Print Screen", "PAUSE": "Pause",
+              "LEFTBRACE": "[", "RIGHTBRACE": "]", "MINUS": "-", "EQUAL": "=",
+              "SEMICOLON": ";", "APOSTROPHE": "'", "GRAVE": "`", "COMMA": ",", "DOT": ".",
+              "SLASH": "/", "BACKSLASH": "\\"}
+
+
+def _pretty_part(part: str) -> str:
+    """One key or modifier of a combination, as a person writes it."""
+    upper = part.upper()
+    if upper in _MODIFIER_WORDS:
+        return _MODIFIER_WORDS[upper]
+    if upper in _KEY_WORDS:
+        return _KEY_WORDS[upper]
+    if len(part) == 1:
+        return part.upper()
+    if upper.startswith("F") and upper[1:].isdigit():
+        return upper
+    return part[:1].upper() + part[1:].lower()
+
+
+def pretty_trigger(trigger: str) -> str:
+    """A desktop shortcut ("CTRL+space") as a person writes it ("Ctrl+Space")."""
+    parts = [part.strip() for part in (trigger or "").split("+") if part.strip()]
+    return "+".join(_pretty_part(part) for part in parts)
+
+
+def pretty_device_key(text: str) -> str:
+    """A keyboard key name ("KEY_LEFTMETA+KEY_SPACE") the same way ("Super+Space")."""
+    out = []
+    for part in (text or "").split("+"):
+        name = part.strip().upper()
+        if name.startswith(("KEY_", "BTN_")):
+            name = name[4:]
+        if not name:
+            continue
+        out.append(_DEVICE_MODIFIERS.get(name) or _pretty_part(name))
+    return "+".join(out)
+
+
+#: A key press, read as a shortcut. The modifiers in the order our own trigger
+#: syntax writes them, and the keys that are only ever half of a combination.
+_CHORD_MODIFIERS = ((Qt.KeyboardModifier.ControlModifier, "CTRL"),
+                    (Qt.KeyboardModifier.ShiftModifier, "SHIFT"),
+                    (Qt.KeyboardModifier.AltModifier, "ALT"),
+                    (Qt.KeyboardModifier.MetaModifier, "SUPER"))
+_HALF_A_CHORD = {Qt.Key.Key_Control, Qt.Key.Key_Shift, Qt.Key.Key_Alt, Qt.Key.Key_AltGr,
+                 Qt.Key.Key_Meta, Qt.Key.Key_Super_L, Qt.Key.Key_Super_R, Qt.Key.Key_CapsLock,
+                 Qt.Key.Key_NumLock, Qt.Key.Key_ScrollLock, Qt.Key.Key_unknown}
+
+
+def chord_trigger(event) -> str | None:
+    """The shortcut a key press asks for, in the syntax the desktop is given.
+
+    None while the press is only half of one - a modifier held down on its own,
+    which is what every combination starts with - and an empty string for a key
+    no shortcut can be made of, so the caller can say so rather than write
+    something the desktop would refuse.
+    """
+    key = event.key()
+    if key in _HALF_A_CHORD or not key:
+        return None
+    name = QKeySequence(key).toString()
+    if not name or " " in name or "+" in name or len(name) > 20:
+        return ""
+    modifiers = event.modifiers()
+    parts = [word for flag, word in _CHORD_MODIFIERS if modifiers & flag]
+    parts.append(name)
+    return "+".join(parts)
 
 
 def _luminance(colour: QColor) -> float:
@@ -599,6 +759,12 @@ class SettingsDialog(QDialog):
         self._language_changed = False     # True once the user picked a language here
         self._inject_mode_changed = False  # True once the user picked a text insertion mode here
         self._pill_placement_changed = False  # True once the pill was moved here
+        #: Which action's key is being changed right now, and whether this
+        #: window is holding the keyboard to read the next combination.
+        self._changing: str | None = None
+        self._grabbing = False
+        #: What "Change…" does here, decided once: see CAPTURE and friends.
+        self._route = self._change_route()
         self._captured.connect(self._on_captured)
         self._desktop_answered.connect(self._on_desktop_answered)
         #: Every circled "?" in the window, by the control it explains.
@@ -715,6 +881,7 @@ class SettingsDialog(QDialog):
         self._pill_placement_changed = False
         self.preview_timer.stop()          # an abandoned gesture shows nothing
         self._say_about_preview("")
+        self._stop_change("")              # nor does an abandoned key change
         self.profile_form = {}
         self._device_choice = None
         self.error_label.setText("")
@@ -730,7 +897,8 @@ class SettingsDialog(QDialog):
         # toggle hotkey and the tray change it while this dialog sits open.
         self.language_combo.currentIndexChanged.connect(self._on_language_picked)
         self.notifications_combo = QComboBox()
-        self.notifications_combo.addItems(["on", "off"])
+        for label, on in _NOTIFICATION_LABELS:
+            self.notifications_combo.addItem(label, on)
         self.inject_mode_combo = QComboBox()
         for code in INJECT_MODES:
             self.inject_mode_combo.addItem(_INJECT_MODE_LABELS[code], code)
@@ -798,7 +966,7 @@ class SettingsDialog(QDialog):
         dictation = self._form()
         self._row(dictation, "Language", self.language_combo)
         self._row(dictation, "Notifications", self.notifications_combo)
-        self._row(dictation, "Text insertion", self.inject_mode_combo, "text_insertion")
+        self._row(dictation, "Inserting text", self.inject_mode_combo, "text_insertion")
         self._row(dictation, "Profile per language", self.language_profile_table,
                   "profile_per_language")
         layout = QVBoxLayout(w)
@@ -810,67 +978,153 @@ class SettingsDialog(QDialog):
         return w
 
     def _hotkeys_tab(self) -> QWidget:
+        """One list of the four actions, each showing the key in force and a
+        button that changes it - whatever "change it" means on this machine.
+
+        What it used to be: two sets of key fields, only one of them in force
+        and neither saying which; a dim line under every field repeating the
+        field; and a paragraph naming the mechanism, the store and the setting
+        that switches between them. The owner could not find the record button
+        because there was none.
+        """
         w = QWidget()
+        #: The key each action is bound to, as the row shows it, and the one
+        #: button that changes it. On a desktop that owns the keys the labels
+        #: are `portal_effective` as well: what the row shows is then exactly
+        #: what the desktop holds, which is the only truthful thing to show.
+        self.key_labels: dict[str, QLabel] = {}
+        self.change_buttons: dict[str, QPushButton] = {}
+        self.portal_edits: dict[str, QLineEdit] = {}
+        self.portal_effective: dict[str, QLabel] = {}
+        self.shortcuts_button: QPushButton | None = None
+        #: The keyboard's own key names. These exist whatever is in force: they
+        #: are what applies when voice reads the keyboard itself, and on any
+        #: other route they sit in "Advanced", unread and unedited.
         self.hotkey_edit = QLineEdit()
-        self.capture_button = QPushButton("Capture key")
-        self.capture_button.clicked.connect(self._start_capture)
-        row = QHBoxLayout()
-        row.setSpacing(COLUMN_SPACING // 2)
-        row.addWidget(self.hotkey_edit)
-        row.addWidget(self.capture_button)
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["hold", "toggle"])
         self.recall_edit = QLineEdit()
         self.cancel_edit = QLineEdit()
-        self.portal_edits: dict[str, QLineEdit] = {}
-        #: The trigger the desktop holds, shown beside each field it belongs to.
-        self.portal_effective: dict[str, QLabel] = {}
-        self.portal_note: QLabel | None = None
-        self.shortcuts_button: QPushButton | None = None
-        self.shortcut_note: QLabel | None = None
+        self.language_toggle_edit = QLineEdit()
+        self.key_edits = {"dictate": self.hotkey_edit, "cancel": self.cancel_edit,
+                          "language_toggle": self.language_toggle_edit,
+                          "recall": self.recall_edit}
+        self.mode_combo = QComboBox()
+        for label, code in _DICTATE_MODES:
+            self.mode_combo.addItem(label, code)
+
+        header = QHBoxLayout()
+        header.setSpacing(COLUMN_SPACING)
+        self.hotkey_owner_label = _wrapped(WHO_MANAGES[self._route])
+        help_button = HelpButton(HOTKEY_HELP[self._route])
+        self.help_buttons["hotkeys"] = help_button
+        header.addWidget(self.hotkey_owner_label, 1)
+        header.addWidget(help_button, 0, Qt.AlignmentFlag.AlignTop)
+
+        keys = self._form()
+        for name, label in ACTIONS:
+            shown = QLabel(NOT_SET)
+            shown.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            button = QPushButton(CHANGE)
+            button.setAccessibleName(f"Change the key for {label.lower()}")
+            button.clicked.connect(lambda _checked=False, n=name: self._start_change(n))
+            self.key_labels[name] = shown
+            self.change_buttons[name] = button
+            holder = QWidget()
+            row = QHBoxLayout(holder)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(COLUMN_SPACING)
+            row.addWidget(shown, 1)
+            row.addWidget(button, 0)
+            keys.addRow(label, holder)
+        keys.addRow("Dictation key", self.mode_combo)
+        if self._route == CAPTURE:
+            # There is nothing else to capture with: the row's own button is the
+            # capture button, and the evdev fields in Advanced follow it.
+            self.capture_button = self.change_buttons["dictate"]
+        else:
+            # What the row shows *is* what the desktop holds here, so these are
+            # the same labels: one key per action, on screen exactly once.
+            self.portal_effective = self.key_labels
+            self.capture_button = QPushButton(CHANGE)
+            self.capture_button.setVisible(False)   # no keystroke ever reaches us here
+            self.capture_button.clicked.connect(lambda: self._start_capture("dictate"))
+        #: One line under the list: what is happening now, and how it went.
+        self.hotkey_status = _caption()
+
         layout = QVBoxLayout(w)
         layout.setContentsMargins(MARGIN, MARGIN, MARGIN, MARGIN)
         layout.setSpacing(ROW_SPACING)
-        if self._backend == "portal":
-            # The compositor consumes the chord before we see it, so there is
-            # nothing to capture: these fields are the desktop's own keys, and
-            # Save writes them into its store (see _apply_desktop_shortcuts).
-            self.capture_button.setVisible(False)
-            desktop = self._form()
-            self.portal_note = _caption(PORTAL_NOTE)
-            desktop.addRow(self._with_help(self.portal_note, "hotkeys",
-                                           HOTKEY_HELP[self._backend]))
-            for name, label in PORTAL_TRIGGERS:
-                edit = QLineEdit()
-                edit.setPlaceholderText("not bound")
-                effective = _caption()
-                self.portal_edits[name] = edit
-                self.portal_effective[name] = effective
-                pair = QVBoxLayout()          # never `row`: that one holds the dictate key
-                pair.setSpacing(2)
-                pair.addWidget(edit)
-                pair.addWidget(effective)
-                desktop.addRow(label, pair)
-            self.shortcuts_button = QPushButton("Open shortcut settings…")
-            self.shortcuts_button.clicked.connect(self._open_shortcut_settings)
-            self.shortcut_note = _caption()
-            desktop.addRow("", self.shortcuts_button)
-            desktop.addRow("", self.shortcut_note)
-            layout.addWidget(self._group("Desktop shortcuts", desktop))
-        self.hotkey_hint = _caption(HOTKEY_HINTS.get(self._backend, HOTKEY_HINTS["evdev"]))
-        keys = self._form()
-        if self._backend == "portal":
-            keys.addRow(self.hotkey_hint)          # spans: it is about the group
-        else:
-            keys.addRow(self._with_help(self.hotkey_hint, "hotkeys",
-                                        HOTKEY_HELP[self._backend]))
-        keys.addRow("Dictate key", row)
-        keys.addRow("Mode", self.mode_combo)
-        keys.addRow("Recall last", self.recall_edit)
-        keys.addRow("Cancel recording", self.cancel_edit)
-        layout.addWidget(self._group("Keyboard device keys", keys))
+        layout.addLayout(header)
+        layout.addWidget(self._group("Shortcuts", keys))
+        layout.addWidget(self.hotkey_status)
         layout.addStretch()
+        layout.addWidget(self._advanced_keys(), 0)
         return w
+
+    def _advanced_keys(self) -> QWidget:
+        """The raw fields, behind one collapsed "Advanced" line.
+
+        Nobody needs them to work the window - the rows above set every key -
+        but the values are still there for whoever wants to type one, and the
+        desktop's own keyboard panel is one click away for whoever wants that.
+        """
+        holder = QWidget()
+        self.advanced_box = QWidget()
+        self.advanced_box.setVisible(False)              # collapsed until asked for
+        self.advanced_button = QToolButton()
+        self.advanced_button.setText(ADVANCED)
+        self.advanced_button.setCheckable(True)
+        self.advanced_button.setAutoRaise(True)
+        self.advanced_button.setArrowType(Qt.ArrowType.RightArrow)
+        self.advanced_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.advanced_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.advanced_button.toggled.connect(self._show_advanced)
+
+        inside = QVBoxLayout(self.advanced_box)
+        inside.setContentsMargins(0, ROW_SPACING, 0, 0)
+        inside.setSpacing(ROW_SPACING)
+        if self._route != CAPTURE:
+            desktop = self._form()
+            for name, label in ACTIONS:
+                edit = QLineEdit()
+                edit.setPlaceholderText(NOT_SET.lower())
+                self.portal_edits[name] = edit
+                desktop.addRow(label, edit)
+            self.shortcuts_button = QPushButton(SHORTCUT_SETTINGS_BUTTON)
+            self.shortcuts_button.clicked.connect(self._open_shortcut_settings)
+            inside.addWidget(_caption(ADVANCED_DESKTOP_NOTE))
+            inside.addLayout(desktop)
+            inside.addWidget(self.shortcuts_button)
+        device = self._form()
+        for name, label in ACTIONS:
+            edit = self.key_edits[name]
+            edit.textChanged.connect(lambda _text, n=name: self._device_key_changed(n))
+            if name != "dictate" or self._route == CAPTURE:
+                # Where these keys are the ones in force, their own row upstairs
+                # has the button - and a widget has one parent, so putting it
+                # here as well would take it off that row.
+                device.addRow(label, edit)
+                continue
+            pair = QWidget()          # the capture button nothing can capture with
+            row = QHBoxLayout(pair)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(COLUMN_SPACING // 2)
+            row.addWidget(edit, 1)
+            row.addWidget(self.capture_button, 0)
+            device.addRow(label, pair)
+        inside.addWidget(_caption(ADVANCED_DEVICE_NOTE[self._route]))
+        inside.addLayout(device)
+
+        layout = QVBoxLayout(holder)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.advanced_button, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self.advanced_box)
+        return holder
+
+    def _show_advanced(self, open_it: bool) -> None:
+        self.advanced_box.setVisible(open_it)
+        self.advanced_button.setArrowType(Qt.ArrowType.DownArrow if open_it
+                                          else Qt.ArrowType.RightArrow)
 
     def _audio_tab(self) -> QWidget:
         w = QWidget()
@@ -884,7 +1138,7 @@ class SettingsDialog(QDialog):
         self.max_seconds.setFixedWidth(90)
         form = self._form()
         self._row(form, "Microphone", self.device_combo)
-        self._row(form, "Stop after", self.max_seconds, "max_seconds")
+        self._row(form, "Stop recording after", self.max_seconds, "max_seconds")
         layout = QVBoxLayout(w)
         layout.setContentsMargins(MARGIN, MARGIN, MARGIN, MARGIN)
         layout.setSpacing(ROW_SPACING)
@@ -936,7 +1190,7 @@ class SettingsDialog(QDialog):
     def _dictionary_tab(self) -> QWidget:
         w = QWidget()
         self.replacements_table = QTableWidget(0, 3)
-        self.replacements_table.setHorizontalHeaderLabels(["Heard", "Replace with", "Flags"])
+        self.replacements_table.setHorizontalHeaderLabels(["Heard", "Replace with", "Options"])
         self.replacements_table.horizontalHeader().setStretchLastSection(True)
         self.replacements_table.verticalHeader().setVisible(False)
         add = QPushButton("Add row")
@@ -993,13 +1247,15 @@ class SettingsDialog(QDialog):
     def _load(self) -> None:
         c = self._cfg
         self.language_combo.setCurrentIndex(max(0, self.language_combo.findData(c.get("general.language", "en"))))
-        self.notifications_combo.setCurrentText("on" if c.get("general.notifications", True) else "off")
+        self.notifications_combo.setCurrentIndex(
+            max(0, self.notifications_combo.findData(bool(c.get("general.notifications", True)))))
         self.inject_mode_combo.setCurrentIndex(max(0, self.inject_mode_combo.findData(c.get("inject.mode", "paste"))))
         self._show_pill_placement(*c.overlay_placement())
-        self.hotkey_edit.setText(c.get("hotkeys.dictate", ""))
-        self.mode_combo.setCurrentText(c.get("hotkeys.dictate_mode", "hold"))
-        self.recall_edit.setText(c.get("hotkeys.recall", ""))
-        self.cancel_edit.setText(c.get("hotkeys.cancel", ""))
+        for name, edit in self.key_edits.items():
+            edit.setText(c.get(f"hotkeys.{name}", "") or "")
+            self._device_key_changed(name)     # a text that did not change says nothing
+        self.mode_combo.setCurrentIndex(
+            max(0, self.mode_combo.findData(c.get("hotkeys.dictate_mode", "hold"))))
         for name, edit in self.portal_edits.items():
             edit.setText(c.portal_trigger(name))
         self.refresh_effective_triggers()
@@ -1070,7 +1326,7 @@ class SettingsDialog(QDialog):
         self.language_profile_combos = {}
         table.setRowCount(len(codes))
         for row, code in enumerate(codes):
-            item = QTableWidgetItem(code)
+            item = QTableWidgetItem(_LANGUAGE_NAMES.get(code.strip().lower(), code))
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             table.setItem(row, 0, item)
             combo = QComboBox()
@@ -1170,8 +1426,9 @@ class SettingsDialog(QDialog):
             self._form_layout.removeRow(0)
         self.profile_form = {}
         fields = _LOCAL_FIELDS if profile.get("backend") == "local" else _CLOUD_FIELDS
+        kind = str(profile.get("backend", ""))
         self._form_layout.addRow(_FIELD_LABELS["backend"],
-                                 QLabel(str(profile.get("backend", ""))))
+                                 QLabel(_BACKEND_LABELS.get(kind, kind)))
         for field in fields:
             edit = QLineEdit(str(profile.get(field, "")))
             if field == "api_key":
@@ -1191,7 +1448,9 @@ class SettingsDialog(QDialog):
                 except ValueError:
                     value = None
                 if value is None or value < 1:
-                    self.error_label.setText(f"{self._current_profile}.{field} must be a positive integer")
+                    self.error_label.setText(
+                        f"{self._current_profile}: {_FIELD_LABELS['beam_size']} must be a "
+                        "whole number, 1 or more")
                     return False
             values[field] = value
         for field, value in values.items():
@@ -1216,36 +1475,192 @@ class SettingsDialog(QDialog):
             self._active_changed = True
             self.active_label.setText(f"Active profile: {self._current_profile}")
 
+    def _change_route(self) -> str:
+        """What "Change…" has to do on this machine.
+
+        Three mechanisms, one button. Where voice reads the keyboard itself it
+        can simply take the next key. Where the desktop owns the keys but keeps
+        them somewhere we may write, it takes the next combination and hands it
+        over. Where the desktop insists on its own window, that window is what
+        the button opens. The user never has to know which - but the window does,
+        because every sentence on the tab turns on it.
+        """
+        if self._backend != "portal":
+            return CAPTURE
+        try:
+            store = self._shortcut_store()
+        except Exception as exc:                 # a probe is never worth a broken window
+            log.debug("cannot tell how this desktop keeps its shortcuts: %s", exc)
+            return DESKTOP_DIALOG
+        return DESKTOP_STORE if store is not None else DESKTOP_DIALOG
+
     def refresh_effective_triggers(self) -> None:
-        """Show what the desktop holds right now, beside each trigger field.
+        """Show what the desktop holds right now, on the row each key belongs to.
 
         Called on every load, so reopening the window (which re-reads the file,
         and makes the daemon ask the portal again) also re-reads the keys - a
-        label captured when the daemon started is the same lie as a field that
-        cannot move one.
+        row showing what was bound when the daemon started is the same lie as a
+        field that cannot move one.
         """
         if not self.portal_effective:
             return
-        triggers: dict[str, str] = {}
-        if self._triggers is not None:
-            try:
-                triggers = dict(self._triggers() or {})
-            except Exception:
-                triggers = {}          # never let a dead accessor block the window
+        triggers = self._desktop_triggers()
         for name, label in self.portal_effective.items():
-            label.setText(EFFECTIVE_PREFIX + effective_trigger_text(triggers, name))
+            label.setText(desktop_key_text(triggers, name))
+
+    def _desktop_triggers(self) -> dict[str, str]:
+        """What the desktop says it holds, or nothing where nobody can say."""
+        if self._triggers is None:
+            return {}
+        try:
+            return dict(self._triggers() or {})
+        except Exception:
+            return {}                  # never let a dead accessor block the window
+
+    def _device_key_changed(self, name: str) -> None:
+        """An evdev field was typed in or filled from a capture.
+
+        The row above it shows the key in force, so where these fields *are*
+        what is in force it has to follow them; where the desktop owns the keys
+        they are a spare set and the row keeps showing the desktop's answer.
+        """
+        if self._route != CAPTURE:
+            return
+        self.key_labels[name].setText(pretty_device_key(self.key_edits[name].text()) or NOT_SET)
 
     def hotkey_help_text(self) -> str:
-        """The detail behind the Hotkeys tab's "?", for this backend."""
-        return HOTKEY_HELP.get(self._backend, HOTKEY_HELP["evdev"])
+        """The detail behind the Hotkeys tab's "?", for what is in force here."""
+        return HOTKEY_HELP[self._route]
 
-    def _apply_desktop_shortcuts(self) -> bool:
-        """Put the saved triggers into the desktop's own store, and say so.
+    # -- one button per key ----------------------------------------------------
+    def _start_change(self, name: str) -> None:
+        """"Change…" on one row: set that key, however this machine does it."""
+        if self._changing is not None:
+            self._stop_change(CHANGE_STOPPED)    # a second press gives up on the first
+            return
+        if self._route == CAPTURE:
+            self._start_capture(name)
+        elif self._route == DESKTOP_STORE:
+            self._start_chord(name)
+        else:
+            self._begin_change(name)
+            self._open_shortcut_settings()
 
-        Only the portal backend has any: on evdev the key is ours to read from
-        /dev/input and no desktop is involved. A desktop that keeps its
-        shortcuts somewhere we must not touch answers None and is left alone -
-        the trigger is still saved, and KDE's own dialog applies it.
+    def _begin_change(self, name: str) -> None:
+        """Say, on the row and under the list, that this key is being changed."""
+        self._changing = name
+        self.change_buttons[name].setText(CHANGE_BUSY[self._route])
+        self._say_about_hotkeys(CHANGE_PROMPT[self._route])
+
+    def _stop_change(self, note: str) -> None:
+        """Put the button back and say how it went, in one line or none."""
+        name, self._changing = self._changing, None
+        self._release_keyboard()
+        if name is not None and name in self.change_buttons:
+            self.change_buttons[name].setText(CHANGE)
+        self._say_about_hotkeys(note)
+
+    def _say_about_hotkeys(self, note: str) -> None:
+        self.hotkey_status.setText(note)
+
+    def _start_capture(self, name: str = "dictate") -> None:
+        """Take the next key straight from the keyboard, for `name`."""
+        self._begin_change(name)
+        self._capture_key(self._captured.emit)
+
+    def _on_captured(self, key: str) -> None:
+        """A key name from the listener - or a sentence, where it cannot say one."""
+        name = self._changing if self._changing in self.key_edits else "dictate"
+        if key.startswith(("KEY_", "BTN_")):
+            self.key_edits[name].setText(key)    # the row follows the field
+            self._stop_change("")
+            return
+        # The portal backend cannot hand back a key name - the compositor keeps
+        # the keystroke - so it answers with a sentence for the user instead.
+        self.error_label.setText(key)
+        self._stop_change("")
+
+    # -- the next combination, read here and handed to the desktop -------------
+    def _start_chord(self, name: str) -> None:
+        """Hold the keyboard until the user presses the combination they want.
+
+        The desktop owns the key, so there is nothing to capture from the
+        keyboard device - but this window is an ordinary window, and an ordinary
+        window is told about a combination the desktop has not already taken.
+        That is enough to ask for a new one.
+        """
+        self._begin_change(name)
+        app = QApplication.instance()
+        if app is None:                          # nothing to read keys from
+            self._stop_change(CHANGE_STOPPED)
+            return
+        self._grabbing = True
+        app.installEventFilter(self)
+
+    def _release_keyboard(self) -> None:
+        if not self._grabbing:
+            return
+        self._grabbing = False
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+
+    def eventFilter(self, watched, event) -> bool:
+        """Every key press in the application, while a combination is wanted.
+
+        Swallowed rather than passed on: the window is full of fields, and a
+        chord typed at one of them must not also land in it.
+        """
+        if not self._grabbing:
+            return super().eventFilter(watched, event)
+        kind = event.type()
+        if kind in (QEvent.Type.KeyRelease, QEvent.Type.ShortcutOverride):
+            return True
+        if kind != QEvent.Type.KeyPress:
+            return super().eventFilter(watched, event)
+        if event.key() == Qt.Key.Key_Escape:
+            self._stop_change(CHANGE_STOPPED)
+            return True
+        trigger = chord_trigger(event)
+        if trigger is None:                      # a modifier on its own: keep waiting
+            return True
+        name = self._changing
+        if not trigger or name is None:
+            self._stop_change(CHANGE_UNUSABLE)
+            return True
+        self._stop_change("")
+        self._give_the_desktop(name, trigger)
+        return True
+
+    def _give_the_desktop(self, name: str, trigger: str) -> None:
+        """Hand one new combination to the desktop, and say how that went.
+
+        The row shows what the desktop holds, so it may only move once the
+        desktop has taken the key: a refusal leaves the row on the truth and
+        puts the reason where the user is already looking.
+        """
+        self.portal_edits[name].setText(trigger)
+        known = self._desktop_triggers()
+        if known and name not in known:
+            # The desktop has never been told this shortcut exists, so its store
+            # has nothing to change and would skip it in silence. The field now
+            # holds the key, and saving is what makes the desktop ask for it.
+            self._say_about_hotkeys(NOT_OFFERED)
+            return
+        if not self._apply_desktop_shortcuts(CHANGED_ON_DESKTOP.format(
+                key=pretty_trigger(trigger), what=ACTION_LABELS[name].lower())):
+            self.refresh_effective_triggers()
+            return
+        self.key_labels[name].setText(pretty_trigger(trigger))
+        self.shortcuts_rebound.emit()
+
+    def _apply_desktop_shortcuts(self, note: str = SAVED_TO_DESKTOP) -> bool:
+        """Put the triggers into the desktop's own store, and say so.
+
+        Only a desktop that owns the keys has any: where voice reads the
+        keyboard the key is ours and no desktop is involved. A desktop that
+        keeps its shortcuts somewhere we must not touch answers None and is left
+        alone - the trigger is still saved, and its own dialog applies it.
 
         Returns whether the listener now needs to bind again.
         """
@@ -1270,56 +1685,47 @@ class SettingsDialog(QDialog):
             log.exception("writing the desktop's shortcut store failed")
             self.error_label.setText(f"Could not change this desktop's shortcuts: {exc}")
             return False
-        if self.shortcut_note is not None:
-            self.shortcut_note.setText(message)
+        log.info("the desktop's shortcut store: %s", message)
+        self._say_about_hotkeys(note)
         return True
 
     def _open_shortcut_settings(self) -> None:
         """Take the user to wherever this desktop really keeps the key.
 
-        Portal version 2 (KDE) has a reconfigure dialog and the listener opens
-        it; that is the same call as "Capture key", and it answers with a
-        sentence either way. Anything else - GNOME, an older portal, a bind that
-        never succeeded - falls through to the desktop's settings app.
+        Some desktops have a window of their own for exactly this and the
+        listener opens it; that is the same call as a capture, and it answers
+        with a sentence either way. Anywhere else - a desktop with no such
+        window, or a shortcut that was never registered - falls through to the
+        desktop's settings app.
         """
         try:
             self._capture_key(self._desktop_answered.emit)
         except Exception as exc:
-            log.debug("the portal could not open its shortcut dialog: %s", exc)
+            log.debug("the desktop would not open its shortcut window: %s", exc)
             self._launch_shortcut_settings()
 
     def _on_desktop_answered(self, message: str) -> None:
-        if message == DIALOG_MESSAGE:               # the desktop's own dialog is up
-            self.shortcut_note.setText(message)
+        if message == DIALOG_MESSAGE:               # the desktop's own window is up
+            self._stop_change(DESKTOP_DIALOG_OPEN)
             return
         self._launch_shortcut_settings()
 
     def _launch_shortcut_settings(self) -> None:
         command = shortcut_settings_command()
         if command is None:
-            self.shortcut_note.setText(
-                f"No desktop settings app found here - open {SHORTCUT_SETTINGS_PATH} yourself.")
+            self._stop_change(SETTINGS_APP_MISSING)
             return
         try:
             _spawn(command)
         except Exception as exc:
-            self.shortcut_note.setText(
-                f"Could not start {command[0]}: {exc}. Open {SHORTCUT_SETTINGS_PATH} yourself.")
+            self._stop_change(SETTINGS_APP_FAILED.format(error=exc))
             return
-        self.shortcut_note.setText(f"Opened {command[0]}: {SHORTCUT_SETTINGS_PATH}.")
+        self._stop_change(SETTINGS_APP_OPENED)
 
-    def _start_capture(self) -> None:
-        self.capture_button.setText("Press a key…")
-        self._capture_key(self._captured.emit)
-
-    def _on_captured(self, name: str) -> None:
-        # The portal backend cannot hand back a key name - the compositor keeps
-        # the keystroke - so it answers with a sentence for the user instead.
-        if name.startswith(("KEY_", "BTN_")):
-            self.hotkey_edit.setText(name)
-        else:
-            self.error_label.setText(name)
-        self.capture_button.setText("Capture key")
+    def closeEvent(self, event) -> None:
+        """Never leave this window reading the keyboard after it is gone."""
+        self._stop_change("")
+        super().closeEvent(event)
 
     def _carry_over_external_edits(self) -> bool:
         """Keep settings switched from the tray, a hotkey or the CLI since this
@@ -1461,19 +1867,26 @@ class SettingsDialog(QDialog):
 
     def _save(self) -> None:
         c = self._cfg
-        for field, edit in (("hotkeys.dictate", self.hotkey_edit), ("hotkeys.recall", self.recall_edit), ("hotkeys.cancel", self.cancel_edit)):
+        for name, edit in self.key_edits.items():
             try:
                 parse_keyspec(edit.text())
             except ValueError as exc:
-                self.error_label.setText(f"{field}: {exc}")
+                # Named for what the key does: "hotkeys.recall" is a line in a
+                # file the user is not reading, and this is the one message
+                # that has to tell them which row to go and fix.
+                self.error_label.setText(f"{ACTION_LABELS[name]}: {exc}")
                 return
-            c.set(field, edit.text().strip())
+            c.set(f"hotkeys.{name}", edit.text().strip())
+        if self.portal_edits and not self.portal_edits["dictate"].text().strip():
+            # Config.errors() refuses this too, in words about a setting name.
+            self.error_label.setText(f"{ACTION_LABELS['dictate']} needs a shortcut.")
+            return
         for name, edit in self.portal_edits.items():
             c.set(f"hotkeys.portal_{name}", edit.text().strip())
         c.set("general.language", self.language_combo.currentData())
-        c.set("general.notifications", self.notifications_combo.currentText() == "on")
+        c.set("general.notifications", bool(self.notifications_combo.currentData()))
         c.set("inject.mode", self.inject_mode_combo.currentData())
-        c.set("hotkeys.dictate_mode", self.mode_combo.currentText())
+        c.set("hotkeys.dictate_mode", self.mode_combo.currentData())
         c.set("audio.device", self.device_combo.currentData() or "")
         c.set("audio.max_seconds", self.max_seconds.value())
         position, margin_x, margin_y = self._chosen_pill_placement()

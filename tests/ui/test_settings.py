@@ -3,9 +3,13 @@ import pytest
 from voice.audio.capture import Source
 from voice.config import Config
 from voice.hotkey.desktop_shortcuts import ShortcutStoreError
-from voice.hotkey.portal_listener import DIALOG_MESSAGE, NO_CAPTURE_MESSAGE, NO_TRIGGER
-from voice.ui.settings import (NOT_REGISTERED, PROFILE_TEMPLATES, SHORTCUT_SETTINGS_PATH,
-                               UNKNOWN_TRIGGER, SettingsDialog)
+from voice.hotkey.portal_listener import DIALOG_MESSAGE, NO_CAPTURE_MESSAGE
+from voice.ui.settings import (ACTION_LABELS, ACTIONS, CHANGE, CHANGE_STOPPED,
+                               CHANGED_ON_DESKTOP, DESKTOP_DIALOG_OPEN, NOT_OFFERED,
+                               NOT_SET, PROFILE_TEMPLATES, SAVED_TO_DESKTOP,
+                               SETTINGS_APP_MISSING, SETTINGS_APP_OPENED,
+                               SHORTCUT_SETTINGS_PATH, UNKNOWN_TRIGGER, WHO_MANAGES,
+                               SettingsDialog)
 
 
 def make(qapp):
@@ -19,7 +23,7 @@ def make(qapp):
 def test_loads_values_from_config(qapp):
     cfg, dlg, _ = make(qapp)
     assert dlg.hotkey_edit.text() == "KEY_F13"
-    assert dlg.mode_combo.currentText() == "hold"
+    assert dlg.mode_combo.currentData() == "hold"
     assert dlg.language_combo.currentData() == "en"
     assert dlg.device_combo.itemText(1) == "OBSBOT Tiny 3 (default)"
     assert [dlg.profile_list.item(i).text() for i in range(dlg.profile_list.count())] == ["local", "openai", "groq", "openrouter"]
@@ -30,7 +34,7 @@ def test_edit_and_save_writes_config_and_emits(qapp):
     fired = []
     dlg.saved.connect(lambda: fired.append(True))
     dlg.hotkey_edit.setText("KEY_RIGHTCTRL")
-    dlg.mode_combo.setCurrentText("toggle")
+    dlg.mode_combo.setCurrentIndex(dlg.mode_combo.findData("toggle"))
     dlg.device_combo.setCurrentIndex(1)
     dlg.profile_list.setCurrentRow(1)                       # openai
     dlg.profile_form["api_key"].setText("sk-abc")
@@ -69,7 +73,7 @@ def test_invalid_beam_size_blocks_save(qapp):
     dlg.saved.connect(lambda: fired.append(True))
     dlg.profile_form["beam_size"].setText("abc")
     dlg.save_button.click()
-    assert "beam_size" in dlg.error_label.text()
+    assert "Search width" in dlg.error_label.text()
     assert fired == []
     assert Config.load().get("stt.profiles.local.beam_size") == 5
 
@@ -93,7 +97,7 @@ def test_close_discards_edits_and_never_touches_the_callers_config(qapp):
     # live Config keeps serving the settings that are actually in force.
     cfg, dlg, _ = make(qapp)
     dlg.hotkey_edit.setText("KEY_RIGHTCTRL")
-    dlg.mode_combo.setCurrentText("toggle")
+    dlg.mode_combo.setCurrentIndex(dlg.mode_combo.findData("toggle"))
     dlg.close()
     assert cfg.get("hotkeys.dictate") == "KEY_F13"
     assert cfg.get("hotkeys.dictate_mode") == "hold"
@@ -178,10 +182,12 @@ def test_portal_backend_explains_where_shortcuts_are_chosen(qapp):
     cfg = Config.load()
     dlg = SettingsDialog(cfg, capture_key=lambda cb: None,
                          sources=lambda: [Source("alsa_input.obsbot", "OBSBOT Tiny 3", True)],
-                         backend="portal")
-    assert "desktop" in (dlg.portal_note.text() + dlg.hotkey_help_text()).lower()
+                         backend="portal", shortcut_store=lambda: None)
+    assert "your desktop" in (dlg.hotkey_owner_label.text()
+                              + dlg.hotkey_help_text()).lower()
     plain = SettingsDialog(cfg, capture_key=lambda cb: None, sources=lambda: [])
-    assert "evdev" in (plain.hotkey_hint.text() + plain.hotkey_help_text()).lower()
+    assert "your keyboard" in (plain.hotkey_owner_label.text()
+                               + plain.hotkey_help_text()).lower()
 
 
 def test_a_captured_message_is_shown_instead_of_being_typed_into_the_field(qapp):
@@ -192,7 +198,7 @@ def test_a_captured_message_is_shown_instead_of_being_typed_into_the_field(qapp)
     qapp.processEvents()
     assert dlg.hotkey_edit.text() == "KEY_F13"               # untouched
     assert "portal" in dlg.error_label.text()
-    assert dlg.capture_button.text() == "Capture key"
+    assert dlg.capture_button.text() == CHANGE
 
 
 def test_save_does_not_revert_a_language_switched_elsewhere(qapp):
@@ -257,7 +263,7 @@ def test_the_portal_backend_edits_its_triggers_instead_of_capturing_keys(qapp):
     assert dlg.portal_edits["dictate"].text() == "CTRL+space"
     assert dlg.capture_button.isHidden() is True
     assert dlg.error_label.text() == ""                 # the explanation is a note,
-    assert "desktop" in dlg.portal_note.text()          # not an error
+    assert "desktop" in dlg.hotkey_owner_label.text()   # not an error
 
 
 def test_the_evdev_backend_still_captures_keys(qapp):
@@ -281,8 +287,9 @@ def test_an_empty_portal_dictate_trigger_is_refused(qapp):
     cfg, dlg = portal_dialog(qapp)
     dlg.portal_edits["dictate"].setText("   ")
     dlg.save_button.click()
-    assert "portal_dictate" in dlg.error_label.text()
+    assert dlg.error_label.text().startswith(ACTION_LABELS["dictate"])
     assert Config.load().get("hotkeys.portal_dictate") == "CTRL+space"
+    assert "hotkeys" not in dlg.error_label.text()
 
 
 # -- the desktop's key, beside the field that can only ask for one -------------
@@ -291,9 +298,9 @@ def test_the_portal_tab_shows_the_key_the_desktop_actually_holds(qapp):
     a tab that shows only them is a tab that lies about what is bound."""
     cfg, dlg = portal_dialog(qapp, triggers=lambda: {"dictate": "F13", "recall": ""})
     assert set(dlg.portal_effective) == set(dlg.portal_edits)
-    assert "F13" in dlg.portal_effective["dictate"].text()
-    assert NO_TRIGGER in dlg.portal_effective["recall"].text()      # registered, no key
-    assert NOT_REGISTERED in dlg.portal_effective["cancel"].text()  # never bound at all
+    assert dlg.portal_effective["dictate"].text() == "F13"
+    assert dlg.portal_effective["recall"].text() == NOT_SET     # registered, no key
+    assert dlg.portal_effective["cancel"].text() == NOT_SET     # never bound at all
 
 
 def test_the_effective_trigger_is_unknown_before_the_desktop_answers(qapp):
@@ -308,7 +315,7 @@ def test_the_effective_triggers_are_re_read_when_the_window_is_reopened(qapp):
     must land on the second one."""
     held = {"dictate": ""}
     cfg, dlg = portal_dialog(qapp, triggers=lambda: dict(held))
-    assert NO_TRIGGER in dlg.portal_effective["dictate"].text()
+    assert dlg.portal_effective["dictate"].text() == NOT_SET
     held["dictate"] = "F13"
     dlg.refresh_effective_triggers()
     assert "F13" in dlg.portal_effective["dictate"].text()
@@ -318,9 +325,9 @@ def test_the_portal_fields_say_who_owns_the_key_and_what_save_does(qapp):
     """They used to say "first-run preference, editing here changes nothing",
     which was true and useless; Save now writes the desktop's own store."""
     cfg, dlg = portal_dialog(qapp, triggers=lambda: {"dictate": "F13"})
-    note = dlg.portal_note.text().lower()
-    assert "desktop" in note and "save" in note
-    assert "gnome" in dlg.hotkey_help_text().lower()   # where the key really lives
+    note = dlg.hotkey_owner_label.text().lower()
+    assert "your desktop" in note and "change" in note
+    assert "change" in dlg.hotkey_help_text().lower()
 
 
 def test_the_shortcut_settings_button_opens_the_desktops_own_dialog(qapp, monkeypatch):
@@ -332,7 +339,8 @@ def test_the_shortcut_settings_button_opens_the_desktops_own_dialog(qapp, monkey
                              capture=lambda cb: cb(DIALOG_MESSAGE))
     dlg.shortcuts_button.click()
     qapp.processEvents()
-    assert DIALOG_MESSAGE in dlg.shortcut_note.text()
+    assert dlg.hotkey_status.text() == DESKTOP_DIALOG_OPEN
+    assert DIALOG_MESSAGE not in dlg.hotkey_status.text()    # written for whoever wrote it
     assert spawned == []                              # nothing else was needed
 
 
@@ -348,7 +356,7 @@ def test_the_shortcut_settings_button_falls_back_to_the_desktops_settings_app(qa
     dlg.shortcuts_button.click()
     qapp.processEvents()
     assert spawned == [["gnome-control-center", "keyboard"]]
-    assert "gnome-control-center" in dlg.shortcut_note.text()
+    assert dlg.hotkey_status.text() == SETTINGS_APP_OPENED
 
 
 def test_the_shortcut_settings_button_finds_the_kde_panel_too(qapp, monkeypatch):
@@ -369,7 +377,8 @@ def test_with_no_settings_app_installed_the_button_says_where_to_click(qapp, mon
     cfg, dlg = portal_dialog(qapp, capture=lambda cb: cb(NO_CAPTURE_MESSAGE))
     dlg.shortcuts_button.click()
     qapp.processEvents()
-    assert SHORTCUT_SETTINGS_PATH in dlg.shortcut_note.text()
+    assert dlg.hotkey_status.text() == SETTINGS_APP_MISSING
+    assert SHORTCUT_SETTINGS_PATH in dlg.hotkey_status.text()
 
 
 def test_a_settings_app_that_will_not_start_says_so_instead_of_vanishing(qapp, monkeypatch):
@@ -381,8 +390,8 @@ def test_a_settings_app_that_will_not_start_says_so_instead_of_vanishing(qapp, m
     cfg, dlg = portal_dialog(qapp, capture=lambda cb: cb(NO_CAPTURE_MESSAGE))
     dlg.shortcuts_button.click()
     qapp.processEvents()
-    assert "no such file" in dlg.shortcut_note.text()
-    assert SHORTCUT_SETTINGS_PATH in dlg.shortcut_note.text()
+    assert "no such file" in dlg.hotkey_status.text()
+    assert SHORTCUT_SETTINGS_PATH in dlg.hotkey_status.text()
 
 
 def test_the_portal_tab_still_shows_the_evdev_key_fields(qapp):
@@ -401,8 +410,8 @@ def test_the_evdev_tab_keeps_its_capture_button_and_gains_nothing(qapp):
     cfg, dlg, _ = make(qapp)
     assert dlg.portal_effective == {}
     assert dlg.shortcuts_button is None
-    assert dlg.portal_note is None
     assert dlg.capture_button.isHidden() is False
+    assert dlg.capture_button is dlg.change_buttons["dictate"]
 
 
 # -- a profile per language -----------------------------------------------------
@@ -417,7 +426,8 @@ def _with_map(mapping: dict, **settings) -> None:
 def test_the_general_tab_lists_one_profile_row_per_language(qapp):
     cfg, dlg, _ = make(qapp)
     table = dlg.language_profile_table
-    assert [table.item(r, 0).text() for r in range(table.rowCount())] == ["en", "sv"]
+    # Named, not coded: "en" is a thing a config file says, not a language.
+    assert [table.item(r, 0).text() for r in range(table.rowCount())] == ["English", "Swedish"]
     combo = dlg.language_profile_combos["sv"]
     assert [combo.itemText(i) for i in range(combo.count())] == [
         "(keep current)", "local", "openai", "groq", "openrouter"]
@@ -867,7 +877,9 @@ def test_saving_a_trigger_writes_it_to_the_desktops_own_store(qapp):
                              "language_toggle": ""}]
     assert Config.load().get("hotkeys.portal_dictate") == "CTRL+ALT+d"
     assert dlg.error_label.text() == ""                  # success is not an error
-    assert "GNOME" in dlg.shortcut_note.text()
+    # The store's own sentence names its ids and its spelling of the key; the
+    # window says the same thing in words, and logs that one.
+    assert dlg.hotkey_status.text() == SAVED_TO_DESKTOP
 
 
 def test_a_successful_write_asks_for_a_rebind(qapp):
@@ -921,7 +933,7 @@ def test_a_save_that_is_refused_never_reaches_the_desktop(qapp):
     dlg.portal_edits["dictate"].setText("   ")           # errors() refuses an empty one
     dlg.save_button.click()
     assert store.writes == []
-    assert "portal_dictate" in dlg.error_label.text()
+    assert dlg.error_label.text().startswith(ACTION_LABELS["dictate"])
 
 
 def test_a_store_that_blows_up_is_reported_rather_than_crashing_the_window(qapp):
@@ -937,15 +949,15 @@ def test_a_store_that_blows_up_is_reported_rather_than_crashing_the_window(qapp)
     assert "dconf went away" in dlg.error_label.text()
 
 
-def test_the_hotkeys_tab_says_what_the_key_does_and_where_it_lives(qapp):
-    """The owner could not find CTRL+space in GNOME's settings; the tab has to
-    say what the key is for, where the desktop keeps it, and how to type one."""
+def test_the_hotkeys_tab_says_what_the_key_does_and_who_owns_it(qapp):
+    """The owner: "the text in yellow especially for KDE means what??". The tab
+    says who manages the keys and what the button will do - in that order, in
+    words, with no mechanism named anywhere."""
     cfg, dlg = portal_dialog_with_store(qapp, FakeStore())
-    words = (dlg.portal_note.text() + " " + dlg.hotkey_help_text()).lower()
-    assert "dictate" in words or "dictation" in words     # what it does
-    assert "global-shortcuts" in words                    # where it is stored
-    assert "ctrl+space" in words                          # what to press
-    assert "save" in words                                # and that saving applies it
+    words = (dlg.hotkey_owner_label.text() + " " + dlg.hotkey_help_text()).lower()
+    assert "your desktop" in words                         # who owns the key
+    assert "change" in words                               # and what the button does
+    assert ACTION_LABELS["dictate"] in [label for _name, label in ACTIONS]
 
 
 # -- and whether this desktop will honour it at all -----------------------------
@@ -1110,7 +1122,9 @@ def test_every_control_survived_the_polish(qapp, backend):
     for name in ("language_combo", "notifications_combo", "inject_mode_combo", "pill_placer",
                  "pill_placement_label", "placement_warning", "preview_note",
                  "language_profile_table", "hotkey_edit", "capture_button", "mode_combo",
-                 "recall_edit", "cancel_edit", "hotkey_hint", "device_combo", "max_seconds",
+                 "recall_edit", "cancel_edit", "language_toggle_edit", "hotkey_owner_label",
+                 "hotkey_status", "advanced_button", "advanced_box",
+                 "device_combo", "max_seconds",
                  "profile_list", "add_profile_combo", "add_profile_button", "activate_button",
                  "active_label", "replacements_table", "error_label", "save_button"):
         widget = getattr(dlg, name)
@@ -1512,3 +1526,356 @@ def test_every_dim_thing_on_every_tab_is_legible_in_every_theme(qapp, themed, th
                 failures.append(f"{ratio:.2f}:1  {where}")
     assert tabs.count() == 5 and worst[1], "no dim text was measured at all"
     assert failures == [], f"worst {worst[0]:.2f}:1 at {worst[1]}\n" + "\n".join(failures)
+
+
+# -- one list, one button per key ------------------------------------------------
+def _press(qapp, widget, key, modifiers=None):
+    """One key press, delivered the way a desktop would deliver it."""
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+
+    modifiers = Qt.KeyboardModifier.NoModifier if modifiers is None else modifiers
+    qapp.sendEvent(widget, QKeyEvent(QEvent.Type.KeyPress, key, modifiers))
+    qapp.processEvents()
+
+
+def _visible_words(dlg):
+    """Every word this window puts on screen, with the widget it belongs to.
+
+    Labels, buttons, group titles, combo entries, table headers and the grey
+    text inside an empty field - everything a person reads, whether or not the
+    tab it sits on is the one in front.
+    """
+    from PySide6.QtWidgets import (QAbstractButton, QComboBox, QGroupBox, QLabel, QLineEdit,
+                                   QTableWidget, QTabWidget)
+
+    found = []
+    for widget in dlg.findChildren(QLabel):
+        found.append((widget, widget.text()))
+    for widget in dlg.findChildren(QAbstractButton):
+        found.append((widget, widget.text()))
+    for widget in dlg.findChildren(QGroupBox):
+        found.append((widget, widget.title()))
+    for widget in dlg.findChildren(QComboBox):
+        found += [(widget, widget.itemText(i)) for i in range(widget.count())]
+    for widget in dlg.findChildren(QLineEdit):
+        found.append((widget, widget.placeholderText()))
+    for widget in dlg.findChildren(QTabWidget):
+        found += [(widget, widget.tabText(i)) for i in range(widget.count())]
+    for widget in dlg.findChildren(QTableWidget):
+        for col in range(widget.columnCount()):
+            item = widget.horizontalHeaderItem(col)
+            found.append((widget, item.text() if item else ""))
+    return [(widget, text) for widget, text in found if text.strip()]
+
+
+def _hotkeys_dialog(qapp, route, triggers=None, capture=lambda cb: None, store=None):
+    """A window on each of the three machines this tab has to work on."""
+    cfg = Config.load()
+    backend = "evdev" if route == "capture" else "portal"
+    return cfg, SettingsDialog(cfg, capture_key=capture, sources=lambda: [],
+                               backend=backend, triggers=triggers,
+                               shortcut_store=lambda: store)
+
+
+@pytest.mark.parametrize("route", ["capture", "desktop-store", "desktop-dialog"])
+def test_every_action_has_one_row_with_its_key_and_one_button(qapp, route):
+    """The owner: "I don't see a record button". One list of what the keys do,
+    each row with the key on it and one button that changes it."""
+    store = FakeStore() if route == "desktop-store" else None
+    cfg, dlg = _hotkeys_dialog(qapp, route, triggers=lambda: {"dictate": "CTRL+space"},
+                               store=store)
+    assert [name for name, _label in ACTIONS] == ["dictate", "cancel", "language_toggle",
+                                                  "recall"]
+    assert set(dlg.key_labels) == set(dlg.change_buttons) == set(ACTION_LABELS)
+    from PySide6.QtWidgets import QTabWidget
+
+    dlg.show()
+    dlg.findChildren(QTabWidget)[0].setCurrentIndex(1)
+    qapp.processEvents()
+    for name in ACTION_LABELS:
+        assert dlg.change_buttons[name].text() == CHANGE
+        # On the tab, not merely built: the dictate row lost its button to the
+        # Advanced section once, because a widget has only one parent.
+        assert dlg.change_buttons[name].isVisible(), name
+        assert dlg.key_labels[name].isVisible() and dlg.key_labels[name].text()
+    shown = dlg.key_labels["dictate"].text()
+    assert shown == ("F13" if route == "capture" else "Ctrl+Space")
+    dlg.close()
+
+
+def test_the_row_shows_the_key_the_way_a_person_writes_it(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.hotkey_edit.setText("KEY_LEFTMETA+KEY_SPACE")
+    assert dlg.key_labels["dictate"].text() == "Super+Space"
+    dlg.cancel_edit.setText("KEY_ESC")
+    assert dlg.key_labels["cancel"].text() == "Escape"
+    dlg.recall_edit.setText("")
+    assert dlg.key_labels["recall"].text() == NOT_SET
+
+
+@pytest.mark.parametrize("route", ["capture", "desktop-store", "desktop-dialog"])
+def test_the_top_sentence_says_who_manages_the_keys(qapp, route):
+    """One line, in plain words, so a user on any desktop knows who to argue
+    with - and no second set of fields to wonder about."""
+    store = FakeStore() if route == "desktop-store" else None
+    cfg, dlg = _hotkeys_dialog(qapp, route, store=store)
+    assert dlg.hotkey_owner_label.text() == WHO_MANAGES[route]
+    if route == "capture":
+        assert "your keyboard" in dlg.hotkey_owner_label.text().lower()
+    else:
+        assert "your desktop" in dlg.hotkey_owner_label.text().lower()
+
+
+def test_change_takes_the_next_key_where_voice_reads_the_keyboard(qapp):
+    captures = []
+    cfg, dlg = _hotkeys_dialog(qapp, "capture", capture=captures.append)
+    dlg.change_buttons["cancel"].click()
+    assert dlg.change_buttons["cancel"].text() == "Press a key…"
+    assert "press the key" in dlg.hotkey_status.text().lower()
+    captures[0]("KEY_F14")                       # the listener thread answers
+    qapp.processEvents()
+    assert dlg.cancel_edit.text() == "KEY_F14"
+    assert dlg.key_labels["cancel"].text() == "F14"
+    assert dlg.change_buttons["cancel"].text() == CHANGE
+    dlg.save_button.click()
+    assert Config.load().get("hotkeys.cancel") == "KEY_F14"
+
+
+def test_change_hands_the_new_combination_to_the_desktop(qapp):
+    """Where the desktop owns the keys but keeps them somewhere we may write,
+    the button reads the combination here and gives it to the desktop at once."""
+    from PySide6.QtCore import Qt
+
+    store = FakeStore()
+    rebound = []
+    cfg, dlg = _hotkeys_dialog(qapp, "desktop-store", triggers=lambda: {"dictate": "CTRL+space"},
+                               store=store)
+    dlg.shortcuts_rebound.connect(lambda: rebound.append(True))
+    dlg.change_buttons["dictate"].click()
+    assert dlg.change_buttons["dictate"].text() == "Press the keys…"
+    assert "press the keys" in dlg.hotkey_status.text().lower()
+    _press(qapp, dlg, Qt.Key.Key_Control, Qt.KeyboardModifier.ControlModifier)   # half of one
+    assert dlg.change_buttons["dictate"].text() == "Press the keys…"
+    _press(qapp, dlg, Qt.Key.Key_D,
+           Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)
+    assert store.writes == [{"dictate": "CTRL+ALT+D", "cancel": "", "language_toggle": "",
+                             "recall": ""}]
+    assert rebound == [True]
+    assert dlg.key_labels["dictate"].text() == "Ctrl+Alt+D"
+    assert dlg.hotkey_status.text() == CHANGED_ON_DESKTOP.format(
+        key="Ctrl+Alt+D", what=ACTION_LABELS["dictate"].lower())
+    assert dlg.change_buttons["dictate"].text() == CHANGE
+    dlg.save_button.click()
+    assert Config.load().get("hotkeys.portal_dictate") == "CTRL+ALT+D"
+
+
+def test_escape_leaves_the_key_as_it_was(qapp):
+    from PySide6.QtCore import Qt
+
+    store = FakeStore()
+    cfg, dlg = _hotkeys_dialog(qapp, "desktop-store", triggers=lambda: {"dictate": "CTRL+space"},
+                               store=store)
+    dlg.change_buttons["dictate"].click()
+    _press(qapp, dlg, Qt.Key.Key_Escape)
+    assert store.writes == []
+    assert dlg.key_labels["dictate"].text() == "Ctrl+Space"
+    assert dlg.change_buttons["dictate"].text() == CHANGE
+    assert dlg.hotkey_status.text() == CHANGE_STOPPED
+    _press(qapp, dlg, Qt.Key.Key_D, Qt.KeyboardModifier.ControlModifier)   # no longer listening
+    assert store.writes == []
+
+
+def test_a_desktop_that_refuses_the_key_leaves_the_row_on_the_truth(qapp):
+    """The row is what the desktop holds; a write that failed did not move it."""
+    from PySide6.QtCore import Qt
+
+    store = FakeStore(fail="that shortcut is not stored yet")
+    cfg, dlg = _hotkeys_dialog(qapp, "desktop-store", triggers=lambda: {"dictate": "CTRL+space"},
+                               store=store)
+    dlg.change_buttons["dictate"].click()
+    _press(qapp, dlg, Qt.Key.Key_D, Qt.KeyboardModifier.ControlModifier)
+    assert "not stored yet" in dlg.error_label.text()
+    assert dlg.key_labels["dictate"].text() == "Ctrl+Space"
+
+
+def test_change_opens_the_desktops_own_window_where_it_insists(qapp, monkeypatch):
+    monkeypatch.setattr("voice.ui.settings._spawn", lambda cmd: pytest.fail("nothing to start"))
+    cfg, dlg = _hotkeys_dialog(qapp, "desktop-dialog", triggers=lambda: {"dictate": "CTRL+space"},
+                               capture=lambda cb: cb(DIALOG_MESSAGE))
+    dlg.change_buttons["language_toggle"].click()
+    qapp.processEvents()
+    assert dlg.hotkey_status.text() == DESKTOP_DIALOG_OPEN
+    assert dlg.change_buttons["language_toggle"].text() == CHANGE
+
+
+def test_no_row_repeats_its_key_under_the_field(qapp):
+    """The dim "desktop: Press <Control>space" under every field is gone: the
+    key is on the row once, and nowhere else."""
+    from PySide6.QtWidgets import QLabel, QTabWidget
+
+    cfg, dlg = _hotkeys_dialog(qapp, "desktop-store", triggers=lambda: {"dictate": "CTRL+space"},
+                               store=FakeStore())
+    dlg.show()
+    dlg.findChildren(QTabWidget)[0].setCurrentIndex(1)
+    qapp.processEvents()
+    on_screen = [w.text() for w in dlg.findChildren(QLabel)
+                 if w.text().strip() and w.isVisible()]
+    assert on_screen.count("Ctrl+Space") == 1
+    assert not [text for text in on_screen if text.lower().startswith("desktop:")]
+    dlg.close()
+
+
+def test_the_advanced_section_is_collapsed_and_still_round_trips(qapp):
+    cfg, dlg = _hotkeys_dialog(qapp, "desktop-store", triggers=lambda: {"dictate": "CTRL+space"},
+                               store=FakeStore())
+    assert dlg.advanced_button.isChecked() is False
+    assert dlg.advanced_box.isHidden() is True          # collapsed until it is asked for
+    dlg.advanced_button.setChecked(True)
+    assert dlg.advanced_box.isHidden() is False
+    dlg.portal_edits["recall"].setText("CTRL+SHIFT+r")
+    dlg.hotkey_edit.setText("KEY_F14")
+    dlg.save_button.click()
+    again = Config.load()
+    assert again.get("hotkeys.portal_recall") == "CTRL+SHIFT+r"
+    assert again.get("hotkeys.dictate") == "KEY_F14"
+    dlg.reload_from_disk()
+    assert dlg.portal_edits["recall"].text() == "CTRL+SHIFT+r"
+    assert dlg.hotkey_edit.text() == "KEY_F14"
+
+
+def test_all_four_keyboard_keys_reach_the_config(qapp):
+    """The language toggle had no field at all, so the one key the daemon binds
+    that nobody could see stayed unset for ever."""
+    cfg, dlg, _ = make(qapp)
+    dlg.language_toggle_edit.setText("KEY_F15")
+    dlg.recall_edit.setText("KEY_F16")
+    dlg.save_button.click()
+    again = Config.load()
+    assert again.get("hotkeys.language_toggle") == "KEY_F15"
+    assert again.get("hotkeys.recall") == "KEY_F16"
+
+
+def test_a_key_that_will_not_parse_says_which_row_to_fix(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.cancel_edit.setText("KEY_BANANA")
+    dlg.save_button.click()
+    assert dlg.error_label.text().startswith(ACTION_LABELS["cancel"])
+    assert "hotkeys." not in dlg.error_label.text()
+
+
+# -- nothing on screen is written for whoever wrote it ---------------------------
+INTERNAL = ("evdev", "portal", "dconf", "backend", "hotkeys.", "ui.", "inject.", "stt.")
+
+
+@pytest.mark.parametrize("route", ["capture", "desktop-store", "desktop-dialog"])
+def test_nothing_this_window_says_names_anything_internal(qapp, route):
+    """The owner: "You need to think as a normal user, not a tech developer!"
+
+    Walked over the whole window rather than asserted per label, so the net
+    catches the next tab as well as these five.
+    """
+    store = FakeStore() if route == "desktop-store" else None
+    cfg, dlg = _hotkeys_dialog(qapp, route, triggers=lambda: {"dictate": "CTRL+space"},
+                               store=store)
+    dlg.set_layer_shell(False)                      # the warning that can appear
+    said = [(widget, text) for widget, text in _visible_words(dlg)
+            if any(word in text.lower() for word in INTERNAL)]
+    assert said == [], [f"{text!r} on {type(widget).__name__}" for widget, text in said]
+
+
+def test_the_help_behind_the_question_marks_is_written_for_a_person(qapp):
+    cfg, dlg = _hotkeys_dialog(qapp, "desktop-store", store=FakeStore())
+    texts = [button.help_text for button in dlg.help_buttons.values()]
+    assert texts and all(button.toolTip() for button in dlg.help_buttons.values())
+    said = [text for text in texts if any(word in text.lower() for word in INTERNAL)]
+    assert said == []
+    assert "/org/" not in " ".join(texts) and "gtk4" not in " ".join(texts).lower()
+
+
+# -- no text is cut off, at any size the window can take -------------------------
+def _too_small_for_its_text(dlg):
+    """Every label that cannot show all of its text where it has been put.
+
+    Two ways for that to happen, and the window has had both: a wrapping label
+    given one row's height by a form layout, and a label whose box is wider than
+    what is left of the window it sits in.
+    """
+    from PySide6.QtCore import QPoint, QRect
+    from PySide6.QtWidgets import QLabel
+
+    bad = []
+    for label in dlg.findChildren(QLabel):
+        if not label.text().strip() or not label.isVisible() or label.width() <= 0:
+            continue
+        needed = (label.heightForWidth(label.width()) if label.wordWrap()
+                  else label.sizeHint().height())
+        if needed > label.height() + 1:
+            bad.append(f"{label.text()[:50]!r} needs {needed}px, has {label.height()}px")
+            continue
+        if not label.wordWrap() and label.sizeHint().width() > label.width() + 1:
+            bad.append(f"{label.text()[:50]!r} needs {label.sizeHint().width()}px across, "
+                       f"has {label.width()}px")
+            continue
+        box = QRect(label.mapTo(dlg, QPoint(0, 0)), label.size())
+        ancestor = label.parentWidget()
+        while ancestor is not None and ancestor is not dlg:
+            frame = QRect(ancestor.mapTo(dlg, QPoint(0, 0)), ancestor.size())
+            if not frame.contains(box):
+                bad.append(f"{label.text()[:50]!r} is cut off by its "
+                           f"{type(ancestor).__name__}")
+                break
+            ancestor = ancestor.parentWidget()
+    return bad
+
+
+@pytest.mark.parametrize("route", ["capture", "desktop-store", "desktop-dialog"])
+@pytest.mark.parametrize("size", ["default", "minimum"])
+def test_no_text_is_cut_off_on_any_tab_at_any_size(qapp, route, size):
+    """A grey paragraph clipped mid-sentence is what the owner photographed, and
+    the longest thing this window can say is the one that did it."""
+    from PySide6.QtWidgets import QTabWidget
+
+    store = FakeStore() if route == "desktop-store" else None
+    cfg, dlg = _hotkeys_dialog(qapp, route, triggers=lambda: {"dictate": "CTRL+space"},
+                               store=store)
+    dlg.set_layer_shell(False)
+    # The longest line any of these ever hold, so the measurement is of the
+    # worst case rather than of an empty label.
+    dlg.hotkey_status.setText(
+        "Saved to your desktop: start and stop dictation now uses Ctrl+Alt+D, and the other "
+        "three are unchanged - a sentence about as long as this one ever gets.")
+    dlg.error_label.setText("Something went wrong while writing this, and the reason is a "
+                            "long one that has to be read to the end.")
+    dlg.advanced_button.setChecked(True)
+    dlg.show()
+    qapp.processEvents()
+    dlg.resize(dlg.sizeHint() if size == "default" else dlg.minimumSizeHint())
+    qapp.processEvents()
+    tabs = dlg.findChildren(QTabWidget)[0]
+    cut = []
+    for index in range(tabs.count()):
+        tabs.setCurrentIndex(index)
+        qapp.processEvents()
+        cut += [f"{tabs.tabText(index)}: {line}" for line in _too_small_for_its_text(dlg)]
+    dlg.close()
+    assert cut == [], "\n".join(cut)
+
+
+def test_a_shortcut_the_desktop_has_never_heard_of_says_what_to_do(qapp):
+    """The store skips an id nobody registered, in silence: on the owner's own
+    machine three of the four are exactly that, so "Change…" would have looked
+    broken on three rows out of four."""
+    from PySide6.QtCore import Qt
+
+    store = FakeStore()
+    cfg, dlg = _hotkeys_dialog(qapp, "desktop-store", triggers=lambda: {"dictate": "CTRL+space"},
+                               store=store)
+    dlg.change_buttons["language_toggle"].click()
+    _press(qapp, dlg, Qt.Key.Key_L,
+           Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+    assert store.writes == []                      # there was nothing to change
+    assert dlg.hotkey_status.text() == NOT_OFFERED
+    assert dlg.portal_edits["language_toggle"].text() == "CTRL+SHIFT+L"
+    dlg.save_button.click()                        # which is what asking for it is
+    assert Config.load().get("hotkeys.portal_language_toggle") == "CTRL+SHIFT+L"

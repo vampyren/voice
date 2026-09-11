@@ -19,7 +19,6 @@ Minor items raised during the phase 1 reviews that were judged not to block the 
 - `voice/config.py`: `load()` writes the default file before chmod (no secrets at that point); importing `Config` now pulls in `evdev` via chord validation.
 - `voice/doctor.py`: `fallback senders` reports ✔ with none installed; the individual probes have no unit tests.
 - `voice/stt/openai_compat.py`: profile-level prompt fallback untested; OpenRouter host match is a substring test.
-- `voice/stt/local.py`: undocumented `turbo` alias.
 - `install.sh`: throwaway `sed` pass; the uninstall `|| true` masks a real `rm` failure.
 - `tests/ui/test_settings.py::test_close_discards_edits_and_never_touches_the_callers_config` asserts nothing that could fail; strengthen or delete.
 - Dictionary tab gives most width to the Flags column.

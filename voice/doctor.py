@@ -222,12 +222,11 @@ def _cuda() -> tuple[bool, str]:
 
 def _model_cache() -> tuple[bool, str]:
     from voice.config import Config
-    from voice.stt.local import resolve_model_name
     cfg = Config.load()
     _, profile = cfg.stt_profile()
     if profile.get("backend") != "local":
         return True, "active profile is cloud; nothing to cache"
-    name = resolve_model_name(profile["model"]).replace("/", "--")
+    name = str(profile["model"]).replace("/", "--")
     hub = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub" / f"models--{name}"
     return (True, str(hub)) if hub.exists() else (False, f"{profile['model']} not downloaded yet (first dictation downloads it)")
 

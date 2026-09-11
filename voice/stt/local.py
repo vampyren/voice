@@ -13,15 +13,6 @@ from voice.stt.base import Transcript, TranscriptionError
 
 log = logging.getLogger(__name__)
 
-_ALIASES = {
-    "large-v3-turbo": "Systran/faster-whisper-large-v3-turbo",
-    "turbo": "Systran/faster-whisper-large-v3-turbo",
-}
-
-
-def resolve_model_name(name: str) -> str:
-    return _ALIASES.get(name, name)
-
 
 def _cuda_available() -> bool:
     try:
@@ -63,8 +54,14 @@ class LocalTranscriber:
             log.warning(self.fallback_reason)
             device, compute = "cpu", "int8"
         self._device, self._compute = device, compute
-        log.info("loading %s on %s/%s", resolve_model_name(self._profile["model"]), device, compute)
-        return self._factory(resolve_model_name(self._profile["model"]), device, compute)
+        # The configured name goes through untouched: faster-whisper resolves its
+        # own short names ("large-v3-turbo", "small"), and anything else is a
+        # Hugging Face repository id, which is how KBLab/kb-whisper-* works. We
+        # once rewrote "large-v3-turbo" ourselves, to a repository that does not
+        # exist - the shipped default could not load a model at all.
+        name = self._profile["model"]
+        log.info("loading %s on %s/%s", name, device, compute)
+        return self._factory(name, device, compute)
 
     def describe(self) -> str:
         return f"local {self._profile.get('model')} ({self._device}/{self._compute})"

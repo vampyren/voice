@@ -2255,6 +2255,45 @@ def test_a_desktop_shortcut_write_rebinds_even_when_the_config_did_not_move(
     d.shutdown()
 
 
+def test_a_rebind_request_binds_at_once_rather_than_at_some_later_reload(
+        isolated_xdg, qapp, monkeypatch):
+    """The window asks for this the moment the desktop's store took a new key,
+    and that can happen with no save behind it at all ("Change…", then Close).
+    Arming a flag for the next apply_config meant the promised immediate rebind
+    never happened: the old key stayed live until something unrelated reloaded
+    the config, and then tore the listener down in the middle of it."""
+    d = _portal_daemon(monkeypatch)
+    first = d.listener
+    external = Config.load()                            # what the window just wrote
+    external.set("hotkeys.portal_dictate", "CTRL+ALT+d")
+    external.save()
+
+    d.rebind_hotkeys()
+
+    assert d.listener is not first
+    assert len(FakePortalListener.made) == 2
+    assert first.started is False and d.listener.started is True
+    # Bound to what the file holds now, not to the snapshot the daemon had.
+    assert FakePortalListener.made[-1].shortcuts["dictate"] == "CTRL+ALT+d"
+    d.shutdown()
+
+
+def test_a_rebind_request_leaves_nothing_armed_for_a_later_reload(
+        isolated_xdg, qapp, monkeypatch):
+    """The flag outlived the request it belonged to, so an unrelated
+    apply_config - minutes later, with whatever config held then - tore the
+    listener down again and could show the desktop's permission dialog for it."""
+    d = _portal_daemon(monkeypatch)
+    d.rebind_hotkeys()
+    made = len(FakePortalListener.made)
+    listener = d.listener
+
+    d.apply_config()                                    # something else entirely
+
+    assert d.listener is listener and len(FakePortalListener.made) == made
+    d.shutdown()
+
+
 def test_nothing_rebinds_when_no_one_asked_and_nothing_changed(isolated_xdg, qapp, monkeypatch):
     """The rebind shows the desktop's permission dialog, so it must not happen
     on every Save."""
@@ -2273,6 +2312,24 @@ def test_the_settings_window_rebind_request_reaches_the_daemon(isolated_xdg, qap
     d._settings.shortcuts_rebound.emit()                # the store took a new key
     d._settings.saved.emit()                            # and the file was written
     assert d.listener is not first
+    # One rebind for the one change: the desktop's permission dialog must not
+    # be asked for twice because the window said both things.
+    assert len(FakePortalListener.made) == 2
+    d._settings.close()
+    d.shutdown()
+
+
+def test_a_window_that_only_wrote_the_desktop_still_gets_its_rebind(
+        isolated_xdg, qapp, monkeypatch):
+    """"Change…" hands the key over on the spot and emits this with no save
+    behind it: that is the whole path the promise "the new key works at once"
+    rests on."""
+    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    d = _portal_daemon(monkeypatch)
+    d.open_settings()
+    first = d.listener
+    d._settings.shortcuts_rebound.emit()                # and no `saved` after it
+    assert d.listener is not first and d.listener.started is True
     d._settings.close()
     d.shutdown()
 

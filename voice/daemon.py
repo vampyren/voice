@@ -325,9 +325,6 @@ class Daemon:
         #: Whether this desktop can put the pill where the config says; None
         #: until the helper probe has answered. See _on_layer_shell_probed.
         self._layer_shell: bool | None = None
-        #: Set by rebind_hotkeys(): the desktop's own shortcut store moved under
-        #: us, which no config snapshot can see. Cleared by the rebind it asks for.
-        self._force_rebind = False
         #: The countdown that ends the pill preview, while one is on screen.
         #: Not None is exactly "a preview is showing"; see _preview_pill.
         self._preview: object | None = None
@@ -567,28 +564,49 @@ class Daemon:
         return (backend, triggers)
 
     def rebind_hotkeys(self) -> None:
-        """Bind again at the next apply_config, whatever the config says.
+        """Bind again now, to what the file and the desktop hold at this moment.
 
         The settings window calls this after it has written the desktop's own
         shortcut store (see `voice.hotkey.desktop_shortcuts`): the key that
         moved is the *desktop's*, so `_hotkey_snapshot` sees nothing at all, and
-        without this the listener keeps the old binding until a restart. Asked
-        for before `saved`, so one apply_config does both.
-        """
-        self._force_rebind = True
+        without a rebind the listener keeps the old binding until a restart.
 
-    def _rebind_hotkeys_if_needed(self) -> None:
+        Done here rather than armed for the next apply_config, because there
+        may not be one - "Change…" hands the key over and writes it with no
+        save behind it - and a flag left armed fires during some later,
+        unrelated reload instead, tearing the listener down (and possibly
+        re-showing the desktop's permission dialog) for a request that belonged
+        to a different minute. The file is re-read first: the window saves the
+        trigger before it asks for this, and the listener has to bind what is
+        actually written down.
+
+        On the save path this still costs exactly one rebind: the window asks
+        before `saved`, and the apply_config that follows finds the bindings
+        already current and leaves them alone.
+        """
+        if self._hotkey_settings is None:
+            return                      # nothing is built yet; build() binds it
+        if not self._reload_config():
+            return
+        before = self.listener
+        self._rebind_hotkeys_if_needed(force=True)
+        if self.listener is not before:
+            # The injector holds the listener's `modifiers_held`, so it must not
+            # be left pointing at the one that has just been stopped.
+            self.injector = self._make_injector()
+            self.dictation.set_injector(self.injector)
+
+    def _rebind_hotkeys_if_needed(self, force: bool = False) -> None:
         """Rebuild the listener when the backend or a portal trigger changed.
 
-        The desktop may show its permission dialog again; that is the price of
-        applying a new trigger without restarting the daemon.
+        `force` is a caller that knows something no config snapshot can see -
+        the desktop's own store moved under us. The desktop may show its
+        permission dialog again; that is the price of applying a new trigger
+        without restarting the daemon.
         """
         if self._hotkey_settings is None:
             return
-        # Read once and cleared either way: a request that survived its own
-        # rebind would rebuild the listener on every later reload as well.
-        forced, self._force_rebind = self._force_rebind, False
-        if not forced and self._hotkey_snapshot() == self._hotkey_settings:
+        if not force and self._hotkey_snapshot() == self._hotkey_settings:
             return
         log.info("hotkey bindings changed; rebuilding the listener")
         try:

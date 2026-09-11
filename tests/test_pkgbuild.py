@@ -42,9 +42,10 @@ def run_wrapper(prefix: str, show: str) -> str:
     import tempfile
     body = re.sub(r"(?m)^exec .*$", f'printf "%s" "${{{show}:-unset}}"',
                   WRAPPER.read_text()).replace("prefix=/usr/lib/voice", f"prefix={prefix}")
-    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
-        fh.write(body)
-    done = subprocess.run(["sh", fh.name], capture_output=True, text=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        script = Path(tmp) / "voice.sh"
+        script.write_text(body)
+        done = subprocess.run(["sh", str(script)], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
     return done.stdout
 

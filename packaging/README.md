@@ -4,8 +4,8 @@
 
 | package | what it is | rough size |
 | --- | --- | --- |
-| `voice` | the app, its locked Python dependency set, the CLI, desktop entry, autostart entry and udev rule | ~1.6 GB installed |
-| `voice-cuda` | the CUDA 12 runtime (cuBLAS, cuDNN, NVRTC) that turns on GPU transcription | ~2.4 GB installed |
+| `voice` | the app, its locked Python dependency set, the CLI, desktop entry, autostart entry and udev rule | ~1.2 GB installed (PySide6 alone is 650 MB) |
+| `voice-cuda` | the CUDA 12 runtime (cuBLAS, cuDNN, NVRTC) that turns on GPU transcription | 1.4 GB of wheels, ~3 GB installed |
 
 Install `voice` alone and transcription runs on the CPU (int8, with a warning
 from `voice doctor`). Add `voice-cuda` and the same install uses the GPU.
@@ -81,6 +81,15 @@ user's data:
 ```
 
 The scriptlet prints these on removal.
+
+## Known fat: cuDNN
+
+`voice-cuda` ships what the project's `gpu` extra pins, which is what the app is
+tested with. Two thirds of it may be dead weight: CTranslate2 4.8.2's own
+binaries name `libcublas.so.12` and `libcuda.so.1` and contain no reference to
+cuDNN at all (`strings ... | grep -ci cudnn` is 0), so `nvidia-cudnn-cu12`
+(751 MB of wheel) is probably never loaded. Drop it from the `gpu` extra, run a
+GPU transcription, and if it still works `voice-cuda` roughly halves.
 
 ## Keeping it current
 

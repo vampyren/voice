@@ -52,7 +52,7 @@ It builds two packages:
 
 `makepkg` needs `uv`, `git` and `python312` (AUR) to build, downloads the locked wheels
 during the build (so build with plain `makepkg`, not a network-less chroot), and installs
-about 1.6 GB (plus 2.4 GB for `voice-cuda`). The app runs on `python312` out of
+about 1.2 GB (plus roughly 3 GB for `voice-cuda`). The app runs on `python312` out of
 `/usr/lib/voice`, not on the system interpreter — `packaging/README.md` explains why, and
 which dependencies exist as Arch packages and which do not.
 

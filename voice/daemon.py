@@ -417,10 +417,10 @@ class Daemon:
             return None
         try:
             answer = ask(FILL_ACK_S)
+            return None if answer is None else float(answer)
         except Exception:
             log.debug("the pill did not say how far its fill had got", exc_info=True)
             return None
-        return None if answer is None else float(answer)
 
     def _hide_pill_for_paste(self) -> None:
         """Take the pill off screen so the paste chord reaches the user's window.

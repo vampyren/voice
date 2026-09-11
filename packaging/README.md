@@ -68,9 +68,6 @@ time, the default is `1`, and an invalid value aborts the build.
 The usual Arch way - install the Python package for the system interpreter and
 list every dependency as a `python-*` package - cannot be done here today:
 
-* Arch's `python` is **3.14**; this project pins `requires-python >=3.12,<3.13`
-  and `uv.lock` resolves the entire dependency set for CPython 3.12. That
-  resolution is what the test suite runs against.
 * **onnxruntime**, which `faster-whisper` needs for the Silero VAD
   (`voice/audio/vad.py`), has no package in the official repositories and none
   usable in the AUR (only an out-of-date `onnxruntime-git`).
@@ -82,17 +79,54 @@ list every dependency as a `python-*` package - cannot be done here today:
   wheel at all, which is why the package carries the PyPI CUDA 12 wheels.
 
 So the package installs the locked, tested set under `/usr/lib/voice` and runs
-it on `python312` (AUR). Everything the *desktop* owns - PipeWire,
-wl-clipboard, libnotify, the portal, PyGObject/GTK 4/pycairo/gtk4-layer-shell
-for the recording pill - comes from pacman as a normal dependency.
+it there. Everything the *desktop* owns - PipeWire, wl-clipboard, libnotify,
+the portal, PyGObject/GTK 4/pycairo/gtk4-layer-shell for the recording pill -
+comes from pacman as a normal dependency. The full list, with what each one is
+for, is the **Requirements** section of the top-level `README.md`; it is not
+repeated here.
+
+## The interpreter, and what it costs when Arch moves
+
+The package builds against and runs on Arch's **`python`** (3.14 today). It
+used to depend on **`python312`**, and that was a real defect rather than a
+detail: `python312` exists only in the AUR, `makepkg -s` does not fetch from
+the AUR, and so the very first `makepkg -si` on a clean machine failed on a
+missing dependency the owner could do nothing about without reading the error.
+Of the three names `pacman -T` reported missing on the owner's box, it was the
+only one not in `extra`.
+
+Nothing needed the pin. `requires-python` is now `>=3.12,<3.15` and
+re-resolving changed **no** package version - the same set, with cp313 and
+cp314 wheels added. The upper bound is PySide6 6.11.2 (`>=3.10,<3.15`).
+
+There is no middle option: `python311`, `python312` and `python313` are all
+AUR-only. `python` is the only interpreter in the official repositories, so
+targeting it is the only way to build with `makepkg -si` alone.
+
+**The price, plainly.** The wheels under `/usr/lib/voice/deps` are compiled
+extension modules built for one CPython minor version. When Arch bumps `python`
+from 3.14 to 3.15, they stop importing and `voice` stops starting:
+
+```
+ModuleNotFoundError / ImportError from a native module on the first run after the bump
+```
+
+**The fix is to rebuild the package** - `cd packaging && makepkg -si` again.
+Nothing detects the bump for you and pacman will not warn, because as far as it
+is concerned the dependency `python` is still satisfied. This is the normal
+situation for any Arch package that bundles compiled Python wheels rather than
+using the distro's own `python-*` packages, and it is exactly what dropping the
+AUR dependency buys: an install that works the first time, in exchange for a
+rebuild once or twice a year. The previous arrangement had the mirror-image
+problem - it was pinned to an interpreter that pacman could not install at all.
 
 ## Layout
 
 ```
-/usr/bin/voice                              wrapper: python312 + app + deps + cuda
+/usr/bin/voice                              wrapper: /usr/bin/python3 + app + deps + cuda
 /usr/bin/voice-overlay                      wrapper: system python3 + app (pill helper)
 /usr/lib/voice/app/voice/...                this project, and nothing else
-/usr/lib/voice/deps/...                     the locked third-party wheels (CPython 3.12)
+/usr/lib/voice/deps/...                     the locked third-party wheels (built for Arch's python)
 /usr/lib/voice/cuda/nvidia/*/lib/*.so       the CUDA 12 runtime (absent in a VOICE_GPU=0 build)
 /usr/share/applications/io.github.vampyren.voice.desktop
 /etc/xdg/autostart/io.github.vampyren.voice.desktop
@@ -102,10 +136,10 @@ for the recording pill - comes from pacman as a normal dependency.
 ```
 
 `app` and `deps` are separate directories on purpose. The daemon spawns the
-recording pill on the *system* interpreter and hands it
-`voice.ui.overlay_client.repo_root()` - the parent of the `voice` package - as
-`PYTHONPATH`. With the app alone in that directory, no CPython 3.12 extension
-module can end up on the 3.14 interpreter's path.
+recording pill and hands it `voice.ui.overlay_client.repo_root()` - the parent
+of the `voice` package - as `PYTHONPATH`. The pill needs `gi` and `cairo` and
+nothing else, so with the app alone in that directory none of the bundled
+wheels (PySide6, numpy, CTranslate2 - gigabytes of them) ends up on its path.
 
 The desktop entry's file name is the app id (`voice.APP_ID`): the
 GlobalShortcuts portal resolves the app through it, and any other name makes it
@@ -144,3 +178,9 @@ GPU transcription, and if it still works the package roughly halves.
   commented GitHub line once the repository is published.
 * The dependency set comes from `uv.lock` via `uv export --frozen`. Run
   `uv lock` in the project and rebuild to move it.
+* **Rebuild after an Arch `python` bump** (3.14 -> 3.15). Nothing warns you; see
+  the interpreter section above for the symptom.
+* Adding a dependency means checking the name is in core/extra -
+  `https://archlinux.org/packages/search/json/?name=<pkg>` - and adding it to
+  `OFFICIAL_REPO_PACKAGES` in `tests/test_pkgbuild.py`, which fails the suite if
+  an AUR-only name is ever declared again.

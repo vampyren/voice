@@ -31,6 +31,13 @@ package, so transcription uses your NVIDIA GPU as soon as the driver is there -
 `voice doctor`'s cuda line says whether it found one. With no usable GPU it
 falls back to CPU int8 by itself; nothing extra to install either way.
 
+One thing to know about updates: this package bundles Python extension modules
+built against Arch's current `python` (3.14). When Arch moves to 3.15 they stop
+importing and voice will not start, with an ImportError from a native module.
+Nothing warns you beforehand - pacman still considers `python` satisfied. The
+fix is to rebuild: `cd packaging && makepkg -si`. That is the normal trade for
+a package that ships its own wheels instead of depending on AUR packages.
+
 Autostart comes from /etc/xdg/autostart/io.github.vampyren.voice.desktop. To
 stop it for your user without touching the package:
   mkdir -p ~/.config/autostart

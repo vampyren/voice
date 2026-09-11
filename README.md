@@ -141,9 +141,24 @@ past the edge, and the range is -2000 to 2000. A half that is `center` or
 it ignores its margin: with the shipped `bottom-center` only `overlay_margin_y`
 (48 by default) does anything.
 
-Changing any of the three takes effect on `voice reload` and on Save in the
+Changing any of them takes effect on `voice reload` and on Save in the
 settings window - the daemon restarts the pill helper - without restarting the
 daemon itself.
+
+**On a desktop that places the pill itself.** GNOME gives the pill a plain
+Wayland window and centres it, and nothing in the window can argue with that.
+So the helper argues with the *size* instead: it asks for a window bigger than
+the pill and draws the pill against the edge you asked for, leaving the rest of
+it transparent. The compositor still centres the window, so `bottom-center`
+puts the pill about a quarter-screen below centre, `top-*` the same above it,
+and `left`/`right` work the same way across. It is near, not exact - the window
+is capped at half the screen, and a margin asking for more than that is spent as
+far as the cap goes. The transparent padding asks the compositor to let clicks
+through it, which needs PyGObject's cairo support (Debian/Ubuntu:
+`python3-gi-cairo`); without that package the padding takes clicks that would
+otherwise reach the window behind it, which is why the cap is half a screen and
+not the whole one. `ui.overlay_pad_to_place = false` turns the whole thing off
+and gives you a pill-sized window wherever the compositor drops it.
 
 **Drag it where you want it.** The settings window's General tab shows this
 screen in miniature with the pill in it: drag the pill, and the drop is saved as
@@ -166,7 +181,8 @@ stealing focus mid-dictation - and a layer-shell surface has no position to
 drag, only anchors and margins. That is why the dragging happens in the
 preview, and why what is stored is an anchor and a margin. Where there is no
 layer-shell (GNOME, see below) not even that applies: the compositor places the
-window. The settings window says so under the placer — *"Your desktop places
+window, and the placement is approximated by padding it (above) rather than
+honoured. The settings window says so under the placer — *"Your desktop places
 this window itself, so this only takes effect on KDE/wlroots"* — and `voice
 doctor`'s **pill placement** line says the same, so the setting is never
 silently ignored. The control stays live either way: the placement is recorded

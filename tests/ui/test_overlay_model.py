@@ -914,6 +914,47 @@ def test_a_second_transcription_does_not_start_on_a_landed_fill(model, clock):
     assert model.sweep[0] > width, "and it is moving"
 
 
+def test_a_retry_under_a_notice_does_not_start_on_a_landed_fill(model, clock):
+    """Reachable, and reported: a dictation finishes, the language is toggled
+    inside the 1.2 s `done` hold, and "Retry last recording" is asked for while
+    the notice is still up. The retry goes IDLE -> TRANSCRIBING with no
+    `recording` in between to clear the completion, so the pill showed a full,
+    motionless bar for the whole retry - the exact defect the `notice`
+    exception was written to prevent."""
+    _mid_sweep(model, clock)
+    model.set_state("done", now=clock.t)                     # the fill is armed
+    model.tick(clock.advance(FINISH + FRAME))
+    assert model.sweep == pytest.approx((1.0, 1.0))          # and it has landed
+    model.set_state("notice", now=clock.advance(0.1))        # the language toggle
+
+    model.set_state("transcribing", now=clock.advance(0.1))  # the retry
+
+    assert model.finishing is False
+    model.tick(clock.advance(FRAME))
+    width, _alpha = model.sweep
+    assert width < 1.0, "a retry sweeps; it does not sit at full width"
+    model.tick(clock.advance(3.0))
+    assert model.sweep[0] > width, "and three seconds later it has moved"
+
+
+def test_a_retry_under_a_notice_raised_mid_fill_does_not_start_on_it_either(model, clock):
+    """The same freeze by the other road into it: the daemon asks for the fill
+    when the transcription lands, so a notice raised between that and `done`
+    remembers `transcribing` with a completion still in flight - and a retry
+    from under it would have inherited that one too."""
+    _mid_sweep(model, clock)
+    model.finish_fill(now=clock.t)                           # the completion is armed
+    model.set_state("notice", now=clock.advance(0.02))       # before `done` arrives
+    model.tick(clock.advance(FINISH + FRAME))
+    assert model.sweep == pytest.approx((1.0, 1.0)), "it landed under the notice"
+
+    model.set_state("transcribing", now=clock.advance(0.1))  # the retry
+
+    assert model.finishing is False
+    model.tick(clock.advance(FRAME))
+    assert model.sweep[0] < 1.0, "a retry sweeps; it does not sit at full width"
+
+
 def test_a_notice_over_a_finishing_fill_still_comes_back_to_it(model, clock):
     """The one way into `transcribing` that must keep the completion: a notice
     covered the pill while the fill was running and then expired."""

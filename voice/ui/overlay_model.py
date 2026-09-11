@@ -304,7 +304,7 @@ class OverlayModel:
         self._enter(state, text, now, reset_counter=True)
 
     def _enter(self, state: str, text: str | None, now: float,
-               reset_counter: bool) -> None:
+               reset_counter: bool, resuming: bool = False) -> None:
         # A transcription that ends runs its fill to the end before the
         # checkmark. The completion belongs to the fill rather than to the
         # state: `transcribing`, `done` and `notice` are the three states that
@@ -314,12 +314,18 @@ class OverlayModel:
         # from further back.
         if state not in ("transcribing", "done", "notice"):
             self._finish_from = None
-        elif state == "transcribing" and self.state != "notice":
+        elif state == "transcribing" and not resuming:
             # A transcription that is starting has nothing to complete: a fill
             # carried in from the last one renders a motionless full bar where
             # the progress curve belongs. The one exception is the notice
-            # that covered a fill and has just expired, which is the only way
-            # into this state with a completion genuinely in flight.
+            # expiring back into the state it covered, which is the only way
+            # into `transcribing` with a completion genuinely in flight - and
+            # `resuming` is that path itself, in `tick`, rather than "a notice
+            # is on screen". Asked the second way, a `set_state("transcribing")`
+            # under a notice inherited the fill too: a retry started inside the
+            # 1.2 s `done` hold, or under a notice raised between the daemon
+            # asking for the completion and `done` arriving, drew a full,
+            # motionless bar for the whole of that retry.
             self._finish_from = None
         elif (state == "done" and self.state == "transcribing"
                 and self._finish_from is None and not self.reduced_motion):
@@ -357,7 +363,7 @@ class OverlayModel:
                                   maxlen=self._half)
         if self.state == "notice" and self.state_age >= NOTICE_TTL:
             state, text, age = self._return
-            self._enter(state, text, now, reset_counter=False)
+            self._enter(state, text, now, reset_counter=False, resuming=True)
             self._state_since = now - age   # resume, do not restart, its hold
             return
         hold = {"done": DONE_HOLD, "error": ERROR_HOLD}.get(self.state)

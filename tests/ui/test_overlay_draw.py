@@ -327,14 +327,14 @@ def test_the_transcribing_fill_sweeps_from_the_left(tmp_path):
     assert reach(late)[1] > reach(early)[1] + 20                     # and it grows
 
 
-def test_a_long_transcription_holds_short_of_the_end_and_never_snaps_back(tmp_path):
+def test_a_long_transcription_reaches_the_end_and_never_snaps_back(tmp_path):
     """Two frames two seconds apart, two minutes into a slow conversion.
 
     The old loop had restarted between them - it was back at the left edge at
     122.2 s - which is the bar "stopping in the middle" the owner photographed.
-    The fill now stands still just short of the end of the track, with grey
-    left between it and the counter: only the completion reaches the end, which
-    is what keeps a full bar meaning "done".
+    The fill now crosses the whole track and rests at the end of it: "go all
+    the way to the right" was the requirement, and a bar parked short of the
+    end reads as stalled however good the reason for it.
     """
     well_x, well_right = 36, 36 + 132
 
@@ -346,8 +346,7 @@ def test_a_long_transcription_holds_short_of_the_end_and_never_snaps_back(tmp_pa
     late, later = reach(120.0, "long.png"), reach(122.2, "longer.png")
     assert later >= late, "the fill must never fall back"
     assert later - late <= 1, "and two minutes in it is not moving either"
-    assert late < well_right - 6, "it holds short of the end of the track"
-    assert late > well_x + 100, "having crept most of the way there"
+    assert late >= well_right - 3, "it reaches the end of the track"
 
 
 def test_the_transcribing_counter_is_dimmed(tmp_path):

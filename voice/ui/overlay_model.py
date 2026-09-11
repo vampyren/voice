@@ -64,11 +64,14 @@ COLLAPSE = 0.2               # bars melting into the track when transcribing sta
 #: A minute-long conversion still creeps: the remaining distance stays over a
 #: pixel of the 132 px track until ~4.5 s, and the bar never goes backwards.
 #:
-#: SWEEP_CEILING 0.95 leaves ~7 px of grey track at 1x (13 px at 2x): enough
-#: that the bar plainly has not finished, close enough to the counter that the
-#: completion reads as arriving rather than as a jump.
-SWEEP_TAU = 0.9
-SWEEP_CEILING = 0.95
+#: SWEEP_CEILING is 1.0: the fill reaches the end of the track and rests
+#: there. Holding it short of the end was a principle nobody asked for - "go
+#: all the way to the right, almost close to the counter where the bar
+#: finished" is the requirement, and a bar that stops short reads as stalled
+#: whatever the reasoning behind it. `finish_fill` still runs it to the end
+#: from wherever it stands when a fast transcription ends early.
+SWEEP_TAU = 0.7
+SWEEP_CEILING = 1.0
 
 #: The fill stops short of the end of the track on its own (SWEEP_CEILING),
 #: so without this the checkmark would replace a half-drawn line - an operation

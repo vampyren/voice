@@ -681,25 +681,24 @@ def test_the_completion_starts_from_where_the_sweep_stood(model, clock):
         clock.advance(FINISH)
 
 
-def test_a_long_transcription_holds_just_short_of_the_end(model, clock):
-    """A slow CPU can transcribe for minutes. The fill creeps up to the
-    ceiling and waits there - short of the end, so the track still says the
-    work is not done, and motionless enough that nothing reads as a restart."""
+def test_a_long_transcription_fills_the_track_and_rests_there(model, clock):
+    """A slow CPU can transcribe for minutes. The fill crosses the track and
+    waits at the end of it - the owner asked for a bar that goes all the way
+    to the right, and one that stops short reads as stalled."""
     model.set_state("transcribing")
     model.tick(clock.advance(SWEEP_TAU * 10))
     settled = model.sweep[0]
-    assert settled == pytest.approx(SWEEP_CEILING, abs=0.005)
-    assert settled < SWEEP_CEILING, "the ceiling is approached, never reached"
+    assert settled == pytest.approx(1.0, abs=0.005)
     model.tick(clock.advance(300.0))                   # five minutes more
-    assert model.sweep[0] >= settled
-    assert model.sweep[0] < 1.0, "the full track belongs to the completion"
+    assert model.sweep[0] >= settled, "it never goes backwards"
+    assert model.sweep[0] <= 1.0
     assert model.state == "transcribing" and model.finishing is False
 
 
 def test_the_completion_fills_the_track_after_a_long_transcription(model, clock):
     """From the ceiling, where a slow transcription leaves it, to 100%."""
     model.set_state("transcribing")
-    model.tick(clock.advance(120.0))
+    model.tick(clock.advance(0.4))          # caught early, still crossing
     caught = model.sweep[0]
     assert caught < 1.0
     model.set_state("done", now=clock.t)

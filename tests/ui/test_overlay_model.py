@@ -763,3 +763,86 @@ def test_a_notice_does_not_replay_the_completion(model, clock):
     model.tick(clock.advance(NOTICE_TTL + 0.01))
     assert model.state == "done" and model.finishing is False
     assert model.check_draw > 0.0, "the checkmark comes back, not the fill line"
+
+
+# -- finishing it on request, before the pill is taken off screen ---------
+#: Where the pill cannot refuse the keyboard (no layer shell), the daemon
+#: unmaps it for the paste chord - and used to unmap it mid-sweep, so the
+#: owner never saw the fill arrive. It now asks for the completion when the
+#: transcription lands and waits for it before hiding anything.
+
+def test_finishing_the_fill_on_request_runs_it_from_where_it_stood(model, clock):
+    started = _mid_sweep(model, clock)[0]
+    assert 0.0 < started < 1.0
+    left = model.finish_fill(now=clock.t)
+    assert left == pytest.approx(FINISH), "it says how long the fill still needs"
+    assert model.state == "transcribing", "the checkmark is not due yet"
+    assert model.finishing is True
+    assert model.sweep[0] == pytest.approx(started), "from here, not from zero"
+    model.tick(clock.advance(FINISH / 2))
+    assert started < model.sweep[0] < 1.0
+    model.tick(clock.advance(FINISH / 2 + FRAME))            # the frame after it lands
+    assert model.sweep == pytest.approx((1.0, 1.0))
+    assert model.finishing is False
+    assert model.finish_fill(now=clock.t) == 0.0, "nothing left to ask for"
+
+
+def test_asking_twice_does_not_restart_the_fill(model, clock):
+    _mid_sweep(model, clock)
+    model.finish_fill(now=clock.t)
+    model.tick(clock.advance(FINISH / 2))
+    half = model.sweep[0]
+    assert model.finish_fill(now=clock.t) == pytest.approx(FINISH / 2, abs=1e-6)
+    assert model.sweep[0] == pytest.approx(half), "it carries on, it does not restart"
+
+
+def test_the_hide_for_paste_sequence_lands_the_fill_then_shows_the_checkmark(model, clock):
+    """transcribing -> finish -> hidden (for the chord) -> done."""
+    _mid_sweep(model, clock)
+    assert model.finish_fill(now=clock.t) == pytest.approx(FINISH)
+    model.tick(clock.advance(FINISH))
+    assert model.sweep == pytest.approx((1.0, 1.0)), "complete before it goes off screen"
+    model.set_state("hidden", now=clock.t)
+    model.set_state("done", now=clock.advance(0.25))         # after the chord
+    assert model.finishing is False, "it finished before the pill was hidden"
+    model.tick(clock.advance(DASH_DELAY + DASH_DUR))
+    assert model.check_draw == pytest.approx(1.0), "the checkmark plays at its own time"
+
+
+def test_done_after_a_requested_finish_does_not_run_a_second_completion(model, clock):
+    """If nothing hides the pill, `done` inherits the completion in flight
+    rather than starting another one from further back."""
+    _mid_sweep(model, clock)
+    model.finish_fill(now=clock.t)
+    model.tick(clock.advance(FINISH / 2))
+    carried = model.sweep[0]
+    model.set_state("done", now=clock.t)
+    assert model.sweep[0] == pytest.approx(carried), "never backwards"
+    model.tick(clock.advance(FINISH / 2 + FRAME))
+    assert model.sweep == pytest.approx((1.0, 1.0))
+    assert model.finishing is False, \
+        "it lands on the original schedule, not FINISH after the checkmark's cue"
+
+
+@pytest.mark.parametrize("state", ["recording", "done", "hidden", "error"])
+def test_finishing_is_a_no_op_where_there_is_no_fill_to_finish(model, clock, state):
+    model.set_state(state, text="x" if state == "error" else None)
+    assert model.finish_fill(now=clock.t) == 0.0
+    assert model.finishing is False
+
+
+def test_reduced_motion_has_no_fill_to_finish(clock):
+    m = OverlayModel(reduced_motion=True, clock=clock)
+    m.set_state("transcribing")
+    m.tick(clock.advance(1.0))
+    assert m.finish_fill(now=clock.t) == 0.0
+    assert m.finishing is False
+
+
+def test_a_notice_does_not_lose_a_fill_that_is_finishing(model, clock):
+    """The badge can swap in the middle of it; the line underneath still lands."""
+    _mid_sweep(model, clock)
+    model.finish_fill(now=clock.t)
+    model.set_state("notice", now=clock.advance(0.05))
+    model.tick(clock.advance(FINISH))
+    assert model.sweep == pytest.approx((1.0, 1.0))

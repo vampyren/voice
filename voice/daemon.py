@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from typing import Callable
 
 from PySide6.QtCore import QObject, Signal
@@ -30,6 +31,10 @@ from voice.stt.base import TranscriptionError
 from voice.ui.notify import Notifier
 from voice.ui.overlay_client import (OverlayClient, cached_probe, default_launcher,
                                      pill_takes_focus)
+#: How long the pill's fill takes to run to the end of its track. The helper's
+#: own constant: this animation happens in another process, and the daemon has
+#: to know when it has landed to sequence the paste around it.
+from voice.ui.overlay_model import FINISH as PILL_FILL_S
 from voice.ui.placement import (LEGACY_POSITIONS, POSITIONS, is_margin,
                                  normalise_position)
 from voice.ui.settings import SettingsDialog
@@ -157,6 +162,11 @@ CLIPBOARD_METHODS = ("clipboard", "clipboard-only", "clipboard-pill")
 #: What the pill says instead. Short: it is drawn inside the 132 px well.
 DONE_COPIED = "Copied · Ctrl+V"
 
+#: The detail on the INJECTING that re-inserts an entry from the history.
+#: There was no transcription and no pill, so there is no fill to finish and
+#: nothing for the paste to wait for.
+RECALL = "recall"
+
 #: How long the settings window's placement preview stays on screen. The
 #: owner's own number: "show the position on the desktop for say 5 sec".
 PREVIEW_SECONDS = 5.0
@@ -183,11 +193,17 @@ def _single_shot(seconds: float, done: Callable[[], None]):
     return type("_SingleShot", (), {"cancel": lambda self: timer.stop()})()
 
 
-def overlay_messages(state: State, detail: str, language: str) -> list[dict]:
+def overlay_messages(state: State, detail: str, language: str,
+                     finish_fill: bool = False) -> list[dict]:
     """The pill protocol for one pipeline transition, in order.
 
     Pure so the mapping can be read (and tested) without a daemon: the states
     the user must see are recording, transcribing, the checkmark and errors.
+
+    `finish_fill` is the daemon saying that this insertion is going to take the
+    pill off screen for its paste chord (see `pill_policy`); the fill is then
+    told to run to the end of its track first, because unmapping the pill
+    mid-sweep is what leaves the bar stopped in the middle.
     """
     if state is State.RECORDING:
         # The badge first, so the pill never appears showing the old language.
@@ -195,9 +211,13 @@ def overlay_messages(state: State, detail: str, language: str) -> list[dict]:
     if state is State.TRANSCRIBING:
         return [{"state": "transcribing"}]
     if state is State.INJECTING:
-        # Nothing: the checkmark belongs to the IDLE that follows a successful
-        # insertion. Saying `done` here too sent it twice per dictation.
-        return []
+        # No checkmark: that belongs to the IDLE that follows a successful
+        # insertion, and saying `done` here too sent it twice per dictation.
+        # The fill's run to the end is a different thing, and it starts here -
+        # as early as the transcript exists - so that the clipboard work and
+        # the wait for the modifiers are paid out of it rather than added to
+        # it. A recall never had a transcription, so it has nothing to finish.
+        return [{"finish": True}] if finish_fill and detail != RECALL else []
     if state is State.ERROR:
         return [{"state": "error", "text": detail or "dictation failed"}]
     if state is State.IDLE:
@@ -262,8 +282,11 @@ class _Bridge(QObject):
 
 class Daemon:
     def __init__(self, config: Config, *, listener=None, recorder=None, clipboard=None, sender=None,
-                 notifier=None, tray=None, preview_timer=None):
+                 notifier=None, tray=None, preview_timer=None, clock=None):
         self.config = config
+        #: The only clock the daemon reads. Injected so the paste's sequencing
+        #: around the pill's animations is testable without waiting for them.
+        self._clock = clock or time.monotonic
         #: What ends a pill preview after PREVIEW_SECONDS. A Qt single shot in
         #: the daemon; tests hand in a clock they can fire themselves.
         self._preview_timer_factory = preview_timer or _single_shot
@@ -293,6 +316,10 @@ class Daemon:
         #: What the focus-stealing pill costs the paste, if anything; set by
         #: _make_injector, reported by `status`. See pill_policy().
         self._pill_policy = "none"
+        #: When the pill's fill will have reached the end of its track, once
+        #: one has been asked for; None when nothing is owed. Written when the
+        #: message goes out, read once by the injector before it hides the pill.
+        self._fill_lands_at: float | None = None
         #: One background refresh of each kind at a time; see _refresh_off_thread.
         self._refreshers: dict[str, threading.Thread] = {}
         #: Whether this desktop can put the pill where the config says; None
@@ -347,7 +374,22 @@ class Daemon:
         return Injector(self._clipboard, self._sender, self.config.get("inject", {}) or {},
                         self.listener.modifiers_held, window_class_getter(self.config),
                         pill_policy=self._pill_policy, hide_pill=self._hide_pill_for_paste,
-                        settle_s=pill_settle_s(self.config))
+                        fill_wait=self._pill_fill_wait, settle_s=pill_settle_s(self.config))
+
+    def _pill_fill_wait(self) -> float:
+        """Seconds still owed to the pill's fill before it may be unmapped.
+
+        The injector calls this immediately before `_hide_pill_for_paste`, and
+        everything the insertion has already done - the clipboard snapshot, the
+        copy, waiting for the hotkey modifiers to clear - has been running
+        while the fill did, so only the remainder is left to wait for. Read
+        once: a second insertion must not inherit a deadline from the first.
+        """
+        lands_at, self._fill_lands_at = self._fill_lands_at, None
+        if lands_at is None:
+            return 0.0
+        # Never longer than the animation itself, whatever a clock has done.
+        return max(0.0, min(PILL_FILL_S, lands_at - self._clock()))
 
     def _hide_pill_for_paste(self) -> None:
         """Take the pill off screen so the paste chord reaches the user's window.
@@ -473,7 +515,12 @@ class Daemon:
         if self.overlay is None:
             return
         language = str(self.config.get("general.language", "en") or "en")
-        self._send_overlay(overlay_messages(state, detail, language), language)
+        # Only the `hide` policy unmaps the pill for the chord; every other
+        # case leaves it on screen, where the fill finishes into the checkmark
+        # on its own and costs the paste nothing. See pill_policy().
+        messages = overlay_messages(state, detail, language,
+                                    finish_fill=self._pill_policy == "hide")
+        self._send_overlay(messages, language)
 
     def _send_overlay(self, messages: list[dict], language: str) -> None:
         """Send one transition's messages, badge first when it has changed.
@@ -489,6 +536,10 @@ class Daemon:
             elif "state" in message and language != self._overlay_language:
                 self.overlay.send({"language": language})
                 self._overlay_language = language
+            if message.get("finish"):
+                # Armed where it is sent, so the deadline and the message can
+                # never disagree about whether a fill is on its way.
+                self._fill_lands_at = self._clock() + PILL_FILL_S
             self.overlay.send(message)
 
     def _sync_overlay_language(self) -> None:

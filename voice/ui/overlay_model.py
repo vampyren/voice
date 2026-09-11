@@ -190,11 +190,12 @@ class OverlayModel:
         #: The loudest recent level, and when it was set: full scale for the bars.
         self._peak = PEAK_FLOOR
         self._peak_at = self._now
-        #: Where the transcribing fill stood when the transcription finished,
-        #: as (width, opacity) - the start of its run to 100%. `None` whenever
-        #: `done` was not reached from a visible sweep, which is what keeps an
+        #: Where the fill stood when the transcription finished, as (width,
+        #: opacity), and when that was: the start of its run to 100%. `None`
+        #: whenever there is no completion to run, which is what keeps an
         #: error, a reduced-motion pill and a repeated `done` from animating.
         self._finish_from: tuple[float, float] | None = None
+        self._finish_at = self._now
 
     # -- geometry ---------------------------------------------------------
 
@@ -229,6 +230,29 @@ class OverlayModel:
         span = self._peak - NOISE
         return _clamp01((level - NOISE) / span) if span > 0 else 0.0
 
+    def finish_fill(self, now: float | None = None) -> float:
+        """Run the fill to the end of its track from wherever it stands now.
+
+        The daemon asks for this the moment the transcription lands, because
+        on a desktop that cannot give the pill a surface refusing the keyboard
+        the pill is unmapped for the paste chord - and unmapping it mid-sweep
+        is exactly the half-drawn line this whole thing exists to stop. The
+        checkmark is not due yet: it belongs to the insertion that follows.
+
+        Returns the seconds the fill still needs, so the caller can wait for
+        it before taking the pill off screen. Asking again while it is already
+        running says how much is left rather than starting it over, and asking
+        when there is no sweep on screen - not transcribing, or a pill with
+        animations turned off - is nothing and says so.
+        """
+        now = self._clock() if now is None else now
+        if self.state != "transcribing" or self.reduced_motion:
+            return 0.0
+        if self._finish_from is None:
+            self._finish_from = self._sweep_at(max(0.0, now - self._state_since))
+            self._finish_at = now
+        return max(0.0, self._finish_at + FINISH - now)
+
     def set_language(self, code: str) -> None:
         """Record a language switch; the badge and any notice read from here."""
         code = (code or "").strip() or self.lang
@@ -255,12 +279,20 @@ class OverlayModel:
     def _enter(self, state: str, text: str | None, now: float,
                reset_counter: bool) -> None:
         # A transcription that ends runs its fill to the end before the
-        # checkmark: read the sweep where it stands *now*, while the
-        # transcribing clock is still the current one.
-        self._finish_from = (
-            self._sweep_at(max(0.0, now - self._state_since))
-            if state == "done" and self.state == "transcribing"
-            and not self.reduced_motion else None)
+        # checkmark. The completion belongs to the fill rather than to the
+        # state: `transcribing`, `done` and `notice` are the three states that
+        # show it or remember it, so it survives them and nothing else. One
+        # already in flight - the daemon asks for it early when it is going to
+        # unmap the pill for a paste chord - is inherited, never restarted
+        # from further back.
+        if state not in ("transcribing", "done", "notice"):
+            self._finish_from = None
+        elif (state == "done" and self.state == "transcribing"
+                and self._finish_from is None and not self.reduced_motion):
+            # Read the sweep where it stands *now*, while the transcribing
+            # clock is still the current one.
+            self._finish_from = self._sweep_at(max(0.0, now - self._state_since))
+            self._finish_at = now
         self._now = self._last_tick = self._state_since = now
         if state == "recording" and self.state != "recording":
             if reset_counter:                  # a notice restores, it never restarts
@@ -384,9 +416,14 @@ class OverlayModel:
         """
         if self._finish_from is not None:
             start_w, start_a = self._finish_from
-            done = ease_out(_clamp01(self.state_age / FINISH)) if FINISH > 0 else 1.0
+            done = ease_out(_clamp01(self._finish_age / FINISH)) if FINISH > 0 else 1.0
             return start_w + (1.0 - start_w) * done, start_a + (1.0 - start_a) * done
         return self._sweep_at(self.state_age)
+
+    @property
+    def _finish_age(self) -> float:
+        """Seconds since the fill was set running to the end of its track."""
+        return max(0.0, self._now - self._finish_at)
 
     @property
     def finishing(self) -> bool:
@@ -397,7 +434,7 @@ class OverlayModel:
         a zero-length path and draws nothing until `check_draw` starts, which
         is the moment the fill lands.
         """
-        return self._finish_from is not None and self.state_age < FINISH
+        return self._finish_from is not None and self._finish_age < FINISH
 
     @property
     def _done_age(self) -> float:
@@ -410,8 +447,10 @@ class OverlayModel:
         completion longer than the delay pushes the checkmark back, and then
         by just the excess - never the whole of it.
         """
-        return max(0.0, self.state_age
-                   - (DONE_DELAY if self._finish_from is not None else 0.0))
+        start = self._state_since
+        if self._finish_from is not None:
+            start = max(start, self._finish_at + DONE_DELAY)
+        return max(0.0, self._now - start)
 
     @property
     def check_pop(self) -> tuple[float, float]:

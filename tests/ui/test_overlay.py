@@ -296,6 +296,34 @@ def test_a_done_after_transcribing_runs_the_fill_to_the_end(text):
     assert model.finishing is False and model.text == text
 
 
+def test_the_finish_message_runs_the_fill_to_the_end_before_the_pill_hides():
+    """What the daemon sends when it is about to unmap the pill for the paste
+    chord: finish the fill first, so nothing takes a half-drawn line off screen."""
+    clock = Clock()
+    model = OverlayModel(clock=clock)
+    apply_message(model, {"state": "transcribing"})
+    clock.t += 1.0
+    model.tick()
+    caught = model.sweep[0]
+    assert 0.0 < caught < 1.0
+    assert apply_message(model, {"finish": True}) is True
+    assert model.finishing is True
+    assert model.sweep[0] == pytest.approx(caught)
+    clock.t += FINISH
+    model.tick()
+    assert model.sweep == pytest.approx((1.0, 1.0)), "complete before it goes off screen"
+    apply_message(model, {"state": "hidden"})              # the chord goes out
+    clock.t += 0.3
+    apply_message(model, {"state": "done"})                # and the pill comes back
+    assert model.state == "done" and model.finishing is False
+
+
+def test_a_finish_with_no_fill_on_screen_is_ignored(model, caplog):
+    with caplog.at_level("WARNING"):
+        assert apply_message(model, {"finish": True}) is False
+    assert model.finishing is False
+
+
 # -- review findings ------------------------------------------------------
 
 @pytest.mark.parametrize("value", [None, 42, ["sv"], {"code": "sv"}, True])

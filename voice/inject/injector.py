@@ -101,6 +101,7 @@ class Injector:
                  modifiers_held: Callable[[], bool], window_class: Callable[[], str | None],
                  sleep: Callable[[float], None] = time.sleep, pill_policy: str = "none",
                  hide_pill: Callable[[], None] | None = None,
+                 fill_wait: Callable[[], float] | None = None,
                  settle_s: float = PILL_SETTLE_S):
         self._clip, self._sender, self._settings = clipboard, sender, settings
         self._modifiers_held, self._window_class, self._sleep = modifiers_held, window_class, sleep
@@ -108,6 +109,9 @@ class Injector:
         #: helper it started got a layer-shell surface. See PILL_POLICIES.
         self._pill_policy = pill_policy if pill_policy in PILL_POLICIES else "none"
         self._hide_pill, self._settle_s = hide_pill, settle_s
+        #: Asks the daemon how much of the pill's progress fill is still to
+        #: run, in seconds. Only the `hide` policy has anything to wait for.
+        self._fill_wait = fill_wait
 
     def _chord(self) -> str:
         cls = (self._window_class() or "").lower()
@@ -165,9 +169,31 @@ class Injector:
         """
         if self._pill_policy != "hide" or self._hide_pill is None:
             return
+        self._await_fill()
         try:
             self._hide_pill()
         except Exception:
             log.warning("could not take the pill off screen before pasting", exc_info=True)
             return
         self._sleep(self._settle_s)
+
+    def _await_fill(self) -> None:
+        """Let the pill's progress fill reach the end of its track first.
+
+        Taking the pill off screen mid-sweep is what leaves the bar stopped in
+        the middle, so the wait belongs here, before the hide - the settle
+        below cannot cover it, because what the settle waits for (the surface
+        going away, the compositor handing focus back) only starts once the
+        pill is unmapped. The daemon set this running when the transcript
+        landed, so everything the insertion has done since comes off it, and
+        it answers 0 when there is nothing on screen to finish.
+        """
+        if self._fill_wait is None:
+            return
+        try:
+            remaining = float(self._fill_wait())
+        except Exception:                       # a broken pill costs no time
+            log.debug("could not ask how far the pill's fill had got", exc_info=True)
+            return
+        if remaining > 0:
+            self._sleep(remaining)

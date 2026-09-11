@@ -1015,6 +1015,19 @@ def test_the_checkmark_is_sent_once_per_dictation(isolated_xdg, qapp, monkeypatc
     assert overlay_messages(State.IDLE, "7 chars via portal in 0.4s", "en") == [{"state": "done"}]
 
 
+def test_injecting_asks_for_the_fill_only_when_the_pill_is_about_to_be_hidden():
+    """A layer-shell pill is never unmapped for the chord, so it keeps the
+    completion it already runs when the checkmark arrives. `recall` never had
+    a transcription behind it, so there is no fill to finish and nothing to
+    wait for - re-inserting from the history must not slow down."""
+    from voice.daemon import overlay_messages
+    from voice.pipeline import State
+
+    assert overlay_messages(State.INJECTING, "", "en") == []
+    assert overlay_messages(State.INJECTING, "", "en", finish_fill=True) == [{"finish": True}]
+    assert overlay_messages(State.INJECTING, "recall", "en", finish_fill=True) == []
+
+
 def test_a_failed_dictation_shows_the_error_and_does_not_hide_it(isolated_xdg, qapp, monkeypatch,
                                                                  helper_processes):
     from voice.pipeline import State
@@ -1505,7 +1518,8 @@ class FakeProbe:
 
 
 def _focus_daemon(monkeypatch, *, overlay=True, allow_fallback=True, layer_shell=False,
-                  command=("python3",), mode="paste", pill_focus=None, settle_ms=None):
+                  command=("python3",), mode="paste", pill_focus=None, settle_ms=None,
+                  clock=None):
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
         "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
     monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
@@ -1520,8 +1534,9 @@ def _focus_daemon(monkeypatch, *, overlay=True, allow_fallback=True, layer_shell
     if settle_ms is not None:
         cfg.set("inject.pill_settle_ms", settle_ms)
     cfg.save()
+    kwargs = {"clock": clock} if clock is not None else {}
     d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray(),
-               notifier=QuietNotifier())
+               notifier=QuietNotifier(), **kwargs)
     d.build()
     return d
 
@@ -1635,7 +1650,12 @@ def test_the_pill_goes_off_screen_settles_and_only_then_is_the_chord_sent(
     carries the checkmark; this drives those three by hand so the ordering is
     observable in one log. The injector's clock is replaced, so every settle is
     recorded rather than waited for and nothing here reads the wall clock.
+
+    The fill's run to the end of the track belongs at the front of this: the
+    owner's pill cannot refuse focus, so it is unmapped for the chord, and
+    unmapping it mid-sweep is exactly why the bar "never goes to the end".
     """
+    from voice.daemon import PILL_FILL_S
     from voice.pipeline import State
 
     d = _focus_daemon(monkeypatch, settle_ms=180)
@@ -1660,7 +1680,10 @@ def test_the_pill_goes_off_screen_settles_and_only_then_is_the_chord_sent(
     d.overlay = RecordingOverlay()
     d.injector._sender = RecordingSender()
     d.injector._clip = RecordingClipboard()
-    d.injector._sleep = lambda seconds: log.append(("settle", round(seconds, 3)))
+    # The injector just sleeps; what each wait is for is its position, so the
+    # log names it that way - before the pill is unmapped it can only be the fill.
+    d.injector._sleep = lambda seconds: log.append(
+        ("fill" if {"state": "hidden"} not in log else "settle", round(seconds, 3)))
     try:
         d._on_dictation_state(State.INJECTING)
         d.injector.inject("hello")
@@ -1669,7 +1692,9 @@ def test_the_pill_goes_off_screen_settles_and_only_then_is_the_chord_sent(
         d.shutdown()
 
     assert log == [
-        ("copy", "hello"),
+        {"finish": True},                    # run the fill to the end of its track
+        ("copy", "hello"),                   # which the clipboard work is paid out of
+        ("fill", pytest.approx(PILL_FILL_S)),  # the rest of it, before anything hides
         {"state": "hidden"},                 # the pill lets go of the keyboard
         ("settle", 0.18),                    # the compositor hands focus back
         ("chord", [29, 47]),                 # and only now, ctrl+v
@@ -1677,6 +1702,149 @@ def test_the_pill_goes_off_screen_settles_and_only_then_is_the_chord_sent(
         "restore",
         {"state": "done"},                   # the pill comes straight back
     ], log
+
+
+class _PillClock:
+    """An injected clock the test moves itself; the daemon never reads the wall."""
+
+    def __init__(self, t=100.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, dt):
+        self.t += dt
+        return self.t
+
+
+def _recording_pill_daemon(monkeypatch, *, clock=None, spend=0.0, **kwargs):
+    """A focus-stealing daemon with every moving part recorded in one log.
+
+    `spend` is how long the clipboard work takes, which is time the fill's
+    completion is running through anyway.
+    """
+    log = []
+    d = _focus_daemon(monkeypatch, clock=clock, **kwargs)
+
+    class RecordingOverlay:
+        def send(self, message): log.append(message)
+        def flush(self, timeout=1.0): return True
+        def stop(self): pass
+        def status(self): return "running"
+
+    class RecordingSender:
+        name = "fake"
+        def send_chord(self, codes): log.append(("chord", codes))
+        def available(self): return True
+
+    class RecordingClipboard:
+        def snapshot(self): return type("S", (), {"text": "old"})()
+
+        def set_text(self, text):
+            log.append(("copy", text))
+            if clock is not None and spend:
+                clock.advance(spend)
+
+        def restore(self, snap): log.append("restore"); return True
+
+    def sleep(seconds):
+        # Named by position: nothing is waited for between the fill and the
+        # hide except the fill, and nothing after the hide except settles.
+        log.append(("fill" if {"state": "hidden"} not in log else "settle",
+                    round(seconds, 4)))
+        if clock is not None:
+            clock.advance(seconds)
+
+    d.overlay = RecordingOverlay()
+    d.injector._sender = RecordingSender()
+    d.injector._clip = RecordingClipboard()
+    d.injector._sleep = sleep
+    return d, log
+
+
+def test_the_layer_shell_path_never_asks_for_a_fill_or_waits_for_one(
+        isolated_xdg, qapp, monkeypatch):
+    """Where the pill can refuse focus nothing hides it, so the completion
+    stays where it was: in the checkmark's own lead-in, costing nothing."""
+    from voice.pipeline import State
+
+    d, log = _recording_pill_daemon(monkeypatch, layer_shell=True)
+    try:
+        assert d.injector._pill_policy == "none"
+        d._on_dictation_state(State.INJECTING)
+        d.injector.inject("hello")
+        d._on_dictation_state(State.IDLE, "5 chars via fake in 0.1s")
+    finally:
+        d.shutdown()
+
+    assert {"finish": True} not in log
+    assert log == [("copy", "hello"), ("chord", [29, 47]), ("fill", 0.15), "restore",
+                   {"state": "done"}], log
+
+
+def test_a_failed_transcription_asks_for_no_completion_and_waits_for_nothing(
+        isolated_xdg, qapp, monkeypatch):
+    """An error is not an operation to finish, and it never reaches the chord."""
+    from voice.pipeline import State
+
+    clock = _PillClock()
+    d, log = _recording_pill_daemon(monkeypatch, clock=clock)
+    try:
+        d._on_dictation_state(State.ERROR, "whisper died")
+        assert log == [{"state": "error", "text": "whisper died"}]
+        assert d._pill_fill_wait() == 0.0, "nothing was armed to wait for"
+    finally:
+        d.shutdown()
+
+
+def test_the_added_latency_is_only_what_the_injection_had_not_already_spent(
+        isolated_xdg, qapp, monkeypatch):
+    """The budget: the fill's completion costs the paste the part of itself
+    that the injection did not use for its own work, and never more than the
+    completion. Everything is measured on the injected clock."""
+    from voice.daemon import PILL_FILL_S
+    from voice.pipeline import State
+
+    for spend, expected in ((0.0, PILL_FILL_S), (0.12, PILL_FILL_S - 0.12), (0.5, 0.0)):
+        clock = _PillClock()
+        d, log = _recording_pill_daemon(monkeypatch, clock=clock, spend=spend)
+        try:
+            d._on_dictation_state(State.INJECTING)
+            d.injector.inject("hello")
+            settle_s = d.injector._settle_s
+        finally:
+            d.shutdown()
+        chord = next(i for i, e in enumerate(log)
+                     if isinstance(e, tuple) and e[0] == "chord")
+        fill = sum(seconds for kind, seconds in
+                   [e for e in log if isinstance(e, tuple) and e[0] == "fill"])
+        assert fill == pytest.approx(max(0.0, expected), abs=1e-6), log
+        assert fill <= PILL_FILL_S, "never longer than the animation itself"
+        # The budget, from the transcript landing to the chord going out: the
+        # insertion's own work, then whatever is left of the completion, then
+        # the unchanged settle. Waiting for the fill costs the difference and
+        # nothing when the insertion took longer than the fill did.
+        waited = spend + sum(seconds for kind, seconds in
+                             [e for e in log[:chord] if isinstance(e, tuple)]
+                             if kind in ("fill", "settle"))
+        assert waited == pytest.approx(max(PILL_FILL_S, spend) + settle_s, abs=1e-6), log
+
+
+def test_a_recall_is_not_slowed_down_by_a_fill_that_never_ran(isolated_xdg, qapp, monkeypatch):
+    """Re-inserting from the history has no transcription behind it."""
+    from voice.pipeline import State
+
+    clock = _PillClock()
+    d, log = _recording_pill_daemon(monkeypatch, clock=clock)
+    try:
+        started = clock.t
+        d._on_dictation_state(State.INJECTING, "recall")
+        d.injector.inject("hello")
+    finally:
+        d.shutdown()
+    assert {"finish": True} not in log
+    assert clock.t - started == pytest.approx(d.injector._settle_s + 0.15, abs=1e-6), log
 
 
 def test_a_reload_re_reads_the_pill_policy(isolated_xdg, qapp, monkeypatch):

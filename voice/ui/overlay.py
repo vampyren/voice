@@ -6,7 +6,7 @@ One JSON object per line, one line per event:
     {"state": "transcribing"}       {"language": "sv"}
     {"state": "done"}               {"state": "notice", "text": "EN → SV"}
     {"state": "error", "text": "pw-record: no such target"}
-    {"state": "hidden"}
+    {"state": "hidden"}             {"finish": true}
 
 Everything above the GTK layer is importable without PyGObject, so the
 protocol is unit-tested without a display; `gi` is imported inside `main`.
@@ -86,6 +86,12 @@ def apply_message(model: OverlayModel, message: dict) -> bool:
             applied = True
         except (TypeError, ValueError):
             log.warning("overlay: bad level %r", message["level"])
+    if message.get("finish"):
+        # "run the progress fill to the end of its track, now": the daemon is
+        # about to take the pill off screen for the paste chord and will not
+        # unmap a half-drawn line. Nothing to finish is not an error - the
+        # daemon cannot see what the pill is showing.
+        applied = model.finish_fill() > 0.0 or applied
     if "state" in message:
         text = message.get("text")
         try:

@@ -545,3 +545,46 @@ def test_a_done_state_with_its_own_words_draws_those_words(tmp_path):
     assert img.count(lit, **label) != plain.count(lit, **label)   # and it is not "Inserted"
     # Inside the pill: a label wider than the well would be clipped by the capsule.
     assert img.count(lit, x0=natural_width(model) - 4, x1=natural_width(model)) == 0
+
+
+# -- the window around the pill -------------------------------------------
+# Where the compositor places the window itself, the pill is drawn at one edge
+# of a bigger, otherwise transparent window; see tests/ui/test_overlay.py for
+# the geometry. Here: that the pill itself is untouched by that.
+
+def _window_png(model, path, window, pill, origin):
+    od.render_window_surface(model, window, pill, origin).write_to_png(str(path))
+    return path
+
+
+def test_a_window_the_size_of_the_pill_is_exactly_the_pill_we_always_drew(tmp_path):
+    """The layer-shell path asks for this, and it must not change one pixel."""
+    model = _model("recording")
+    width, height = natural_width(model, 44), 44
+    plain = od.render_surface(model, width, height)
+    padded = od.render_window_surface(model, (width, height), (width, height), (0, 0))
+    assert (padded.get_width(), padded.get_height()) == (width, height)
+    assert bytes(padded.get_data()) == bytes(plain.get_data())
+
+
+def test_the_pill_inside_a_padded_window_is_the_same_pill(tmp_path):
+    model = _model("recording")
+    width, height = natural_width(model, 44), 44
+    plain = Image(render_png(model, tmp_path / "plain.png", width=width, height=height))
+    img = Image(_window_png(model, tmp_path / "padded.png",
+                            (width + 40, 520), (width, height), (20, 476)))
+    assert (img.width, img.height) == (width + 40, 520)
+    for y in range(height):
+        for x in range(width):
+            assert img(20 + x, 476 + y) == plain(x, y), f"pixel {x},{y} moved or changed"
+
+
+def test_the_padding_around_the_pill_is_transparent_not_filled(tmp_path):
+    model = _model("recording")
+    width, height = natural_width(model, 44), 44
+    img = Image(_window_png(model, tmp_path / "padded.png",
+                            (width + 40, 520), (width, height), (20, 476)))
+    outside = [(x, y) for y in range(0, 520) for x in range(0, width + 40)
+               if not (20 <= x < 20 + width and 476 <= y < 476 + height)]
+    assert max(img(x, y)[3] for x, y in outside) == 0, "the padding must not be painted"
+    assert img.count(lambda p: p[3] > 0, y0=476, y1=520) > 100, "the pill is still drawn"

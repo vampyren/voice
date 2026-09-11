@@ -1,0 +1,18 @@
+#!/bin/sh
+# /usr/bin/voice-overlay - installed by the `voice` package.
+#
+# The recording pill is GTK 4 through PyGObject, which is a distro package for
+# the *system* interpreter; the app's own python312 has no `gi` and no `cairo`.
+# So this runs the helper on /usr/bin/python3 with only the app directory on
+# PYTHONPATH - deliberately not /usr/lib/voice/deps, whose extension modules
+# are built for 3.12 and have no business on the system interpreter's path.
+#
+# The daemon normally spawns the helper itself (voice.ui.overlay_client probes
+# /usr/bin/python3 first and runs `python3 -m voice.ui.overlay`); this script is
+# the same thing by hand, for `voice doctor` follow-up and debugging.
+set -e
+
+PYTHONPATH="/usr/lib/voice/app${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+
+exec /usr/bin/python3 -P -m voice.ui.overlay "$@"

@@ -1,0 +1,60 @@
+# pacman scriptlet for the `voice` package.
+#
+# The udev rule tags input event devices with `uaccess` so the logged-in seat
+# user can read keyboard events for push-to-talk. udev does not pick a new rule
+# up on its own, hence the reload here and after removal.
+
+_reload_udev() {
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules >/dev/null 2>&1 || true
+        udevadm trigger --subsystem-match=input >/dev/null 2>&1 || true
+    fi
+}
+
+post_install() {
+    _reload_udev
+    cat <<'MSG'
+voice is installed. Three things to do, once:
+
+  1. Assign the push-to-talk key. Start the daemon (`voice daemon`, or log out
+     and back in - it autostarts), then open
+       Settings -> Keyboard -> Keyboard Shortcuts
+     and give "voice" a key. The desktop owns that key from then on; the
+     hotkeys.portal_* settings are only a first-run preference.
+  2. Run `voice doctor`. It says what works on this machine and what to fix.
+  3. The first dictation opens the desktop's RemoteDesktop permission dialog -
+     accept it. The restore token is cached, so it asks once.
+
+The local backend downloads its model on first use (large-v3-turbo is about
+1.6 GB, cached under ~/.cache/huggingface). Transcription runs on the CPU
+unless the `voice-cuda` package is installed as well.
+
+Autostart comes from /etc/xdg/autostart/io.github.vampyren.voice.desktop. To
+stop it for your user without touching the package:
+  mkdir -p ~/.config/autostart
+  cp /etc/xdg/autostart/io.github.vampyren.voice.desktop ~/.config/autostart/
+  echo 'Hidden=true' >> ~/.config/autostart/io.github.vampyren.voice.desktop
+
+If you also installed from a git clone, ~/.local/bin/voice shadows /usr/bin/voice
+on most PATHs; run ./install.sh --uninstall in the checkout to clear it.
+MSG
+}
+
+post_upgrade() {
+    _reload_udev
+}
+
+post_remove() {
+    _reload_udev
+    cat <<'MSG'
+voice is removed. Your own files are deliberately left behind - delete them by
+hand if you want a clean slate:
+
+  rm -rf ~/.config/voice          # config.toml
+  rm -rf ~/.local/state/voice     # history, portal restore token
+  rm -rf ~/.cache/huggingface     # downloaded models (shared with other tools!)
+
+A running daemon from before the removal keeps going until you log out or run
+`kill` on it; the socket is /run/user/$UID/voice.sock.
+MSG
+}

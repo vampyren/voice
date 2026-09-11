@@ -1,0 +1,30 @@
+#!/bin/sh
+# /usr/bin/voice - installed by the `voice` package.
+#
+# The app runs on python312 out of /usr/lib/voice, not on the system Python:
+# the project pins CPython 3.12 and its locked dependency set (CTranslate2,
+# onnxruntime, PySide6) is built for it. `app` holds the project, `deps` the
+# locked third-party wheels.
+#
+# -P keeps the current directory off sys.path, so running this from a checkout
+# of the project cannot shadow the installed package with the working copy.
+set -e
+
+prefix=/usr/lib/voice
+PYTHONPATH="$prefix/app:$prefix/deps${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+
+# CTranslate2 dlopens libcublas.so.12 at runtime and nothing puts the wheel's
+# copy on the loader path. Present only when `voice-cuda` is installed; without
+# it the local backend falls back to CPU int8 with a warning.
+if [ -d "$prefix/cuda/nvidia" ]; then
+    for dir in "$prefix"/cuda/nvidia/*/lib; do
+        # A literal glob (nothing matched) fails this test and is skipped.
+        if [ -d "$dir" ]; then
+            LD_LIBRARY_PATH="$dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        fi
+    done
+    export LD_LIBRARY_PATH
+fi
+
+exec /usr/bin/python3.12 -P -m voice.cli "$@"

@@ -287,6 +287,13 @@ class OverlayModel:
         # from further back.
         if state not in ("transcribing", "done", "notice"):
             self._finish_from = None
+        elif state == "transcribing" and self.state != "notice":
+            # A transcription that is starting has nothing to complete: a fill
+            # carried in from the last one renders a motionless full bar where
+            # the indeterminate loop belongs. The one exception is the notice
+            # that covered a fill and has just expired, which is the only way
+            # into this state with a completion genuinely in flight.
+            self._finish_from = None
         elif (state == "done" and self.state == "transcribing"
                 and self._finish_from is None and not self.reduced_motion):
             # Read the sweep where it stands *now*, while the transcribing

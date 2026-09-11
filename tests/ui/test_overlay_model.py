@@ -846,3 +846,40 @@ def test_a_notice_does_not_lose_a_fill_that_is_finishing(model, clock):
     model.set_state("notice", now=clock.advance(0.05))
     model.tick(clock.advance(FINISH))
     assert model.sweep == pytest.approx((1.0, 1.0))
+
+
+def test_a_second_transcription_does_not_start_on_a_landed_fill(model, clock):
+    """A landed completion leaves `sweep` at (1, 1) for as long as it is held,
+    and entering `transcribing` did not clear it: a transition into that state
+    from anywhere but recording, error or hidden would have drawn a motionless
+    full bar instead of the indeterminate loop. Not reachable from the daemon
+    today, which is why it has to be pinned here."""
+    _mid_sweep(model, clock)
+    model.finish_fill(now=clock.t)
+    model.tick(clock.advance(FINISH + FRAME))
+    assert model.sweep == pytest.approx((1.0, 1.0))          # the fill has landed
+    model.set_state("done", now=clock.t)
+
+    model.set_state("transcribing", now=clock.advance(0.1))  # the would-be path
+
+    assert model.finishing is False
+    model.tick(clock.advance(FRAME))
+    width, alpha = model.sweep
+    assert width < 1.0, "a new transcription sweeps; it does not sit at full width"
+    assert model.sweep[0] != pytest.approx(1.0)
+    model.tick(clock.advance(SWEEP_PERIOD / 4))
+    assert model.sweep[0] > width, "and it is moving"
+
+
+def test_a_notice_over_a_finishing_fill_still_comes_back_to_it(model, clock):
+    """The one way into `transcribing` that must keep the completion: a notice
+    covered the pill while the fill was running and then expired."""
+    _mid_sweep(model, clock)
+    model.finish_fill(now=clock.t)
+    caught = model.sweep[0]
+    model.set_state("notice", now=clock.advance(0.02))
+    model.tick(clock.advance(NOTICE_TTL + 0.01))             # the notice expires
+
+    assert model.state == "transcribing"
+    assert model.sweep == pytest.approx((1.0, 1.0)), "the fill landed under the notice"
+    assert caught < 1.0

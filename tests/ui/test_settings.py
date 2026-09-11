@@ -1133,7 +1133,8 @@ def test_every_control_survived_the_polish(qapp, backend):
                  "hotkey_status", "advanced_button", "advanced_box",
                  "device_combo", "max_seconds",
                  "profile_list", "add_profile_combo", "add_profile_button", "activate_button",
-                 "active_label", "replacements_table", "error_label", "save_button"):
+                 "active_label", "replacements_table", "hotwords_edit",
+                 "error_label", "save_button"):
         widget = getattr(dlg, name)
         assert widget is not None, name
         assert widget.parentWidget() is not None, f"{name} is not in the layout"
@@ -2063,3 +2064,15 @@ def test_advanced_sits_under_the_shortcuts_it_expands(qapp, isolated_xdg):
     gap = (dlg.advanced_button.mapTo(dlg, dlg.advanced_button.rect().topLeft()).y()
            - group.mapTo(dlg, group.rect().bottomLeft()).y())
     assert 0 <= gap < 100, f"Advanced sits {gap}px below the group it expands"
+
+
+def test_words_to_listen_for_roundtrip(qapp):
+    """The vocabulary is a list in the file and a comma-separated line in the
+    window; blanks a user leaves between commas are not words."""
+    cfg, dlg, _ = make(qapp)
+    assert dlg.hotwords_edit.text() == ""
+    dlg.hotwords_edit.setText(" Hollyland Lark, Keychron , , ")
+    dlg.save_button.click()
+    assert Config.load().get("dictionary.hotwords") == ["Hollyland Lark", "Keychron"]
+    _, reopened, _ = make(qapp)
+    assert reopened.hotwords_edit.text() == "Hollyland Lark, Keychron"

@@ -509,3 +509,35 @@ def test_a_broken_placement_still_reads_back_as_something_showable(isolated_xdg)
     cfg.set("ui.overlay_position", "sideways")
     cfg.set("ui.overlay_margin_y", 99999)
     assert cfg.overlay_placement() == ("bottom-center", 0, 2000)
+
+
+def test_the_shipped_config_has_an_empty_hotwords_list(isolated_xdg):
+    cfg = Config.load()
+    assert cfg.get("dictionary.hotwords") == []
+    assert cfg.errors() == []
+
+
+def test_hotwords_joins_the_word_list_with_the_replacement_targets(isolated_xdg):
+    cfg = Config.load()
+    cfg.set("dictionary.hotwords", ["Hollyland Lark", "Keychron"])
+    # The shipped replacements target CachyOS and OBSBOT.
+    assert cfg.hotwords() == "Hollyland Lark, Keychron, CachyOS, OBSBOT"
+
+
+def test_hotwords_is_empty_for_a_config_written_before_the_key_existed(isolated_xdg):
+    cfg = Config.load()
+    cfg.set("dictionary.replacements", [])
+    cfg._doc["dictionary"].pop("hotwords")
+    assert cfg.hotwords() == ""
+    assert cfg.errors() == []
+
+
+@pytest.mark.parametrize("value, wanted", [
+    ("CachyOS, OBSBOT", "list"),          # the string form is a common hand-edit
+    (["CachyOS", 7], "non-empty strings"),
+    (["CachyOS", "  "], "non-empty strings"),
+])
+def test_errors_rejects_a_hotwords_list_that_is_not_a_list_of_words(isolated_xdg, value, wanted):
+    cfg = Config.load()
+    cfg.set("dictionary.hotwords", value)
+    assert any("dictionary.hotwords" in e and wanted in e for e in cfg.errors()), cfg.errors()

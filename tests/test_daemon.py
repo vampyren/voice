@@ -2729,3 +2729,30 @@ def test_the_settings_window_previews_through_the_daemon(isolated_xdg, qapp, mon
     assert "Showing" in d._settings.preview_note.text()
     d._settings.close()
     d.shutdown()
+
+
+def test_the_dictation_vocabulary_is_built_from_the_dictionary(isolated_xdg, qapp):
+    """The words the user listed plus the spellings their replacements aim at,
+    read fresh on the worker so an edit applies to the next dictation."""
+    cfg = Config.load()
+    cfg.set("dictionary.hotwords", ["Hollyland Lark"])
+    cfg.save()
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    try:
+        assert d.dictation.sv.hotwords_getter() == "Hollyland Lark, CachyOS, OBSBOT"
+    finally:
+        d.shutdown()
+
+
+def test_an_unusable_dictionary_costs_the_vocabulary_not_the_dictation(isolated_xdg, qapp):
+    """_hotwords() runs on the worker just before transcribe(); raising there
+    would bypass the TranscriptionError path and discard the recording."""
+    cfg = Config.load()
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    try:
+        cfg.set("dictionary.replacements", "not a list at all")
+        assert d._hotwords() is None or isinstance(d._hotwords(), str)
+    finally:
+        d.shutdown()

@@ -348,7 +348,8 @@ class Daemon:
         self._active_profile = self._profile_snapshot()
         services = Services(recorder=self._recorder, transcriber=self._make_transcriber(),
                             injector=self.injector, history=self.history, notify=self._notifier.notify,
-                            config_getter=self.config.get, prompt_getter=self._prompt)
+                            config_getter=self.config.get, prompt_getter=self._prompt,
+                            hotwords_getter=self._hotwords)
         self.dictation = Dictation(services)
         self.tray = self._tray or Tray(self._on_tray_action)
         self.overlay = self._make_overlay()
@@ -873,6 +874,20 @@ class Daemon:
             return self.config.stt_profile()[1].get("prompt") or None
         except Exception:
             log.debug("no prompt available for the active profile", exc_info=True)
+            return None
+
+    def _hotwords(self) -> str | None:
+        """The vocabulary for the next dictation: the words the user listed plus
+        the spellings their replacements aim at.
+
+        Runs on the worker just before transcribe(), like _prompt(), and must not
+        raise there for the same reason: a hand-edited dictionary costs the
+        vocabulary, never the recording.
+        """
+        try:
+            return self.config.hotwords() or None
+        except Exception:
+            log.debug("no vocabulary available", exc_info=True)
             return None
 
     # -- runtime ------------------------------------------------------------

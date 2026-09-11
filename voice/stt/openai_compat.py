@@ -39,7 +39,11 @@ class OpenAICompatTranscriber:
     def describe(self) -> str:
         return f"{self._profile.get('model')} @ {urlparse(str(self._profile.get('base_url'))).hostname}"
 
-    def transcribe(self, pcm: np.ndarray, language: str | None, prompt: str | None) -> Transcript:
+    def transcribe(self, pcm: np.ndarray, language: str | None, prompt: str | None,
+                   hotwords: str | None = None) -> Transcript:
+        """`hotwords` is a faster-whisper decoder setting with no equivalent in the
+        OpenAI transcription API, so it is accepted and ignored here: the local
+        backend is the one that can be told what to listen for."""
         if not self._secret:
             raise TranscriptionError(
                 f"no API key for {self.describe()}: set api_key or api_key_env in the profile")

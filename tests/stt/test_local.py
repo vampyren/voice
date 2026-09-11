@@ -61,6 +61,26 @@ def test_transcribe_joins_segments_and_reports_metadata():
     assert FakeModel.last_kwargs["language"] == "en"
 
 
+def test_the_vocabulary_is_sent_as_hotwords_beside_the_style_prompt():
+    """Two separate things: hotwords bias the decoder towards the user's words,
+    initial_prompt steers the style. Measured, a prose prompt doing the
+    vocabulary's job doubled the errors on ordinary English."""
+    t = LocalTranscriber({"model": "small"}, model_factory=FakeModel, cuda_available=lambda: True)
+    t.transcribe(np.zeros(1600, dtype=np.int16), "en", "Dictating notes.",
+                 hotwords="CachyOS, OBSBOT")
+    assert FakeModel.last_kwargs["hotwords"] == "CachyOS, OBSBOT"
+    assert FakeModel.last_kwargs["initial_prompt"] == "Dictating notes."
+
+
+@pytest.mark.parametrize("hotwords", [None, "", "   "])
+def test_an_empty_vocabulary_sends_no_hotwords_at_all(hotwords):
+    """faster-whisper builds a <|startofprev|> context whenever hotwords is set;
+    an empty list must leave the decoder exactly as it was."""
+    t = LocalTranscriber({"model": "small"}, model_factory=FakeModel, cuda_available=lambda: True)
+    t.transcribe(np.zeros(1600, dtype=np.int16), "en", None, hotwords=hotwords)
+    assert "hotwords" not in FakeModel.last_kwargs
+
+
 def test_auto_language_passes_none():
     t = LocalTranscriber({"model": "small"}, model_factory=FakeModel, cuda_available=lambda: True)
     t.transcribe(np.zeros(1600, dtype=np.int16), language="auto", prompt="")

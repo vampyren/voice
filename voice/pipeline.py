@@ -79,6 +79,9 @@ class Services:
     notify: Callable[..., None]
     config_getter: Callable[..., Any]
     prompt_getter: Callable[[], str | None] = lambda: None
+    #: The user's vocabulary, read fresh for each dictation so an edit in the
+    #: settings window applies to the next one without a restart.
+    hotwords_getter: Callable[[], str | None] = lambda: None
     trim: Callable[[np.ndarray], np.ndarray] = trim_silence
     #: Every capture source PipeWire knows about, or None when it could not be
     #: asked at all. The two answers are not the same: see `_no_microphone`.
@@ -541,7 +544,8 @@ class Dictation:
                 # What an abandoned attempt leaves behind for the retry.
                 self._audio = audio
             try:
-                result = self.sv.transcriber.transcribe(audio, language, self.sv.prompt_getter())
+                result = self.sv.transcriber.transcribe(audio, language, self.sv.prompt_getter(),
+                                                        hotwords=self.sv.hotwords_getter())
             except TranscriptionError as exc:
                 if not self._claim(attempt):
                     log.info("a backend error from an abandoned attempt: %s", exc)

@@ -13,6 +13,7 @@ from tomlkit.exceptions import TOMLKitError
 from voice import paths
 from voice.inject.injector import PILL_FOCUS_CHOICES
 from voice.inject.keys import parse_chord
+from voice.text import build_hotwords
 from voice.ui.placement import (DEFAULT_MARGIN_X, DEFAULT_MARGIN_Y, DEFAULT_POSITION,
                                 LEGACY_POSITIONS, MARGIN_LIMIT, POSITIONS, clamp_margin,
                                 is_margin, normalise_position)
@@ -72,7 +73,10 @@ model = "large-v3-turbo"   # or "KBLab/kb-whisper-large" for Swedish
 device = "cuda"            # falls back to cpu/int8 with a warning
 compute_type = "float16"
 beam_size = 5
-prompt = ""                # vocabulary hint, e.g. "CachyOS, OBSBOT, Keychron"
+prompt = ""                # steers the style of what is written, e.g. "Notes on a
+                           # meeting." Names and jargon belong in [dictionary]
+                           # hotwords instead: a prose prompt here pulls ordinary
+                           # sentences towards its own wording.
 
 [stt.profiles.openai]
 backend = "openai_compatible"
@@ -101,6 +105,11 @@ replacements = [
   ["cachy os", "CachyOS", "icase"],
   ["obs bot", "OBSBOT", "icase"],
 ]
+# Names and jargon to tell the local model to listen for, as whole words or short
+# phrases, e.g. ["CachyOS", "Hollyland Lark"]. The spellings the replacements
+# above aim at are added for you; the first 200 characters of the combined list
+# are sent with each recording, and anything past that is left out.
+hotwords = []
 
 [inject]
 mode = "paste"             # "paste" sends the paste chord; "clipboard" only copies and
@@ -224,6 +233,19 @@ class Config:
         current = str(self.get("general.language", "en") or "en").strip()
         return [current] if current else []
 
+    def hotwords(self) -> str:
+        """The vocabulary the local backend biases towards, as one string.
+
+        Built from `dictionary.hotwords` and the replacement targets; see
+        `voice.text.build_hotwords`. A config written before this key existed, or
+        one a hand edit has made nonsense of, simply has no vocabulary - the
+        recording is still transcribed, and `errors()` says what to fix.
+        """
+        words = self.get("dictionary.hotwords", [])
+        rules = self.get("dictionary.replacements", [])
+        return build_hotwords(words if isinstance(words, list) else [],
+                              rules if isinstance(rules, list) else [])
+
     def language_profiles(self) -> dict[str, str]:
         """`general.language_profiles`, normalised to lower-case codes.
 
@@ -307,6 +329,16 @@ class Config:
                 for entry in languages:
                     errs += _language_errors("general.languages", entry)
         errs += self._language_profile_errors(profiles)
+        # Absent in a config written before the vocabulary existed: that file
+        # transcribes exactly as it did then, with the replacement targets alone.
+        hotwords = self.get("dictionary.hotwords")
+        if hotwords is not None:
+            if not isinstance(hotwords, list):
+                errs.append("dictionary.hotwords must be a list of words and short "
+                            f"phrases, got {hotwords!r}")
+            elif any(not isinstance(w, str) or not w.strip() for w in hotwords):
+                errs.append("dictionary.hotwords must hold only non-empty strings, "
+                            f"got {hotwords!r}")
         if not isinstance(self.get("audio.max_seconds"), int) or self.get("audio.max_seconds") <= 0:
             errs.append("audio.max_seconds must be a positive integer")
         # Absent in a config written before this option existed: that file pastes,

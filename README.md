@@ -327,7 +327,10 @@ model = "large-v3-turbo"   # or "KBLab/kb-whisper-large" for Swedish
 device = "cuda"            # falls back to cpu/int8 with a warning
 compute_type = "float16"
 beam_size = 5
-prompt = ""                # vocabulary hint, e.g. "CachyOS, OBSBOT, Keychron"
+prompt = ""                # steers the style of what is written, e.g. "Notes on a
+                           # meeting." Names and jargon belong in [dictionary]
+                           # hotwords instead: a prose prompt here pulls ordinary
+                           # sentences towards its own wording.
 
 [stt.profiles.openai]
 backend = "openai_compatible"
@@ -356,6 +359,11 @@ replacements = [
   ["cachy os", "CachyOS", "icase"],
   ["obs bot", "OBSBOT", "icase"],
 ]
+# Names and jargon to tell the local model to listen for, as whole words or short
+# phrases, e.g. ["CachyOS", "Hollyland Lark"]. The spellings the replacements
+# above aim at are added for you; the first 200 characters of the combined list
+# are sent with each recording, and anything past that is left out.
+hotwords = []
 
 [inject]
 mode = "paste"             # "paste" sends the paste chord; "clipboard" only copies and
@@ -375,6 +383,19 @@ pill_focus = "hide"        # what to do when the recording pill can only be an o
 pill_settle_ms = 150       # how long to let the compositor hand focus back after the
                            # pill is hidden, before the chord is sent
 ```
+
+**Words the model does not know.** Whisper has never seen *CachyOS*, *OBSBOT* or
+*CTranslate2* written down, so it writes the nearest ordinary English it can hear —
+"khaki OS", "Ubspot" — and which way it lands changes with how you said the word. List
+those names in `[dictionary] hotwords` (the settings window calls it **Words to listen
+for**) and the model is told to expect them: on this project's test corpus that took
+domain-term recall from 3 of 8 to 7 of 8 with no change at all to ordinary English. The
+`replacements` table below it is the other half — it fixes a spelling *after* the fact —
+and every spelling in its "Replace with" column is listened for automatically, so you
+keep one list, not two. The vocabulary is capped at 200 characters because it shares
+Whisper's small prompt window; entries past that are left out. Put names here rather than
+in a profile's `prompt`: a prose prompt reaches the same recall but pulls ordinary
+sentences towards its own wording, which doubled the errors on plain English.
 
 **Hotkey backend.** `hotkeys.backend` decides how the hotkey is seen:
 

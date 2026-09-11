@@ -239,6 +239,13 @@ HELP = {
         "runs on this computer, or an online service you have an account with.\n\n"
         "\"Use this profile\" makes the selected one the one that transcribes; \"Add from "
         "template\" fills in a known service for you, and you paste in your API key."),
+    "hotwords": (
+        "Names and jargon the model has never seen come out as the nearest ordinary "
+        "English - \"CachyOS\" becomes \"khaki OS\". Listing them here tells it to expect "
+        "those words, so it writes them correctly the first time.\n\n"
+        "Whole words and short phrases, separated by commas. The replacements below are "
+        "the other half: they fix a spelling after the fact, and what you put in their "
+        "\"Replace with\" column is listened for here automatically."),
     "dictionary": (
         "Every replacement is applied to the text before it is inserted, in order: names and "
         "words the model hears wrong, fixed once here.\n\n"
@@ -1265,6 +1272,14 @@ class SettingsDialog(QDialog):
 
     def _dictionary_tab(self) -> QWidget:
         w = QWidget()
+        self.hotwords_edit = QLineEdit()
+        self.hotwords_edit.setPlaceholderText("CachyOS, Hollyland Lark, Keychron")
+        heard = QVBoxLayout()
+        heard.setSpacing(ROW_SPACING)
+        heard.addWidget(self._with_help(
+            _caption("Names and jargon to expect, separated by commas."),
+            "hotwords", HELP["hotwords"]))
+        heard.addWidget(self.hotwords_edit)
         self.replacements_table = QTableWidget(0, 3)
         self.replacements_table.setHorizontalHeaderLabels(["Heard", "Replace with", "Options"])
         self.replacements_table.horizontalHeader().setStretchLastSection(True)
@@ -1287,7 +1302,9 @@ class SettingsDialog(QDialog):
         inner.addLayout(row)
         layout = QVBoxLayout(w)
         layout.setContentsMargins(MARGIN, MARGIN, MARGIN, MARGIN)
-        layout.addWidget(self._group("Word replacements", inner))
+        layout.setSpacing(ROW_SPACING)
+        layout.addWidget(self._group("Words to listen for", heard))
+        layout.addWidget(self._group("Word replacements", inner), 1)
         return w
 
     # -- load/save --------------------------------------------------------------
@@ -1344,6 +1361,9 @@ class SettingsDialog(QDialog):
             self.profile_list.addItem(name)
         self.active_label.setText(f"Active profile: {c.get('stt.active')}")
         self.profile_list.setCurrentRow(0)
+        words = c.get("dictionary.hotwords", []) or []
+        self.hotwords_edit.setText(", ".join(str(word) for word in words)
+                                   if isinstance(words, list) else str(words))
         rules = c.get("dictionary.replacements", []) or []
         self.replacements_table.setRowCount(len(rules))
         for i, rule in enumerate(rules):
@@ -2028,6 +2048,8 @@ class SettingsDialog(QDialog):
             if src:
                 rules.append([src, dst, flags] if flags else [src, dst])
         c.set("dictionary.replacements", rules)
+        c.set("dictionary.hotwords", [word.strip() for word in self.hotwords_edit.text().split(",")
+                                      if word.strip()])
         self._save_language_profiles()
         if not self._carry_over_external_edits():
             return

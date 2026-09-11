@@ -38,8 +38,9 @@ class FakeTranscriber:
     def __init__(self, text="hello world", fail=False):
         self.text, self.fail, self.calls = text, fail, []
 
-    def transcribe(self, pcm, language, prompt):
+    def transcribe(self, pcm, language, prompt, hotwords=None):
         self.calls.append((pcm.size, language, prompt))
+        self.hotwords = hotwords
         if self.fail:
             raise TranscriptionError("cloud down")
         return Transcript(self.text, language, 1.0, 0.1, self.name)
@@ -56,7 +57,7 @@ class BlockingTranscriber:
         self.text, self.calls = text, []
         self.release = threading.Event()
 
-    def transcribe(self, pcm, language, prompt):
+    def transcribe(self, pcm, language, prompt, hotwords=None):
         self.calls.append((pcm.size, language, prompt))
         self.release.wait(5)
         return Transcript(self.text, language, 1.0, 0.1, self.name)
@@ -98,6 +99,7 @@ def make(cfg=None, rec=None, stt=None, inj=None, executor=None, notify=None, sou
         recorder=rec or FakeRecorder(), transcriber=stt or FakeTranscriber(), injector=inj or FakeInjector(),
         history=History(), notify=notify or (lambda t, b, u="normal": notes.append((t, b))),
         trim=lambda pcm: pcm, config_getter=lambda k, d=None: cfg.get(k, d), prompt_getter=lambda: "CachyOS",
+        hotwords_getter=lambda: "CachyOS, OBSBOT",
         sources=sources if sources is not None else (lambda: list(A_MICROPHONE)))
     states = []
     d = Dictation(services, executor=executor or (lambda fn: fn()), timer_factory=FakeTimer)
@@ -686,3 +688,11 @@ def test_idle_is_allowed_to_wait_for_ever():
     d, sv, states, notes = make()
     assert d.state == State.IDLE
     assert [t for t in FakeTimer.instances if not t.cancelled] == []
+
+
+def test_the_vocabulary_reaches_the_backend_with_every_transcription():
+    stt = FakeTranscriber("hello")
+    d, sv, states, notes = make(stt=stt)
+    d.start()
+    d.stop()
+    assert stt.hotwords == "CachyOS, OBSBOT"

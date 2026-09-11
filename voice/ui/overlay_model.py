@@ -70,6 +70,10 @@ COLLAPSE = 0.2               # bars melting into the track when transcribing sta
 #: finished" is the requirement, and a bar that stops short reads as stalled
 #: whatever the reasoning behind it. `finish_fill` still runs it to the end
 #: from wherever it stands when a fast transcription ends early.
+#: How coarsely the fill advances when the desktop asks for reduced motion:
+#: eight visible steps across the track instead of a continuous slide.
+REDUCED_STEP = 0.125
+
 SWEEP_TAU = 0.7
 SWEEP_CEILING = 1.0
 
@@ -431,11 +435,18 @@ class OverlayModel:
         loop, and a fill that dims is a fill that is giving up. It stays lit
         from the first frame to the checkmark.
         """
-        if self.reduced_motion:
-            return 0.35, 1.0
         # -expm1(-x) is 1 - exp(-x) without the cancellation at small x, which
         # is exactly where the fill moves fastest.
-        return SWEEP_CEILING * -math.expm1(-max(0.0, age) / SWEEP_TAU), 1.0
+        width = SWEEP_CEILING * -math.expm1(-max(0.0, age) / SWEEP_TAU)
+        if self.reduced_motion:
+            # Reduced motion is about decoration - the breathing dot, the
+            # waveform's swing - not about information. A progress bar that
+            # refuses to progress reads as broken, and did: this used to
+            # return a fixed 0.35, so the fill sat at a third of the track
+            # for the whole conversion whatever the tuning said. It still
+            # advances here, in coarse steps so the repaint is not continuous.
+            width = min(1.0, round(width / REDUCED_STEP) * REDUCED_STEP)
+        return width, 1.0
 
     @property
     def sweep(self) -> tuple[float, float]:

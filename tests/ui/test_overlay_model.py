@@ -16,6 +16,7 @@ from voice.ui.overlay_model import (
     LABEL_DUR,
     NOTICE_TTL,
     POP_IN,
+    REDUCED_STEP,
     SWEEP_CEILING,
     SWEEP_TAU,
     OverlayModel,
@@ -498,9 +499,13 @@ def test_reduced_motion_stills_the_animations_and_lowers_the_waveform(clock):
     m.tick(clock.advance(BREATH_PERIOD / 2))
     assert m.breath == still, "the dot must not breathe"
     m.set_state("transcribing", now=clock.t)
-    fill = m.sweep
+    fill = m.sweep[0]
     m.tick(clock.advance(1.3))
-    assert m.sweep == fill, "the fill line must not sweep"
+    # The fill is information, not decoration: it still advances under reduced
+    # motion, in coarse steps rather than a continuous slide. Freezing it is
+    # what made the bar sit at a third of the track for a whole conversion.
+    assert m.sweep[0] > fill, "the fill still reports progress"
+    assert m.sweep[0] % REDUCED_STEP == pytest.approx(0.0, abs=1e-9), "in visible steps"
 
 
 # -- review findings ------------------------------------------------------
@@ -942,3 +947,27 @@ def test_the_fill_crosses_the_track_in_the_time_a_transcription_takes(clock):
     assert width_at(2.0) >= 0.80, "two seconds is most of a dictation; the bar must be near the end"
     assert width_at(3.0) >= 0.90
     assert width_at(30.0) <= SWEEP_CEILING, "the end belongs to the completion, never to the sweep"
+
+
+def test_reduced_motion_still_shows_progress(clock):
+    """Reduced motion drops decoration, not information.
+
+    This returned a fixed 0.35 for the whole conversion, so on a desktop that
+    reports animations off - a VM without hardware acceleration, say - the
+    fill sat at a third of the track no matter how it was tuned, and read as
+    stalled. The owner chased that through three retunes before a trace of the
+    live pill showed the same 0.35 at every age.
+    """
+    model = OverlayModel(clock=clock, reduced_motion=True)
+    started = clock.t
+    model.set_state("transcribing", now=started)
+
+    def width_at(seconds):
+        clock.t = started + seconds
+        model.tick(clock.t)
+        return model.sweep[0]
+
+    early, later, settled = width_at(0.5), width_at(1.0), width_at(3.0)
+    assert early < later < settled, "it has to advance, not sit"
+    assert settled == pytest.approx(1.0), "and reach the end of the track"
+    assert model.breath == 0.5, "while the decorative breathing stays still"

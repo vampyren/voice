@@ -64,15 +64,22 @@ def scriptlet_code() -> str:
     return "\n".join(out)
 
 
-def shell_vars() -> dict:
-    """Source the PKGBUILD the way makepkg does and read back what it defined."""
+def shell_vars(env: dict | None = None) -> dict:
+    """Source the PKGBUILD the way makepkg does and read back what it defined.
+
+    `env` adds environment variables. That is how the CPU-only build option is
+    selected - `VOICE_GPU=0 makepkg -si` - because makepkg sources the PKGBUILD
+    in a shell that inherits the caller's environment, exactly as this does.
+    """
     script = (
         'startdir=/tmp/voice-build/packaging; source "$1" >/dev/null;'
-        'declare -p pkgbase pkgname pkgver pkgrel arch license source makedepends options _prefix _appid _py;'
+        'declare -p pkgname pkgver pkgrel arch license source makedepends options'
+        ' depends optdepends install _prefix _appid _py _gpu;'
         'echo "FUNCS: $(declare -F | sed "s/^declare -f //" | tr "\\n" " ")"'
     )
     done = subprocess.run(["bash", "-c", script, "_", str(PKGBUILD)],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True,
+                          env={**os.environ, **(env or {})})
     assert done.returncode == 0, done.stderr
     out = {}
     for line in done.stdout.splitlines():
@@ -84,6 +91,17 @@ def shell_vars() -> dict:
     return out
 
 
+def shell_array(name: str, env: dict | None = None) -> list[str]:
+    """One array from the sourced PKGBUILD, element by element."""
+    script = (f'startdir=/tmp/voice-build/packaging; source "$1" >/dev/null;'
+              f'printf "%s\\n" "${{{name}[@]}}"')
+    done = subprocess.run(["bash", "-c", script, "_", str(PKGBUILD)],
+                          capture_output=True, text=True,
+                          env={**os.environ, **(env or {})})
+    assert done.returncode == 0, done.stderr
+    return [line for line in done.stdout.splitlines() if line]
+
+
 @pytest.mark.parametrize("path", [PKGBUILD, SCRIPTLET, WRAPPER, OVERLAY_WRAPPER])
 def test_every_shipped_shell_file_parses(path):
     assert path.exists(), f"{path} is missing"
@@ -92,21 +110,60 @@ def test_every_shipped_shell_file_parses(path):
 
 def test_pkgbuild_has_the_fields_makepkg_requires():
     v = shell_vars()
-    assert v["pkgbase"] == '"voice"' or "voice" in v["pkgbase"]
-    assert "'voice'" in v["pkgname"] or '"voice"' in v["pkgname"]
+    assert v["pkgname"].strip("\"'") == "voice"
     assert re.search(r"\d+\.\d+\.\d+", v["pkgver"])
     assert v["pkgrel"].strip("\"'").isdigit()
     assert "x86_64" in v["arch"]
     assert v["license"].strip() not in ("", "''", '""')
-    for fn in ("build", "package_voice"):
+    for fn in ("build", "package"):
         assert fn in v["_funcs"], f"PKGBUILD defines no {fn}()"
 
 
-def test_the_gpu_libraries_are_a_separate_package():
-    """CPU transcription must not cost the user the multi-gigabyte CUDA wheels."""
-    v = shell_vars()
-    assert "voice-cuda" in v["pkgname"]
-    assert "package_voice-cuda" in v["_funcs"]
+def test_the_gpu_runtime_is_not_an_optional_extra():
+    """The owner's decision: `makepkg -si` produces a GPU-ready install.
+
+    Nothing about the GPU may be phrased as something to add afterwards - not a
+    second package to install, not an optdepend. `nvidia-utils` (which owns
+    /usr/lib/libcuda.so.1) is a hard dependency, and the CUDA 12 wheels the
+    CTranslate2 build dlopens ship inside this package.
+    """
+    assert shell_array("pkgname") == ["voice"], "one package, not a split build"
+    depends = shell_array("depends")
+    assert "nvidia-utils" in depends, f"libcuda.so.1 is not a dependency: {depends}"
+    for entry in shell_array("optdepends"):
+        low = entry.lower()
+        assert "cuda" not in low and "gpu" not in low and "nvidia" not in low, \
+            f"the GPU is still offered as optional: {entry!r}"
+
+
+def test_the_cuda_runtime_ships_inside_the_package(tmp_path):
+    """Not a `voice-cuda` to install afterwards: the wheels are in `voice`."""
+    text = PKGBUILD.read_text()
+    assert "package_voice-cuda" not in text
+    pkg = _stage(tmp_path)
+    assert (pkg / "usr/lib/voice/cuda/nvidia/cublas/lib/libcublas.so.12").exists()
+
+
+def test_the_cpu_only_build_is_available_and_is_not_the_default(tmp_path):
+    """The escape hatch for a machine with no NVIDIA card - one build variable,
+    the same package name, and off unless it is asked for."""
+    assert shell_vars()["_gpu"].strip("\"'") == "1", "the default build is GPU-ready"
+    cpu = {"VOICE_GPU": "0"}
+    assert shell_vars(cpu)["_gpu"].strip("\"'") == "0"
+    assert "nvidia-utils" not in shell_array("depends", cpu)
+    assert shell_array("pkgname", cpu) == ["voice"], "not a second product"
+    pkg = _stage(tmp_path, env=cpu)
+    assert not (pkg / "usr/lib/voice/cuda").exists(), \
+        "a CPU-only build must not carry the CUDA wheels"
+    assert (pkg / "usr/lib/voice/app/voice/__init__.py").exists(), "everything else is identical"
+
+
+def test_the_packaged_wrapper_and_the_development_launcher_agree_on_the_gpu_libs():
+    """install.sh grew this in f41213c; the package had it first. The two routes
+    must expose the wheels the same way or the GPU works on only one of them."""
+    assert "nvidia/*/lib" in WRAPPER.read_text()
+    assert "nvidia/*/lib" in (ROOT / "install.sh").read_text()
+    assert "LD_LIBRARY_PATH" in (ROOT / "install.sh").read_text()
 
 
 def test_the_desktop_entry_is_installed_under_the_app_id():
@@ -207,17 +264,31 @@ def test_the_scriptlet_reloads_udev_and_points_the_user_at_the_next_step():
     assert "Keyboard" in text, "say where the shortcut is assigned"
 
 
+def test_no_shipped_text_tells_the_user_to_install_the_gpu_separately():
+    """The scriptlet used to end with "unless the voice-cuda package is
+    installed as well". With the GPU in the package that sentence is a lie.
+
+    packaging/README.md is exempt from the name check and only from it: it is
+    the design note, and it has to be able to say which shape was rejected.
+    """
+    for path in (SCRIPTLET, ROOT / "README.md"):
+        assert "voice-cuda" not in path.read_text(), \
+            f"{path.name} still points the user at a separate GPU package"
+    assert "GPU" in SCRIPTLET.read_text(), "say that the GPU runtime is included"
+    assert "not optional" in (PKG / "README.md").read_text().lower(), \
+        "the packaging note must record that the GPU stack is not an extra"
+
+
+def test_both_readmes_document_the_cpu_only_build():
+    """The escape hatch is useless if nobody without a 4090 can find it."""
+    for path in (PKG / "README.md", ROOT / "README.md"):
+        assert "VOICE_GPU=0" in path.read_text(), f"{path} does not document it"
+
+
 def test_the_scriptlet_says_what_pacman_leaves_behind():
     text = SCRIPTLET.read_text()
     for leftover in (".config/voice", ".local/state/voice", ".cache/huggingface"):
         assert leftover in text
-
-
-@pytest.mark.skipif(not os.path.exists("/usr/bin/bash"), reason="no bash")
-def test_the_cuda_package_depends_on_the_base_package():
-    text = PKGBUILD.read_text()
-    body = text[text.index("package_voice-cuda"):]
-    assert "depends=" in body and "voice=" in body
 
 
 def test_every_file_the_package_installs_exists_in_the_repository():
@@ -238,9 +309,9 @@ def test_the_license_text_the_package_ships_is_not_empty():
     assert "## License" in text and len(text.split()) > 5
 
 
-def _stage(tmp_path: Path) -> Path:
-    """Run the PKGBUILD's package functions against a stub $srcdir and return
-    the $pkgdir they filled, which is exactly what pacman would ship.
+def _stage(tmp_path: Path, env: dict | None = None) -> Path:
+    """Run the PKGBUILD's package() against a stub $srcdir and return the
+    $pkgdir it filled, which is exactly what pacman would ship.
 
     makepkg cannot run here, but the package functions are plain bash and the
     file layout they produce is the thing most worth checking: it is where a
@@ -262,9 +333,10 @@ def _stage(tmp_path: Path) -> Path:
         # python3.12 is the *target* interpreter and need not exist on the
         # machine writing the package; only compileall uses it here.
         '_py=$(command -v python3.12 || command -v python3);'
-        'package_voice; package_voice-cuda'
+        'package'
     )
-    done = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    done = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                          env={**os.environ, **(env or {})})
     assert done.returncode == 0, done.stderr
     return pkg
 

@@ -26,8 +26,10 @@ voice is installed. Three things to do, once:
      accept it. The restore token is cached, so it asks once.
 
 The local backend downloads its model on first use (large-v3-turbo is about
-1.6 GB, cached under ~/.cache/huggingface). Transcription runs on the CPU
-unless the `voice-cuda` package is installed as well.
+1.6 GB, cached under ~/.cache/huggingface). The CUDA 12 runtime is part of this
+package, so transcription uses your NVIDIA GPU as soon as the driver is there -
+`voice doctor`'s cuda line says whether it found one. With no usable GPU it
+falls back to CPU int8 by itself; nothing extra to install either way.
 
 Autostart comes from /etc/xdg/autostart/io.github.vampyren.voice.desktop. To
 stop it for your user without touching the package:

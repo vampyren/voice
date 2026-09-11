@@ -24,8 +24,10 @@ Status: phase 1 (dictation core). See `docs/superpowers/specs/` for the full des
   `libnotify`, `xdg-desktop-portal-kde` (or `xdg-desktop-portal-gnome`), and — for the
   git-clone route only — [`uv`](https://docs.astral.sh/uv/). The package below pulls all
   of these in for you.
-- Optional: an NVIDIA GPU with a recent driver for local transcription on CUDA. Without
-  one, the local backend falls back to CPU (slower, but works).
+- An NVIDIA GPU with a recent driver for local transcription on CUDA. The package
+  installs the CUDA 12 runtime and depends on `nvidia-utils`; there is nothing else to
+  add. Without a GPU the local backend falls back to CPU int8 (slower, but works) — and
+  see the CPU-only build below if you want a package that leaves the CUDA wheels out.
 - Optional, for the recording pill: `python-gobject` with GTK 4 (system package, already
   present on KDE and GNOME) and `gtk4-layer-shell` (Debian/Ubuntu:
   `gir1.2-gtk4layershell-1.0`). See "Recording pill" below for why the second one is not
@@ -38,26 +40,35 @@ The supported install is the package: pacman owns every file and removes them al
 ```
 git clone https://github.com/vampyren/voice ~/Apps/voice
 cd ~/Apps/voice/packaging
-makepkg -si                                     # builds and installs `voice`
-sudo pacman -U voice-cuda-*.pkg.tar.zst         # optional: NVIDIA GPU transcription
+makepkg -si                                     # builds and installs `voice`, GPU included
 voice doctor
 ```
 
-It builds two packages:
-
-- **`voice`** — the app, its locked Python dependency set, `/usr/bin/voice`, the desktop
-  entry, the autostart entry and the udev rule. Transcription runs on the CPU.
-- **`voice-cuda`** — the CUDA 12 runtime that switches local transcription to the GPU.
-  Install it whenever you like; nothing else changes.
+One package. It carries the app, its locked Python dependency set, `/usr/bin/voice`, the
+desktop entry, the autostart entry, the udev rule **and the CUDA 12 runtime**, so
+transcription uses your NVIDIA GPU straight after the install — `voice doctor`'s **cuda**
+line confirms it. GPU support is a hard dependency (`nvidia-utils`), not an extra.
 
 `makepkg` needs `uv`, `git` and `python312` (AUR) to build, downloads the locked wheels
 during the build (so build with plain `makepkg`, not a network-less chroot), and installs
-about 1.2 GB (plus roughly 3 GB for `voice-cuda`). The app runs on `python312` out of
-`/usr/lib/voice`, not on the system interpreter — `packaging/README.md` explains why, and
-which dependencies exist as Arch packages and which do not.
+about 4 GB (1.2 GB app and dependencies, roughly 3 GB of CUDA runtime). The app runs on
+`python312` out of `/usr/lib/voice`, not on the system interpreter —
+`packaging/README.md` explains why, and which dependencies exist as Arch packages and
+which do not.
 
-Remove it with `pacman -R voice` (and `voice-cuda`). See [Uninstall](#uninstall) for the
-three directories under your home that a package must not delete.
+Remove it with `pacman -R voice`. See [Uninstall](#uninstall) for the three directories
+under your home that a package must not delete.
+
+### No NVIDIA card? The CPU-only build
+
+```
+cd ~/Apps/voice/packaging
+VOICE_GPU=0 makepkg -si
+```
+
+Same package, same name, same paths — it just leaves out the ~3 GB of CUDA wheels and the
+`nvidia-utils` dependency, and transcription runs on CPU int8. This is the exception, not
+the recommended install; use the plain `makepkg -si` above if the machine has a GPU.
 
 ## Install from the git clone (development)
 
@@ -608,9 +619,11 @@ other things `inject.pill_focus` can do instead.
 - **portal** — the `RemoteDesktop` portal is reachable (`xdg-desktop-portal-kde` on KDE,
   `xdg-desktop-portal-gnome` on GNOME). If the permission dialog needs revoking or
   doesn't reappear, check KDE System Settings → Applications → Remote Desktop.
-- **cuda** *(optional)* — an NVIDIA GPU is visible to `ctranslate2`; without it (or on a
-  machine with none), the local backend runs on CPU int8 automatically — slower, but it
-  works, and this line explains why nothing is using the GPU.
+- **cuda** — an NVIDIA GPU is visible to `ctranslate2`. The package ships the CUDA 12
+  runtime, so on a machine with a card this should be green with no extra install; if it
+  is not, the driver (`nvidia-utils`) is the thing to check. Without a GPU — or in a
+  `VOICE_GPU=0` build — the local backend runs on CPU int8 automatically, slower but
+  working, and this line explains why nothing is using the GPU.
 - **microphones** *(optional)* — at least one PipeWire source is visible.
 - **model cache** *(optional)* — whether the active local model has already downloaded.
 - **notify-send**, **fallback senders** *(optional)* — desktop notifications, and
@@ -671,7 +684,7 @@ Two more common issues doctor doesn't cover directly:
 Packaged install:
 
 ```
-sudo pacman -R voice-cuda voice     # either one alone is fine too
+sudo pacman -R voice
 ```
 
 Git clone:

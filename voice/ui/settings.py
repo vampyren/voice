@@ -67,6 +67,10 @@ PILL_PLACEMENT_NOTE = (
     "Some desktops place small windows themselves and ignore what they are asked for. "
     "Where that happens the line under the preview says so, and the pill still appears - "
     "just wherever your desktop decides.")
+#: Above the preview: what this screen in miniature is for. Without it the
+#: tab shows a black rectangle and leaves the reader to work out that it is a
+#: screen, that the dot in it is the pill, and that both can be dragged.
+PILL_PLACER_NOTE = "Drag the pill to where it should appear on your screen."
 #: The "leave stt.active alone for this language" row of the profile table.
 KEEP_CURRENT = "(keep current)"
 #: The four things a key can do, in the order the Hotkeys tab lists them, named
@@ -926,6 +930,7 @@ class SettingsDialog(QDialog):
         self.preview_note_timer = QTimer(self)
         self.preview_note_timer.setSingleShot(True)
         self.preview_note_timer.timeout.connect(lambda: self.preview_note.setText(""))
+        self.pill_placer_note = _caption(PILL_PLACER_NOTE)
         self.pill_placement_label = _caption()
         self.placement_warning = _caption(NO_LAYER_SHELL_NOTE)
         self.placement_warning.setVisible(False)
@@ -949,6 +954,7 @@ class SettingsDialog(QDialog):
         # 320 px preview is too narrow to read a sentence in.
         placement = QVBoxLayout()
         placement.setSpacing(ROW_SPACING)
+        placement.addWidget(self.pill_placer_note)
         placement.addLayout(preview)
         placement.addLayout(beside)
         self.language_profile_table = QTableWidget(0, 2)
@@ -1178,13 +1184,14 @@ class SettingsDialog(QDialog):
         columns = QHBoxLayout()
         columns.setSpacing(COLUMN_SPACING)
         columns.addWidget(self._group("Profiles", left), 1)
-        columns.addWidget(self._group("Settings", right), 2)
+        columns.addWidget(self._group("Selected profile", right), 2)
         layout = QVBoxLayout(w)
         layout.setContentsMargins(MARGIN, MARGIN, MARGIN, MARGIN)
         layout.setSpacing(ROW_SPACING)
         layout.addLayout(columns)
-        layout.addWidget(self._with_help(_caption("The active profile transcribes every "
-                                                  "dictation."), "profiles", HELP["profiles"]))
+        layout.addWidget(self._with_help(
+            _caption("The active profile is the one that turns your speech into text."),
+            "profiles", HELP["profiles"]))
         return w
 
     def _dictionary_tab(self) -> QWidget:
@@ -1204,8 +1211,9 @@ class SettingsDialog(QDialog):
         row.addWidget(remove)
         inner = QVBoxLayout()
         inner.setSpacing(ROW_SPACING)
-        inner.addWidget(self._with_help(_caption("Fixes applied to every dictation, in order."),
-                                        "dictionary", HELP["dictionary"]))
+        inner.addWidget(self._with_help(
+            _caption("What voice heard on the left, what it should write on the right."),
+            "dictionary", HELP["dictionary"]))
         inner.addWidget(self.replacements_table, 1)
         inner.addLayout(row)
         layout = QVBoxLayout(w)

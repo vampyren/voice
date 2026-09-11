@@ -1,6 +1,7 @@
 """The daemon side of the overlay protocol: spawn, throttle, survive, stop."""
 import contextlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -755,3 +756,167 @@ def test_stop_releases_the_writer_even_when_the_queue_is_full():
     writer.join(2.0)
     assert not writer.is_alive(), "stop() leaked the writer thread"
     assert proc.stdin.closed is True, "stop() left the helper's stdin open"
+
+
+# -- what the helper says back: how long its fill really needs ------------------
+class _Answering:
+    """A helper with a stdout the client can read, so it can answer a `finish`.
+
+    The real one writes one JSON object per line back; this hands those lines
+    over on demand, so the test decides exactly when the answer arrives.
+    """
+
+    def __init__(self):
+        self.stdin = _Sink()
+        self.stdout = _Pipe()
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+    def terminate(self):
+        if self.returncode is None:
+            self.returncode = -15
+
+    kill = terminate
+
+
+class _Sink:
+    def __init__(self):
+        self.data = b""
+        self.closed = False
+
+    def write(self, blob):
+        self.data += blob
+        return len(blob)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+class _Pipe:
+    """A readline() that blocks until the test says a line, like a real pipe."""
+
+    def __init__(self):
+        import queue as _queue
+        self._lines = _queue.Queue()
+        self.closed = False
+        #: How many times the reader thread has asked for a line. Back up by
+        #: one means the line before it has been dealt with, which is the only
+        #: sync point a test has with that thread.
+        self.reads = 0
+
+    def readline(self):
+        self.reads += 1
+        return self._lines.get()
+
+    def say(self, message):
+        self._lines.put((json.dumps(message) + "\n").encode())
+
+    def say_raw(self, blob: bytes):
+        self._lines.put(blob)
+
+    def close(self):
+        self.closed = True
+        self._lines.put(b"")             # end of file: the reader thread ends
+
+
+def _answering_client(clock=None):
+    proc = _Answering()
+    client = _client(lambda: proc, clock=clock)
+    client.start()
+    return client, proc
+
+
+def test_the_helpers_answer_says_how_much_of_the_fill_is_left():
+    """The daemon used to guess: FINISH seconds, counted from the moment it put
+    the message on the queue. Only the helper knows what it is really doing."""
+    now = [0.0]
+    client, proc = _answering_client(clock=lambda: now[0])
+    client.expect_finish()
+    client.send({"finish": True})
+    assert client.flush()
+    proc.stdout.say({"ack": "finish", "seconds": 0.2})
+
+    assert client.finish_wait(2.0) == pytest.approx(0.2)
+    now[0] += 0.05                                   # the insertion does its own work
+    assert client.finish_wait(2.0) == pytest.approx(0.15), "only the remainder is owed"
+    client.stop()
+
+
+def test_an_answer_of_nothing_to_finish_costs_the_paste_nothing():
+    """Reduced motion, or a pill that never animated: the helper says zero and
+    the paste waits for nothing at all."""
+    client, proc = _answering_client(clock=lambda: 0.0)
+    client.expect_finish()
+    client.send({"finish": True})
+    assert client.flush()
+    proc.stdout.say({"ack": "finish", "seconds": 0})
+    assert client.finish_wait(2.0) == 0.0
+    client.stop()
+
+
+def test_a_helper_that_never_answers_falls_back_instead_of_hanging():
+    """An older helper, or one that is wedged: the caller gets "I do not know"
+    inside the timeout and uses its own estimate."""
+    client, proc = _answering_client()
+    client.expect_finish()
+    client.send({"finish": True})
+    started = time.monotonic()
+    assert client.finish_wait(0.05) is None
+    assert time.monotonic() - started < 1.0
+    client.stop()
+
+
+def test_nonsense_on_the_helpers_stdout_is_ignored_and_the_answer_still_lands():
+    client, proc = _answering_client(clock=lambda: 0.0)
+    client.expect_finish()
+    client.send({"finish": True})
+    proc.stdout.say_raw(b"not json at all\n")
+    proc.stdout.say_raw(b"[1, 2, 3]\n")
+    proc.stdout.say({"ack": "something-else"})
+    proc.stdout.say({"ack": "finish", "seconds": 0.1})
+    assert client.finish_wait(2.0) == pytest.approx(0.1)
+    client.stop()
+
+
+def _read_again(pipe, count, timeout=2.0):
+    """Wait until the reader thread has asked for its `count`th line.
+
+    Asking again is the proof that whatever it was handed before that has been
+    dealt with; without it a test races the thread it is testing.
+    """
+    end = time.monotonic() + timeout
+    while pipe.reads < count and time.monotonic() < end:
+        time.sleep(0.005)
+    assert pipe.reads >= count, f"the reader never asked for line {count}"
+
+
+def test_an_answer_nobody_asked_for_is_not_kept_for_the_next_paste():
+    """A late answer to a request already given up on must not be handed to the
+    next paste as if it were about that one."""
+    client, proc = _answering_client(clock=lambda: 0.0)
+    _read_again(proc.stdout, 1)                             # the reader is parked
+    proc.stdout.say({"ack": "finish", "seconds": 0.2})      # and nobody asked
+    _read_again(proc.stdout, 2)                             # it has been dealt with
+
+    client.expect_finish()
+    assert client.finish_wait(0.05) is None, "the stale answer must not be reused"
+    client.stop()
+
+
+def test_the_helper_is_spawned_with_somewhere_to_answer(monkeypatch):
+    """stdout was DEVNULL, so there was no channel for this at all."""
+    monkeypatch.setattr("voice.ui.overlay_client._probe", lambda python: ("gtk4",))
+    seen = {}
+    default_launcher(lang="", popen=lambda cmd, **kw: seen.update(kw) or "proc")
+    assert seen["stdout"] is subprocess.PIPE
+    assert seen["stdin"] is subprocess.PIPE

@@ -8,6 +8,17 @@ One JSON object per line, one line per event:
     {"state": "error", "text": "pw-record: no such target"}
     {"state": "hidden"}             {"finish": true}
 
+One message is answered, on stdout, in the same one-object-per-line form:
+
+    {"finish": true}   ->   {"ack": "finish", "seconds": 0.2}
+
+because the daemon is about to take the pill off screen for the paste chord
+and has to wait for the fill - and only this process knows whether there is a
+fill at all (reduced motion, or a pill that is not transcribing, has none) and
+how much of it is left. `seconds: 0` is "nothing to wait for". Nothing else is
+written to stdout, and a daemon that ignores the line loses nothing but the
+precision.
+
 Everything above the GTK layer is importable without PyGObject, so the
 protocol is unit-tested without a display; `gi` is imported inside `main`.
 
@@ -35,6 +46,7 @@ import logging
 import os
 import sys
 import threading
+from typing import Callable
 
 from voice.ui.overlay_model import OverlayModel
 from voice.ui.placement import (DEFAULT_MARGIN_X, DEFAULT_MARGIN_Y, DEFAULT_POSITION,
@@ -66,11 +78,17 @@ def parse_line(line: str) -> dict | None:
     return message
 
 
-def apply_message(model: OverlayModel, message: dict) -> bool:
+def apply_message(model: OverlayModel, message: dict,
+                  reply: Callable[[dict], None] | None = None) -> bool:
     """Apply one decoded message to the model. Returns True if it took effect.
 
     A bad field never kills the helper: the daemon must be able to keep
     dictating even when it sends us nonsense.
+
+    `reply` is where an answer goes when the message has one - today only
+    `finish`, which is answered with the seconds the fill really needs. It is
+    optional so the protocol can be read and tested without a pipe, and so a
+    helper with nowhere to answer still does the work.
     """
     applied = False
     if "language" in message:
@@ -90,8 +108,13 @@ def apply_message(model: OverlayModel, message: dict) -> bool:
         # "run the progress fill to the end of its track, now": the daemon is
         # about to take the pill off screen for the paste chord and will not
         # unmap a half-drawn line. Nothing to finish is not an error - the
-        # daemon cannot see what the pill is showing.
-        applied = model.finish_fill() > 0.0 or applied
+        # daemon cannot see what the pill is showing, which is exactly why the
+        # answer below carries the real duration rather than leaving it to
+        # guess one: 0 is "nothing is animating; do not wait for me".
+        seconds = model.finish_fill()
+        if reply is not None:
+            reply({"ack": "finish", "seconds": round(max(0.0, seconds), 4)})
+        applied = seconds > 0.0 or applied
     if "state" in message:
         text = message.get("text")
         try:
@@ -264,9 +287,22 @@ class _Pill:
 
     def feed(self, line: str) -> bool:
         message = parse_line(line)
-        if message and apply_message(self.model, message):
+        if message and apply_message(self.model, message, reply=self._answer):
             self._wake()
         return self._glib.SOURCE_REMOVE
+
+    def _answer(self, message: dict) -> None:
+        """One line back to the daemon. Never raises: it is only an answer.
+
+        Written from the main loop, where `feed` runs, so it cannot interleave
+        with another answer - and flushed at once, because what is waiting for
+        it is a paste the user is watching for.
+        """
+        try:
+            sys.stdout.write(json.dumps(message, separators=(",", ":")) + "\n")
+            sys.stdout.flush()
+        except Exception:
+            log.debug("overlay: could not answer %s", message, exc_info=True)
 
     def quit(self) -> bool:
         log.info("overlay: stdin closed, exiting")

@@ -8,6 +8,8 @@ everything the daemon needs to do that safely:
 * write events without ever blocking the caller - levels arrive on the audio
   reader thread, and a stalled helper must never cost us a recording;
 * throttle levels to the helper's ~30 fps redraw rate;
+* read the one thing the helper answers - how long its progress fill still
+  needs - without ever depending on it answering;
 * survive the helper dying: log it once, restart it once, then stay quiet.
 
 Nothing here raises to its caller. The overlay is decoration; dictation is not.
@@ -90,6 +92,10 @@ NO_LAYER_SHELL_STATUS = "disabled: no layer-shell"
 
 #: Queue item meaning "the helper is gone; bring it back before the next line".
 _RESPAWN = object()
+
+#: The one answer the helper gives (see `voice.ui.overlay`): how many seconds
+#: its progress fill still needs, 0 for "nothing is animating".
+FINISH_ACK = "finish"
 
 
 def repo_root() -> Path:
@@ -234,7 +240,9 @@ def default_launcher(position: str = DEFAULT_POSITION, lang: str = "en", verbose
     log.info("recording overlay: %s", " ".join(cmd))
     # stderr is inherited on purpose: the helper's own log lines (layer-shell
     # present or not, window mapped or not) belong in the daemon's log.
-    return popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, env=env)
+    # stdout is a pipe, not DEVNULL: the helper answers a `finish` with how long
+    # its fill really needs, and the paste waits for that instead of guessing.
+    return popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
 
 
 class OverlayClient:
@@ -271,6 +279,13 @@ class OverlayClient:
         #: aimed at has been replaced cannot condemn its replacement.
         self._generation = 0
         self._respawn_queued = False
+        #: The helper's last answer to a `finish`, as (seconds it needs, when it
+        #: said so), and the wait that ends when it arrives. Armed by
+        #: `expect_finish`, so an answer nobody is waiting for is dropped rather
+        #: than kept for whatever asks next.
+        self._finish_reply: tuple[float, float] | None = None
+        self._finish_expected = False
+        self._finish_said = threading.Event()
 
     # -- lifecycle ----------------------------------------------------------
     def status(self) -> str:
@@ -379,6 +394,12 @@ class OverlayClient:
         except Exception:
             log.debug("closing the overlay helper's stdin failed", exc_info=True)
         try:
+            stdout = getattr(proc, "stdout", None)
+            if stdout is not None:
+                stdout.close()          # and with it the reader thread parked on it
+        except Exception:
+            log.debug("closing the overlay helper's stdout failed", exc_info=True)
+        try:
             proc.wait(timeout=STOP_WAIT_S)
         except subprocess.TimeoutExpired:
             log.warning("overlay helper did not exit; terminating it")
@@ -406,6 +427,12 @@ class OverlayClient:
         self._generation += 1
         self._dead = False
         self._status = "running"
+        stdout = getattr(proc, "stdout", None)
+        if stdout is not None:
+            # One reader per helper, ending when its pipe does. A helper that
+            # never writes a line simply parks this thread until it exits.
+            threading.Thread(target=self._listen, args=(stdout, self._generation),
+                             name="overlay-reader", daemon=True).start()
         if self._writer is None or not self._writer.is_alive():
             self._writer = threading.Thread(target=self._pump, name="overlay-writer", daemon=True)
             self._writer.start()
@@ -551,6 +578,75 @@ class OverlayClient:
             self._dead = True
             self._status = status
         log.warning("%s", message)
+
+    # -- what the helper answers --------------------------------------------
+    def expect_finish(self) -> None:
+        """Arm the wait for the next `finish` answer. Called before the send.
+
+        Armed rather than assumed, so an answer that arrives with nobody
+        waiting - a late one, from a request already given up on - is dropped
+        instead of being handed to whatever asks next.
+        """
+        with self._lock:
+            self._finish_reply = None
+            self._finish_expected = True
+            self._finish_said.clear()
+
+    def finish_wait(self, timeout: float) -> float | None:
+        """Seconds the helper's fill still needs, or None if it did not say.
+
+        None is the whole point of the timeout: an older helper, or one that is
+        wedged, must cost the paste a short wait and then leave the caller to
+        its own estimate rather than hanging the insertion on a decoration.
+        """
+        with self._lock:
+            if not self._finish_expected:
+                return None
+            if self._dead or self._stopped or self._proc is None:
+                return None
+        if not self._finish_said.wait(max(0.0, timeout)):
+            return None
+        with self._lock:
+            reply = self._finish_reply
+        if reply is None:
+            return None
+        seconds, said_at = reply
+        # Only the remainder: everything the insertion has done since the helper
+        # answered has been running while the fill did.
+        return max(0.0, seconds - (self._clock() - said_at))
+
+    def _listen(self, stream, generation: int) -> None:
+        """Reader thread: one line at a time until the helper's pipe closes."""
+        try:
+            for line in iter(stream.readline, b""):
+                if not line:
+                    break
+                self._answered(line, generation)
+        except Exception:
+            # A closed pipe, a helper that was replaced, a half-written line:
+            # none of it is worth more than a debug line. The pill is decoration.
+            log.debug("overlay reader stopped", exc_info=True)
+
+    def _answered(self, line, generation: int) -> None:
+        """One line from the helper. Anything we do not understand is dropped."""
+        try:
+            text = line.decode() if isinstance(line, bytes) else str(line)
+            message = json.loads(text)
+        except Exception:
+            log.debug("overlay: ignoring what the helper said (%r)", line[:120])
+            return
+        if not isinstance(message, dict) or message.get("ack") != FINISH_ACK:
+            return
+        try:
+            seconds = max(0.0, float(message.get("seconds", 0.0)))
+        except (TypeError, ValueError):
+            log.debug("overlay: helper answered a bad duration %r", message.get("seconds"))
+            return
+        with self._lock:
+            if generation != self._generation or not self._finish_expected:
+                return              # a different helper, or nobody is waiting
+            self._finish_reply = (seconds, self._clock())
+            self._finish_said.set()
 
     # -- writer thread ------------------------------------------------------
     def _pump(self) -> None:

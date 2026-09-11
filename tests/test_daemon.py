@@ -1718,11 +1718,13 @@ class _PillClock:
         return self.t
 
 
-def _recording_pill_daemon(monkeypatch, *, clock=None, spend=0.0, **kwargs):
+def _recording_pill_daemon(monkeypatch, *, clock=None, spend=0.0, answers=None, **kwargs):
     """A focus-stealing daemon with every moving part recorded in one log.
 
     `spend` is how long the clipboard work takes, which is time the fill's
-    completion is running through anyway.
+    completion is running through anyway. `answers` is the helper saying how
+    long its fill really needs; None is a helper that says nothing at all,
+    which is every other test in this file and the behaviour to degrade to.
     """
     log = []
     d = _focus_daemon(monkeypatch, clock=clock, **kwargs)
@@ -1732,6 +1734,15 @@ def _recording_pill_daemon(monkeypatch, *, clock=None, spend=0.0, **kwargs):
         def flush(self, timeout=1.0): return True
         def stop(self): pass
         def status(self): return "running"
+
+    class AnsweringOverlay(RecordingOverlay):
+        """A helper that talks back, the way the real one does."""
+
+        def expect_finish(self): log.append("expect-finish")
+
+        def finish_wait(self, timeout):
+            log.append(("asked", round(timeout, 4)))
+            return answers
 
     class RecordingSender:
         name = "fake"
@@ -1756,7 +1767,7 @@ def _recording_pill_daemon(monkeypatch, *, clock=None, spend=0.0, **kwargs):
         if clock is not None:
             clock.advance(seconds)
 
-    d.overlay = RecordingOverlay()
+    d.overlay = RecordingOverlay() if answers is None else AnsweringOverlay()
     d.injector._sender = RecordingSender()
     d.injector._clip = RecordingClipboard()
     d.injector._sleep = sleep
@@ -1829,6 +1840,78 @@ def test_the_added_latency_is_only_what_the_injection_had_not_already_spent(
                              [e for e in log[:chord] if isinstance(e, tuple)]
                              if kind in ("fill", "settle"))
         assert waited == pytest.approx(max(PILL_FILL_S, spend) + settle_s, abs=1e-6), log
+
+
+def test_a_pill_that_says_it_is_not_animating_costs_the_paste_nothing(
+        isolated_xdg, qapp, monkeypatch):
+    """`finish_fill` answers 0 under reduced motion, and for a model that was
+    never transcribing. The daemon could not see that - it armed the wait on
+    the pill policy alone - so every paste paid up to FINISH seconds for an
+    animation nobody was watching. The helper is asked, and says so."""
+    from voice.pipeline import State
+
+    clock = _PillClock()
+    d, log = _recording_pill_daemon(monkeypatch, clock=clock, answers=0.0)
+    started = clock.t
+    try:
+        d._on_dictation_state(State.INJECTING)
+        d.injector.inject("hello")
+    finally:
+        d.shutdown()
+
+    assert {"finish": True} in log                      # the fill is still asked for
+    assert log.index("expect-finish") < log.index({"finish": True}), \
+        "the answer has to be waited for before the question goes out"
+    assert [e for e in log if isinstance(e, tuple) and e[0] == "fill"] == [], log
+    assert clock.t - started == pytest.approx(d.injector._settle_s + 0.15, abs=1e-6)
+
+
+def test_a_helper_that_only_starts_the_fill_later_still_gets_all_of_it(
+        isolated_xdg, qapp, monkeypatch):
+    """The deadline was `now + FINISH`, set where the message was *queued* -
+    behind up to thirty level messages a second. A helper that got to the fill
+    later had its deadline expire before the fill began, and the pill was
+    unmapped mid-sweep: the exact defect this whole change exists to fix.
+
+    Here the insertion spends half a second before it asks, which is well past
+    that old deadline, and the helper answers that its fill has only just
+    started."""
+    from voice.daemon import PILL_FILL_S
+    from voice.pipeline import State
+
+    clock = _PillClock()
+    d, log = _recording_pill_daemon(monkeypatch, clock=clock, spend=0.5,
+                                    answers=PILL_FILL_S)
+    try:
+        d._on_dictation_state(State.INJECTING)
+        d.injector.inject("hello")
+    finally:
+        d.shutdown()
+
+    fill = [seconds for kind, seconds in
+            [e for e in log if isinstance(e, tuple) and e[0] == "fill"]]
+    assert fill == [pytest.approx(PILL_FILL_S)], log
+    chord = next(i for i, e in enumerate(log) if isinstance(e, tuple) and e[0] == "chord")
+    assert log.index({"state": "hidden"}) < chord, "and only then is the pill unmapped"
+
+
+def test_a_helper_that_never_answers_leaves_the_old_estimate_in_place(
+        isolated_xdg, qapp, monkeypatch):
+    """An older helper, or one that is wedged, says nothing: the daemon must
+    fall back to counting FINISH from the message rather than wait for ever."""
+    from voice.daemon import PILL_FILL_S
+    from voice.pipeline import State
+
+    clock = _PillClock()
+    d, log = _recording_pill_daemon(monkeypatch, clock=clock, answers=None)
+    try:
+        d._on_dictation_state(State.INJECTING)
+        d.injector.inject("hello")
+    finally:
+        d.shutdown()
+    assert [seconds for kind, seconds in
+            [e for e in log if isinstance(e, tuple) and e[0] == "fill"]] == \
+        [pytest.approx(PILL_FILL_S)], log
 
 
 def test_a_recall_is_not_slowed_down_by_a_fill_that_never_ran(isolated_xdg, qapp, monkeypatch):

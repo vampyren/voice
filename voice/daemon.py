@@ -241,6 +241,13 @@ def window_class_getter(config: Config) -> Callable[[], str | None]:
 #: its next frame, ~33 ms later.
 OVERLAY_HIDE_FLUSH_S = 0.5
 
+#: How long the daemon waits for the helper to say what its fill still needs
+#: (see `voice.ui.overlay`). Short on purpose: the answer is normally already
+#: waiting by the time this is asked - the insertion has done its clipboard
+#: work since - and a helper that never answers has to cost the paste a blink,
+#: not a pause, before the daemon falls back to its own estimate.
+FILL_ACK_S = 0.1
+
 
 class _BrokenTranscriber:
     """Placeholder used when the active stt profile can't be built; keeps the daemon alive."""
@@ -381,12 +388,39 @@ class Daemon:
         copy, waiting for the hotkey modifiers to clear - has been running
         while the fill did, so only the remainder is left to wait for. Read
         once: a second insertion must not inherit a deadline from the first.
+
+        The helper is asked first, because only it knows two things this side
+        cannot see: whether anything is animating at all (nothing is, under
+        reduced motion or for a pill that was not transcribing) and when the
+        fill actually started - which is not when the message was queued, since
+        it queues behind up to thirty level messages a second. A helper that
+        does not answer leaves the old estimate in place.
         """
         lands_at, self._fill_lands_at = self._fill_lands_at, None
         if lands_at is None:
             return 0.0
+        told = self._what_the_pill_says()
+        if told is not None:
+            return max(0.0, min(PILL_FILL_S, told))
         # Never longer than the animation itself, whatever a clock has done.
         return max(0.0, min(PILL_FILL_S, lands_at - self._clock()))
+
+    def _what_the_pill_says(self) -> float | None:
+        """The helper's own answer to the `finish` just sent, or None.
+
+        None covers every way of not being told: an older helper with nothing
+        to say, one that is wedged, or a client with no such question. The
+        caller then falls back to the estimate, exactly as before.
+        """
+        ask = getattr(self.overlay, "finish_wait", None) if self.overlay is not None else None
+        if ask is None:
+            return None
+        try:
+            answer = ask(FILL_ACK_S)
+        except Exception:
+            log.debug("the pill did not say how far its fill had got", exc_info=True)
+            return None
+        return None if answer is None else float(answer)
 
     def _hide_pill_for_paste(self) -> None:
         """Take the pill off screen so the paste chord reaches the user's window.
@@ -535,8 +569,15 @@ class Daemon:
                 self._overlay_language = language
             if message.get("finish"):
                 # Armed where it is sent, so the deadline and the message can
-                # never disagree about whether a fill is on its way.
+                # never disagree about whether a fill is on its way. Two things
+                # are armed: the wait for the helper's own answer (which is the
+                # truth - it knows whether anything is animating and when it
+                # really started), and, for a helper that never answers, the
+                # estimate this has always used.
                 self._fill_lands_at = self._clock() + PILL_FILL_S
+                expect = getattr(self.overlay, "expect_finish", None)
+                if expect is not None:
+                    expect()
             self.overlay.send(message)
 
     def _sync_overlay_language(self) -> None:

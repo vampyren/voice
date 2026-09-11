@@ -324,6 +324,98 @@ def test_a_finish_with_no_fill_on_screen_is_ignored(model, caplog):
     assert model.finishing is False
 
 
+# -- and what the helper answers, so the daemon waits for the real thing ---
+
+def test_a_finish_is_answered_with_how_long_it_will_take():
+    """The daemon cannot see what the pill is showing: it guessed the animation
+    always ran and always took FINISH seconds, and charged every paste for it.
+    The helper is the only one that knows, so it says so."""
+    clock = Clock()
+    model = OverlayModel(clock=clock)
+    said = []
+    apply_message(model, {"state": "transcribing"}, reply=said.append)
+    clock.t += 1.0
+    model.tick()
+    assert said == [], "only a finish is answered"
+
+    assert apply_message(model, {"finish": True}, reply=said.append) is True
+    assert said == [{"ack": "finish", "seconds": pytest.approx(FINISH)}]
+
+
+@pytest.mark.parametrize("reduced,state", [(True, "transcribing"),   # nothing animates
+                                           (False, "recording")])    # nothing to finish
+def test_a_fill_that_will_not_run_is_answered_with_nothing_to_wait_for(reduced, state):
+    """Reduced motion, or a pill that is not transcribing at all: `finish_fill`
+    does nothing, and the daemon must not pay for an animation nobody sees."""
+    model = OverlayModel(clock=Clock(), reduced_motion=reduced)
+    said = []
+    apply_message(model, {"state": state}, reply=said.append)
+    apply_message(model, {"finish": True}, reply=said.append)
+    assert said == [{"ack": "finish", "seconds": 0.0}]
+    assert model.finishing is False
+
+
+def test_an_already_running_fill_is_answered_with_what_is_left_of_it():
+    """The daemon asks once and waits once; a second finish must not restart it
+    or claim the whole animation again."""
+    clock = Clock()
+    model = OverlayModel(clock=clock)
+    said = []
+    apply_message(model, {"state": "transcribing"}, reply=said.append)
+    apply_message(model, {"finish": True}, reply=said.append)
+    clock.t += FINISH / 2
+    apply_message(model, {"finish": True}, reply=said.append)
+    assert said[-1] == {"ack": "finish", "seconds": pytest.approx(FINISH / 2)}
+
+
+def test_the_helper_writes_its_answer_as_one_flushed_line(monkeypatch):
+    """The daemon is reading that pipe with a paste held up behind it, so the
+    line has to be whole and flushed, not sitting in a buffer."""
+    import io
+    import sys
+
+    from voice.ui.overlay import _Pill
+
+    class Out(io.StringIO):
+        flushes = 0
+
+        def flush(self):
+            type(self).flushes += 1
+
+    out = Out()
+    monkeypatch.setattr(sys, "stdout", out)
+    _Pill._answer(_Pill.__new__(_Pill), {"ack": "finish", "seconds": 0.2})
+    assert out.getvalue() == '{"ack":"finish","seconds":0.2}\n'
+    assert Out.flushes == 1
+
+
+def test_a_helper_whose_answer_cannot_be_written_carries_on(monkeypatch, caplog):
+    """The daemon closed the pipe, or went away: the pill keeps drawing."""
+    import sys
+
+    from voice.ui.overlay import _Pill
+
+    class Broken:
+        def write(self, text):
+            raise BrokenPipeError("nobody is reading")
+
+        def flush(self):
+            pass
+
+    monkeypatch.setattr(sys, "stdout", Broken())
+    with caplog.at_level("DEBUG"):
+        _Pill._answer(_Pill.__new__(_Pill), {"ack": "finish", "seconds": 0.2})
+
+
+def test_a_helper_with_nowhere_to_answer_still_applies_the_message():
+    """`reply` is optional on purpose: the answer is a nicety, the fill is not."""
+    clock = Clock()
+    model = OverlayModel(clock=clock)
+    apply_message(model, {"state": "transcribing"})
+    assert apply_message(model, {"finish": True}) is True
+    assert model.finishing is True
+
+
 # -- review findings ------------------------------------------------------
 
 @pytest.mark.parametrize("value", [None, 42, ["sv"], {"code": "sv"}, True])

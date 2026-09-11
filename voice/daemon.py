@@ -13,7 +13,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 
 from voice import APP_NAME, __version__
-from voice.audio.capture import Recorder, list_sources
+from voice.audio.capture import Recorder, capture_sources
 from voice.config import Config, is_language_code
 from voice.history import History
 from voice.hotkey.evdev_listener import EvdevListener
@@ -282,6 +282,7 @@ class _Bridge(QObject):
     set_language = Signal(str)
     quit = Signal()
     triggers_refreshed = Signal()
+    refresh_sources = Signal()
     sources_listed = Signal(object)
     layer_shell_probed = Signal(object)
     preview_pill = Signal(str, int, int)
@@ -317,9 +318,13 @@ class Daemon:
         self._overlay_language = str(config.get("general.language", "en") or "en")
         #: The [ui] settings the running helper was started with; see _make_overlay.
         self._overlay_settings: tuple | None = None
-        #: The last microphone listing, so the settings window can open on it
-        #: instead of waiting for `pw-dump`. Only ever written on the Qt thread.
-        self._source_cache: list = []
+        #: The last microphone listing: the settings window opens on it instead
+        #: of waiting for `pw-dump`, and the record-start guard reads it rather
+        #: than shelling out between the hotkey and `recorder.start()`. None is
+        #: "nobody has managed to ask yet", which is not the same answer as an
+        #: empty list and must never stop a recording - see `_capture_sources`.
+        #: Only ever written on the Qt thread.
+        self._source_cache: list | None = None
         #: What the focus-stealing pill costs the paste, if anything; set by
         #: _make_injector, reported by `status`. See pill_policy().
         self._pill_policy = "none"
@@ -349,7 +354,7 @@ class Daemon:
         services = Services(recorder=self._recorder, transcriber=self._make_transcriber(),
                             injector=self.injector, history=self.history, notify=self._notifier.notify,
                             config_getter=self.config.get, prompt_getter=self._prompt,
-                            hotwords_getter=self._hotwords)
+                            hotwords_getter=self._hotwords, sources=self._capture_sources)
         self.dictation = Dictation(services)
         self.tray = self._tray or Tray(self._on_tray_action)
         self.overlay = self._make_overlay()
@@ -363,6 +368,7 @@ class Daemon:
         self._bridge.set_language.connect(self._set_language)
         self._bridge.quit.connect(self._quit)
         self._bridge.triggers_refreshed.connect(self._on_triggers_refreshed)
+        self._bridge.refresh_sources.connect(self._refresh_sources)
         self._bridge.sources_listed.connect(self._on_sources_listed)
         self._bridge.layer_shell_probed.connect(self._on_layer_shell_probed)
         self._bridge.preview_pill.connect(self._preview_pill)
@@ -814,7 +820,7 @@ class Daemon:
         """
         self._refresh_off_thread("triggers", self._refresh_shortcut_triggers,
                                  lambda _: self._bridge.triggers_refreshed.emit())
-        self._refresh_off_thread("sources", list_sources, self._bridge.sources_listed.emit)
+        self._refresh_sources()
         # Whether the pill can be placed at all. The probe spawns two
         # interpreters on a cold cache, which is not something the Qt thread may
         # do while a window is opening - and the answer cannot change under a
@@ -842,11 +848,42 @@ class Daemon:
         if self._settings is not None:
             self._settings.set_layer_shell(self._layer_shell)
 
+    def _capture_sources(self) -> list | None:
+        """What PipeWire last said it had, plus a fresh ask for the next time.
+
+        Read, never asked. This is called from `Dictation.start()`, which is on
+        the listener thread with the pipeline's lock held, between the hotkey and
+        `recorder.start()` - and `pw-dump` is a subprocess bounded at five
+        seconds. Measured at 11-18 ms here (~70 ms on the reviewer's machine) of
+        latency before every dictation, which is a clipped first syllable; a
+        PipeWire that was wedged rather than merely slow would have held the lock
+        for the whole five seconds, blocking stop(), cancel() and toggle() too.
+
+        The guard it feeds is unchanged: `[]` is still "this machine has no
+        capture device" and None is still "could not be asked", which may never
+        stop a recording. Asking here for a fresh listing is what keeps the
+        cache honest without putting it in the way - a microphone unplugged
+        mid-session is noticed by the next dictation, including one that was
+        just refused for want of one.
+        """
+        self._bridge.refresh_sources.emit()
+        return self._source_cache
+
+    def _refresh_sources(self) -> None:
+        """Ask `pw-dump` for the capture devices, off whatever thread is here."""
+        self._refresh_off_thread("sources", capture_sources,
+                                 self._bridge.sources_listed.emit)
+
     def _on_sources_listed(self, sources) -> None:
-        """Qt thread: `pw-dump` has answered."""
-        self._source_cache = list(sources)
+        """Qt thread: `pw-dump` has answered - with a listing, or with nothing.
+
+        None is kept as None: the guard reads this, and flattening "could not
+        ask" into "no microphone" would refuse to record on a machine whose
+        capture works perfectly well.
+        """
+        self._source_cache = None if sources is None else list(sources)
         if self._settings is not None:
-            self._settings.set_sources(self._source_cache)
+            self._settings.set_sources(self._source_cache or [])
 
     def _profile_snapshot(self) -> tuple[str, dict] | None:
         """The active (name, profile) pair, or None if stt.active is unresolvable."""
@@ -908,6 +945,9 @@ class Daemon:
         self.overlay.start()
         self.tray.show()
         self._start_warmup()
+        # Before the first hotkey, so the no-microphone guard has an answer to
+        # read rather than the "nobody asked yet" it starts out with.
+        self._refresh_sources()
         # The portal listener answers asynchronously and reports through
         # _on_hotkeys_ready; only the evdev listener knows its state by now.
         if self.hotkey_backend != "portal" and self.listener.devices_ok() is False:
@@ -1144,7 +1184,7 @@ class Daemon:
                 # kept calling the stopped one - "Press a key..." for ever.
                 self._settings = SettingsDialog(self.config,
                                                 lambda cb: self.listener.capture_next(cb),
-                                                lambda: list(self._source_cache),
+                                                lambda: list(self._source_cache or []),
                                                 backend=self.hotkey_backend,
                                                 triggers=self.effective_triggers,
                                                 preview_pill=self._ask_for_preview)

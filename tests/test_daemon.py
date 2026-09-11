@@ -412,10 +412,86 @@ def test_warmup_does_not_occupy_the_dictation_worker(isolated_xdg, qapp, monkeyp
     d.shutdown()
 
 
+def _quiet_daemon(monkeypatch, **kwargs):
+    """A built daemon with nothing in it that reaches the owner's machine."""
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
+               tray=FakeTray(), notifier=QuietNotifier(), **kwargs)
+    d.build()
+    return d
+
+
+def test_the_record_start_path_reads_the_cache_rather_than_running_pw_dump(
+        isolated_xdg, qapp, monkeypatch):
+    """`pw-dump` sat between the hotkey and `recorder.start()`, on the listener
+    thread with the pipeline's lock held: latency before every single word, and
+    a wedged PipeWire would have held that lock for the whole five-second bound,
+    blocking stop(), cancel() and toggle() with it."""
+    from voice.audio.capture import Source
+
+    asked = []
+
+    def slow_pw_dump(*args, **kwargs):
+        asked.append(threading.current_thread())
+        time.sleep(0.5)
+        return [Source("mic", "Some Microphone", True)]
+
+    monkeypatch.setattr("voice.daemon.capture_sources", slow_pw_dump)
+    d = _quiet_daemon(monkeypatch)
+    try:
+        d._source_cache = [Source("mic", "Some Microphone", True)]
+        started = time.perf_counter()
+        answer = d.dictation.sv.sources()
+        elapsed = time.perf_counter() - started
+        assert elapsed < 0.05, f"the start path blocked for {elapsed:.3f} s"
+        assert threading.current_thread() not in asked, \
+            "pw-dump ran on the very thread that is about to start the recorder"
+        assert [s.name for s in answer] == ["mic"], "the answer came from the cache"
+    finally:
+        d.shutdown()
+
+
+def test_the_cache_still_reports_a_missing_microphone_and_an_unknown_one(
+        isolated_xdg, qapp, monkeypatch):
+    """The guard exists because pw-record "records" happily with no capture
+    device. Reading a cache may not weaken it - and "nobody has asked yet" is
+    not "no microphone", or a daemon would refuse to record before its first
+    listing came back."""
+    monkeypatch.setattr("voice.daemon.capture_sources", lambda *a, **k: [])
+    d = _quiet_daemon(monkeypatch)
+    try:
+        d._source_cache = []
+        assert d.dictation.sv.sources() == [], "an empty listing still means no microphone"
+        d._source_cache = None
+        assert d.dictation.sv.sources() is None, "not asked yet is not an answer"
+    finally:
+        d.shutdown()
+
+
+def test_reading_the_cache_asks_for_a_fresh_listing_for_the_next_dictation(
+        isolated_xdg, qapp, monkeypatch):
+    """Off the start path, but not never: a microphone unplugged mid-session
+    has to be noticed, and a dictation refused for want of one has to notice
+    the moment it comes back."""
+    from voice.audio.capture import Source
+
+    monkeypatch.setattr("voice.daemon.capture_sources",
+                        lambda *a, **k: [Source("mic", "Some Microphone", True)])
+    d = _quiet_daemon(monkeypatch)
+    try:
+        d._source_cache = None
+        d.dictation.sv.sources()
+        assert settle(qapp, lambda: d._source_cache is not None), d._source_cache
+        assert [s.name for s in d._source_cache] == ["mic"]
+    finally:
+        d.shutdown()
+
+
 def test_open_settings_refreshes_the_reused_dialog(isolated_xdg, qapp, monkeypatch):
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
         "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
-    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.capture_sources", lambda: [])
     d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
     d.build()
 
@@ -440,7 +516,7 @@ def test_open_settings_shows_the_key_the_desktop_really_holds(isolated_xdg, qapp
     The re-read is a D-Bus round trip and no longer holds the window shut, so
     the label is corrected a moment after it appears rather than before.
     """
-    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.capture_sources", lambda: [])
     held = {"dictate": ""}
 
     class Refreshing(FakeListener):
@@ -508,7 +584,7 @@ class SlowPortal(FakeListener):
 def _slow_portal_daemon(monkeypatch, listener_cls=SlowPortal, sources=lambda: []):
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
         "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
-    monkeypatch.setattr("voice.daemon.list_sources", sources)
+    monkeypatch.setattr("voice.daemon.capture_sources", sources)
     monkeypatch.setattr("voice.daemon.PortalListener", listener_cls)
     cfg = Config.load()
     cfg.set("hotkeys.backend", "portal")
@@ -610,7 +686,7 @@ def test_open_settings_does_not_reset_a_visible_dialog(isolated_xdg, qapp, monke
     user's half-finished edits, not throw them away."""
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
         "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
-    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.capture_sources", lambda: [])
     d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
     d.build()
 
@@ -1522,7 +1598,7 @@ def _focus_daemon(monkeypatch, *, overlay=True, allow_fallback=True, layer_shell
                   clock=None):
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
         "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
-    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.capture_sources", lambda: [])
     monkeypatch.setattr("voice.ui.overlay_client.cached_probe",
                         lambda: FakeProbe(command, layer_shell))
     cfg = Config.load()
@@ -2000,7 +2076,7 @@ def test_the_reused_settings_dialog_captures_with_the_current_listener(isolated_
     """The dialog is built once and kept. It used to capture the *bound method*
     of the listener alive at that moment, so after any rebind "Capture key"
     called a stopped listener and the button sat on "Press a key..." for ever."""
-    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.capture_sources", lambda: [])
     d = _portal_daemon(monkeypatch)
     d.open_settings()
     dialog = d._settings
@@ -2022,7 +2098,7 @@ def test_the_reused_settings_dialog_captures_with_the_current_listener(isolated_
 
 
 def test_the_evdev_capture_button_follows_a_rebuilt_listener(isolated_xdg, qapp, monkeypatch):
-    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.capture_sources", lambda: [])
     d = _evdev_daemon(monkeypatch)
     d.open_settings()
     dialog, first = d._settings, d.listener
@@ -2048,7 +2124,7 @@ def test_a_backend_change_rebuilds_the_settings_dialog_portal_to_evdev(isolated_
     """The backend is baked into the dialog's widget set, so a reused dialog
     showed the old backend's fields - portal trigger boxes for a listener that
     no longer reads them, and no way to capture the key that now applies."""
-    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.capture_sources", lambda: [])
     d = _portal_daemon(monkeypatch)
     d.open_settings()
     first_dialog = d._settings
@@ -2071,7 +2147,7 @@ def test_a_backend_change_rebuilds_the_settings_dialog_portal_to_evdev(isolated_
 
 
 def test_a_backend_change_rebuilds_the_settings_dialog_evdev_to_portal(isolated_xdg, qapp, monkeypatch):
-    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.capture_sources", lambda: [])
     d = _evdev_daemon(monkeypatch)
     d.open_settings()
     first_dialog = d._settings
@@ -2095,7 +2171,7 @@ def test_a_backend_change_rebuilds_the_settings_dialog_evdev_to_portal(isolated_
 def test_a_backend_change_replaces_the_window_the_user_is_looking_at(isolated_xdg, qapp, monkeypatch):
     """Saving the backend change from this very window is the commonest way to
     make it: the reload must not leave the old backend's fields on screen."""
-    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.capture_sources", lambda: [])
     d = _portal_daemon(monkeypatch)
     d.open_settings()
     first_dialog = d._settings
@@ -2388,7 +2464,7 @@ def test_nothing_rebinds_when_no_one_asked_and_nothing_changed(isolated_xdg, qap
 
 
 def test_the_settings_window_rebind_request_reaches_the_daemon(isolated_xdg, qapp, monkeypatch):
-    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.capture_sources", lambda: [])
     d = _portal_daemon(monkeypatch)
     d.open_settings()
     first = d.listener
@@ -2407,7 +2483,7 @@ def test_a_window_that_only_wrote_the_desktop_still_gets_its_rebind(
     """"Change…" hands the key over on the spot and emits this with no save
     behind it: that is the whole path the promise "the new key works at once"
     rests on."""
-    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.capture_sources", lambda: [])
     d = _portal_daemon(monkeypatch)
     d.open_settings()
     first = d.listener
@@ -2476,7 +2552,7 @@ def test_a_dialog_rebuilt_for_a_new_backend_is_told_what_the_desktop_holds(
     """The window was thrown away and rebuilt *before* the new listener started,
     so it asked a listener that could not answer and sat on "waiting for an
     answer" until it was closed and reopened."""
-    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.capture_sources", lambda: [])
     monkeypatch.setattr("voice.daemon.PortalListener", ReadyPortalListener)
     d = _evdev_daemon(monkeypatch)
     d.open_settings()
@@ -2499,7 +2575,7 @@ def test_the_desktops_answer_reaches_a_window_that_is_already_open(
         isolated_xdg, qapp, monkeypatch):
     """The portal answers on its own thread, whenever the user accepts its
     dialog; a window opened before that must not keep showing nothing."""
-    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.capture_sources", lambda: [])
     monkeypatch.setattr("voice.daemon.PortalListener", ReadyPortalListener)
     cfg = Config.load()
     cfg.set("hotkeys.backend", "portal")
@@ -2528,7 +2604,7 @@ def test_the_settings_window_is_told_this_desktop_cannot_place_the_pill(
     the window afterwards - like the microphone list and the triggers."""
     from voice.ui.overlay_client import HelperProbe
 
-    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.capture_sources", lambda: [])
     monkeypatch.setattr("voice.daemon.cached_probe", lambda: HelperProbe(
         ["/usr/bin/python3", "-m", "voice.ui.overlay"], ("gtk4",)))
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
@@ -2546,7 +2622,7 @@ def test_the_settings_window_is_told_this_desktop_cannot_place_the_pill(
 def test_a_desktop_that_can_place_the_pill_gets_no_warning(isolated_xdg, qapp, monkeypatch):
     from voice.ui.overlay_client import HelperProbe
 
-    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.capture_sources", lambda: [])
     monkeypatch.setattr("voice.daemon.cached_probe", lambda: HelperProbe(
         ["/usr/bin/python3", "-m", "voice.ui.overlay"], ("gtk4", "layer-shell")))
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
@@ -2718,7 +2794,7 @@ def test_a_second_preview_replaces_the_first(isolated_xdg, qapp, monkeypatch):
 def test_the_settings_window_previews_through_the_daemon(isolated_xdg, qapp, monkeypatch):
     """The window asks over the same command the CLI would use, so there is one
     path into the preview and one place it is validated."""
-    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.capture_sources", lambda: [])
     d = _preview_daemon(monkeypatch)
     d.open_settings()
     d._settings.pill_placer.set_placement("top-right", 10, 20)

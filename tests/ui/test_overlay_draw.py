@@ -327,6 +327,17 @@ def test_the_transcribing_fill_sweeps_from_the_left(tmp_path):
     assert reach(late)[1] > reach(early)[1] + 20                     # and it grows
 
 
+def test_a_long_transcription_holds_short_of_the_end_of_the_track(tmp_path):
+    """Only the completion reaches the end. However long the conversion runs,
+    there is grey track left between the fill and the counter - which is what
+    keeps a full bar meaning "done"."""
+    well_x, well_right = 36, 36 + 132
+    late = Image(render_png(_model("transcribing", age=120.0), tmp_path / "long.png"))
+    lit = [x for x in range(well_x, well_right) for y in (21, 22) if wave(late(x, y))]
+    assert max(lit) < well_right - 6, "the fill holds short of the end of the track"
+    assert max(lit) > well_x + 100, "and it has crept most of the way there"
+
+
 def test_the_transcribing_counter_is_dimmed(tmp_path):
     live = Image(render_png(_model("recording", elapsed=12.0), tmp_path / "rec.png"))
     frozen = Image(render_png(_model("transcribing", elapsed=12.0, age=0.5), tmp_path / "tra.png"))

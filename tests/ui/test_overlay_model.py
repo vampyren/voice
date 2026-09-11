@@ -16,10 +16,10 @@ from voice.ui.overlay_model import (
     LABEL_DUR,
     NOTICE_TTL,
     POP_IN,
-    SWEEP_PERIOD,
+    SWEEP_CEILING,
+    SWEEP_TAU,
     OverlayModel,
     TAPER,
-    ease_in_out,
     ease_out,
 )
 
@@ -67,19 +67,17 @@ def profile(level=1.0, bars=21, amplitude=1.0):
 
 # -- easing ---------------------------------------------------------------
 
-@pytest.mark.parametrize("ease", [ease_out, ease_in_out])
-def test_easings_run_from_zero_to_one_without_going_backwards(ease):
-    assert ease(0.0) == 0.0
-    assert ease(1.0) == 1.0
-    assert ease(-1.0) == 0.0 and ease(2.0) == 1.0
-    samples = [ease(i / 40) for i in range(41)]
+def test_the_easing_runs_from_zero_to_one_without_going_backwards():
+    assert ease_out(0.0) == 0.0
+    assert ease_out(1.0) == 1.0
+    assert ease_out(-1.0) == 0.0 and ease_out(2.0) == 1.0
+    samples = [ease_out(i / 40) for i in range(41)]
     assert all(b >= a - 1e-9 for a, b in zip(samples, samples[1:]))
 
 
 def test_ease_out_front_loads_its_progress():
     # cubic-bezier(.16, 1, .3, 1): most of the distance is covered early.
     assert ease_out(0.25) > 0.6
-    assert ease_in_out(0.25) < 0.25
 
 
 # -- states ---------------------------------------------------------------
@@ -428,18 +426,41 @@ def test_the_recording_dot_breathes_once_per_period(model, clock):
     assert model.breath == pytest.approx(0.0, abs=1e-9)
 
 
-def test_the_transcribing_fill_grows_then_fades_and_repeats(model, clock):
+def test_the_transcribing_fill_reads_as_progress(model, clock):
+    """Quick at first, then a creep - and never a step backwards.
+
+    The owner watched the old indeterminate loop give up half-way across and
+    start again. Twelve seconds at the helper's frame rate: every frame is at
+    least as far along as the one before it, the opacity never fades, and the
+    fill is still short of the end of the track.
+    """
     model.set_state("transcribing")
     assert model.sweep == (0.0, 1.0)
-    model.tick(clock.advance(1.1))
-    grown, alpha = model.sweep
-    assert 0.0 < grown < 1.0 and alpha == 1.0
-    model.tick(clock.advance(1.1))
-    assert model.sweep[0] > grown
-    model.tick(clock.advance(0.2))               # inside the trailing fade
-    assert model.sweep[0] == pytest.approx(1.0) and model.sweep[1] < 1.0
-    model.tick(clock.advance(0.3))               # and round again
-    assert model.sweep[0] < 0.5
+    widths = [0.0]
+    for _ in range(int(12 / FRAME)):
+        model.tick(clock.advance(FRAME))
+        width, alpha = model.sweep
+        assert alpha == 1.0, "the fill never fades out any more"
+        widths.append(width)
+    assert widths == sorted(widths), "the fill never goes backwards"
+    assert widths[-1] > widths[0], "and it does move"
+    one_second = widths[int(1 / FRAME)]
+    assert one_second > 0.3, "a third of the track inside the first second"
+    two_seconds = widths[int(2 / FRAME)]
+    assert two_seconds > widths[-1] - two_seconds, \
+        "the first two seconds cover more ground than the next ten"
+    assert widths[-1] < SWEEP_CEILING, "it approaches the ceiling, never reaches it"
+
+
+def test_the_transcribing_fill_never_restarts(model, clock):
+    """The defect itself: the fill used to fall back to zero every 2.6 s."""
+    model.set_state("transcribing")
+    last = 0.0
+    for _ in range(60):
+        model.tick(clock.advance(0.5))           # half a minute, 0.5 s at a time
+        width = model.sweep[0]
+        assert width >= last, "the fill restarted"
+        last = width
 
 
 def test_the_checkmark_pops_then_draws_then_labels(model, clock):
@@ -660,14 +681,32 @@ def test_the_completion_starts_from_where_the_sweep_stood(model, clock):
         clock.advance(FINISH)
 
 
-def test_a_long_transcription_still_loops(model, clock):
+def test_a_long_transcription_holds_just_short_of_the_end(model, clock):
+    """A slow CPU can transcribe for minutes. The fill creeps up to the
+    ceiling and waits there - short of the end, so the track still says the
+    work is not done, and motionless enough that nothing reads as a restart."""
     model.set_state("transcribing")
-    model.tick(clock.advance(SWEEP_PERIOD * 0.5))
-    peak = model.sweep[0]
-    model.tick(clock.advance(SWEEP_PERIOD * 0.55))     # over the top and round again
-    assert model.sweep[0] < peak, "the indeterminate sweep must keep looping"
-    model.tick(clock.advance(SWEEP_PERIOD * 3))
+    model.tick(clock.advance(SWEEP_TAU * 10))
+    settled = model.sweep[0]
+    assert settled == pytest.approx(SWEEP_CEILING, abs=0.005)
+    assert settled < SWEEP_CEILING, "the ceiling is approached, never reached"
+    model.tick(clock.advance(300.0))                   # five minutes more
+    assert model.sweep[0] >= settled
+    assert model.sweep[0] < 1.0, "the full track belongs to the completion"
     assert model.state == "transcribing" and model.finishing is False
+
+
+def test_the_completion_fills_the_track_after_a_long_transcription(model, clock):
+    """From the ceiling, where a slow transcription leaves it, to 100%."""
+    model.set_state("transcribing")
+    model.tick(clock.advance(120.0))
+    caught = model.sweep[0]
+    assert caught < 1.0
+    model.set_state("done", now=clock.t)
+    assert model.sweep[0] == pytest.approx(caught)
+    model.tick(clock.advance(FINISH))
+    assert model.sweep == pytest.approx((1.0, 1.0)), \
+        "the completed fill ends where the grey track ends"
 
 
 def test_an_error_skips_the_completion(model, clock):
@@ -867,7 +906,7 @@ def test_a_second_transcription_does_not_start_on_a_landed_fill(model, clock):
     width, alpha = model.sweep
     assert width < 1.0, "a new transcription sweeps; it does not sit at full width"
     assert model.sweep[0] != pytest.approx(1.0)
-    model.tick(clock.advance(SWEEP_PERIOD / 4))
+    model.tick(clock.advance(1.0))
     assert model.sweep[0] > width, "and it is moving"
 
 

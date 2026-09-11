@@ -42,11 +42,35 @@ ERROR_HOLD = 2.0
 
 #: Motion timings, straight from the design.
 BREATH_PERIOD = 2.4          # recording dot, ease-in-out, infinite
-SWEEP_PERIOD = 2.6           # transcribing fill line, indeterminate loop
-SWEEP_HOLD = 0.85            # fraction of the loop spent growing; then it fades
 COLLAPSE = 0.2               # bars melting into the track when transcribing starts
-#: The sweep is indeterminate, and real transcriptions end part-way through
-#: it, so the checkmark used to replace a half-drawn line - an operation
+
+#: The transcribing fill is *progress*, not an indeterminate loop. It used to
+#: grow over 2.6 s, fade out and start again from zero, and what the owner saw
+#: was a bar that gives up half-way across - a screenshot of a real
+#: transcription catches it stopped in the middle of the track.
+#:
+#: It now advances quickly and then creeps, on the shape every indeterminate
+#: progress bar uses: `SWEEP_CEILING * (1 - exp(-age / SWEEP_TAU))`. It is
+#: monotonic by construction, so there is no restart to see, and it cannot
+#: reach the end of the track on its own - the end belongs to `finish_fill`,
+#: which is the one thing that means the transcript exists.
+#:
+#: SWEEP_TAU 2.2 s is set by how long a transcription actually takes. On this
+#: machine's GPU a sentence is over in one to three seconds, so the fill has
+#: to be well across the track by then: a third of it in the first second,
+#: half at 1.7 s, 80% of the ceiling at 3.5 s. A slow CPU takes tens of
+#: seconds, and the fill is still visibly moving for about ten of them - the
+#: track is 132 px wide, so a pixel is 0.0076 of it and the remaining
+#: distance stays over a pixel until ~10.5 s. After that it holds.
+#:
+#: SWEEP_CEILING 0.92 leaves ~11 px of grey track at 1x (21 px at 2x): enough
+#: that the bar plainly has not finished, close enough to the counter that the
+#: completion reads as arriving rather than as a jump.
+SWEEP_TAU = 2.2
+SWEEP_CEILING = 0.92
+
+#: The fill stops short of the end of the track on its own (SWEEP_CEILING),
+#: so without this the checkmark would replace a half-drawn line - an operation
 #: abandoned rather than one completed. When the transcription ends the fill
 #: instead runs from wherever it stands to a full track, and only then does
 #: the checkmark begin. 0.2 s is the same beat as COLLAPSE, the gesture that
@@ -131,11 +155,6 @@ def _bezier(x: float, x1: float, y1: float, x2: float, y2: float) -> float:
 def ease_out(t: float) -> float:
     """The design's cubic-bezier(.16, 1, .3, 1) - everything settles with it."""
     return _bezier(t, .16, 1., .3, 1.)
-
-
-def ease_in_out(t: float) -> float:
-    """cubic-bezier(.4, 0, .2, 1), used by the transcribing fill line."""
-    return _bezier(t, .4, 0., .2, 1.)
 
 
 def _clamp01(value: float) -> float:
@@ -290,7 +309,7 @@ class OverlayModel:
         elif state == "transcribing" and self.state != "notice":
             # A transcription that is starting has nothing to complete: a fill
             # carried in from the last one renders a motionless full bar where
-            # the indeterminate loop belongs. The one exception is the notice
+            # the progress curve belongs. The one exception is the notice
             # that covered a fill and has just expired, which is the only way
             # into this state with a completion genuinely in flight.
             self._finish_from = None
@@ -402,24 +421,28 @@ class OverlayModel:
         return (1.0 - math.cos(2 * math.pi * phase)) / 2
 
     def _sweep_at(self, age: float) -> tuple[float, float]:
-        """The indeterminate loop at `age` seconds into the transcribing state."""
+        """The progress fill at `age` seconds into the transcribing state.
+
+        Opacity is a constant: the line used to fade out at the end of every
+        loop, and a fill that dims is a fill that is giving up. It stays lit
+        from the first frame to the checkmark.
+        """
         if self.reduced_motion:
             return 0.35, 1.0
-        phase = (age % SWEEP_PERIOD) / SWEEP_PERIOD
-        width = ease_in_out(_clamp01(phase / SWEEP_HOLD))
-        fade = 1.0 if phase <= SWEEP_HOLD else 1.0 - (phase - SWEEP_HOLD) / (1 - SWEEP_HOLD)
-        return width, _clamp01(fade)
+        # -expm1(-x) is 1 - exp(-x) without the cancellation at small x, which
+        # is exactly where the fill moves fastest.
+        return SWEEP_CEILING * -math.expm1(-max(0.0, age) / SWEEP_TAU), 1.0
 
     @property
     def sweep(self) -> tuple[float, float]:
         """The fill line as (width 0..1, opacity 0..1).
 
-        While transcribing this is the indeterminate loop. Once the
-        transcription is over it is the completion: the same line carried from
-        wherever it stood to a full track, eased so a long remainder still
-        reads as quick and a short one does not crawl. A line caught in the
-        loop's trailing fade brightens back up as it finishes - the point is a
-        finished bar, and half-faded is not that.
+        While transcribing this is the progress curve, which approaches
+        SWEEP_CEILING and stops there. Once the transcription is over it is
+        the completion: the same line carried from wherever it stood to a full
+        track, eased so a long remainder still reads as quick and a short one
+        does not crawl. Only the completion reaches the end of the track,
+        which is what makes a full bar mean "done".
         """
         if self._finish_from is not None:
             start_w, start_a = self._finish_from

@@ -25,6 +25,39 @@ OVERLAY_WRAPPER = PKG / "voice-overlay.wrapper"
 APP_DIR = "/usr/lib/voice/app"
 DEPS_DIR = "/usr/lib/voice/deps"
 
+#: The Python that Arch's `python` package is, checked against
+#: https://archlinux.org/packages/search/json/?name=python on 2026-09-11
+#: (core/python 3.14.7). The package installs the locked dependency set on this
+#: interpreter and runs it there, so the project has to support it.
+ARCH_SYSTEM_PYTHON = (3, 14)
+
+#: Every package name the PKGBUILD is allowed to declare, each one checked on
+#: 2026-09-11 against https://archlinux.org/packages/search/json/?name=<pkg>
+#: and found in core/ or extra/.
+#:
+#: `makepkg -s` installs dependencies from the configured repositories and from
+#: nowhere else - it does not fetch from the AUR. A name that is not here is
+#: either a typo or an AUR package, and both fail the very first `makepkg -si`
+#: on a clean machine with an error the owner cannot act on. Adding a
+#: dependency means re-running that query and adding the name here.
+OFFICIAL_REPO_PACKAGES = {
+    "python", "pipewire", "pipewire-audio", "wl-clipboard", "libnotify",
+    "xdg-desktop-portal", "python-gobject", "gtk4", "python-cairo",
+    "gtk4-layer-shell", "nvidia-utils", "wtype", "ydotool",
+    "ttf-jetbrains-mono", "dconf", "git", "uv",
+}
+
+#: Not packages but virtual names that official packages satisfy through
+#: `provides`, so a name search returns nothing while pacman resolves them
+#: fine: xdg-desktop-portal-kde, -gnome, -gtk, -wlr and eight others provide
+#: this one (checked the same day).
+OFFICIAL_VIRTUAL_PROVIDES = {"xdg-desktop-portal-impl"}
+
+#: Interpreter packages that have only ever existed in the AUR. `python312` was
+#: a hard dependency until this package was retargeted at Arch's own `python`;
+#: naming any of them again reintroduces the failure described above.
+AUR_ONLY_INTERPRETERS = {"python311", "python312", "python313"}
+
 
 def code(path: Path) -> str:
     """`path` without its comment lines: what it actually runs."""
@@ -203,13 +236,92 @@ def test_the_dependency_set_comes_from_the_lock_file():
     assert (ROOT / "uv.lock").exists()
 
 
+def _declared_dependency_names(env: dict | None = None) -> set[str]:
+    """Every package name the PKGBUILD declares as a dependency of any kind."""
+    names = set()
+    for var in ("depends", "makedepends", "optdepends"):
+        for entry in shell_array(var, env):
+            name = entry.split(":", 1)[0].strip()        # optdepends: "pkg: why"
+            name = re.split(r"[<>=]", name, 1)[0].strip()  # any version pin
+            if name:
+                names.add(name)
+    return names
+
+
+def test_no_dependency_comes_from_the_aur():
+    """`makepkg -s` does not fetch from the AUR.
+
+    The package used to depend on `python312`, which exists only there, so the
+    first `makepkg -si` on a clean machine died on a missing dependency that
+    the owner could not act on without reading the error. Checked for the GPU
+    build and the CPU-only one, since they declare different `depends`.
+    """
+    known = OFFICIAL_REPO_PACKAGES | OFFICIAL_VIRTUAL_PROVIDES
+    for env in (None, {"VOICE_GPU": "0"}):
+        declared = _declared_dependency_names(env)
+        assert declared, "no dependencies were read out of the PKGBUILD at all"
+        for name in sorted(declared):
+            assert name not in AUR_ONLY_INTERPRETERS, \
+                f"{name} is AUR-only; `makepkg -s` cannot install it"
+            assert name in known, (
+                f"{name!r} is not in the list of names checked against the "
+                f"official repositories. If it really is in core/extra add it "
+                f"to OFFICIAL_REPO_PACKAGES; if it is an AUR package it cannot "
+                f"be a dependency.")
+
+
+def test_the_package_depends_on_arch_s_own_python():
+    """There is no pinned-interpreter alternative that avoids the AUR: none of
+    python311, python312 or python313 is in the official repositories."""
+    for env in (None, {"VOICE_GPU": "0"}):
+        assert "python" in shell_array("depends", env)
+
+
+def test_the_project_supports_the_interpreter_arch_will_run_it_on():
+    """`requires-python` has to admit Arch's `python`, because that is what the
+    wheels are resolved and built for and what /usr/bin/voice execs. It must
+    still admit 3.12, which costs nothing - the lock resolves the same
+    versions either way."""
+    import tomlkit
+    spec = tomlkit.parse((ROOT / "pyproject.toml").read_text())
+    spec = str(spec["project"]["requires-python"])
+    low = tuple(int(n) for n in re.search(r">=\s*(\d+)\.(\d+)", spec).groups())
+    high = tuple(int(n) for n in re.search(r"<\s*(\d+)\.(\d+)", spec).groups())
+    assert low <= ARCH_SYSTEM_PYTHON < high, \
+        f"requires-python {spec!r} excludes Arch's python " \
+        f"{'.'.join(str(n) for n in ARCH_SYSTEM_PYTHON)}"
+    assert low <= (3, 12), "3.12 support is free to keep; do not drop it"
+
+
+def test_the_wrapper_runs_the_very_interpreter_the_package_builds_against():
+    """The wheels under deps/ are CPython extension modules built for `_py`.
+    If /usr/bin/voice execs anything else they are the wrong ABI and every
+    import of numpy or ctranslate2 fails on first use - at runtime, on the
+    owner's machine, long after a build that reported success."""
+    py = shell_vars()["_py"].strip("\"'")
+    assert py == "/usr/bin/python3", \
+        f"_py is {py!r}: the package builds against Arch's `python`"
+    assert re.search(rf"(?m)^exec {re.escape(py)}\s", code(WRAPPER)), \
+        f"the wrapper does not exec {py}"
+
+
+def test_no_shipped_code_names_a_pinned_interpreter():
+    """Comments and prose may explain the history; the code must not run it."""
+    for path in (PKGBUILD, WRAPPER, OVERLAY_WRAPPER):
+        body = code(path)
+        assert "python3.12" not in body, f"{path.name} still runs python3.12"
+        for name in AUR_ONLY_INTERPRETERS:
+            assert name not in body, f"{path.name} still declares {name}"
+    assert "python3.12" not in scriptlet_code()
+
+
 def test_the_wrapper_runs_the_projects_console_script_entry_point():
     import tomlkit
     pyproject = tomlkit.parse((ROOT / "pyproject.toml").read_text())
     assert pyproject["project"]["scripts"]["voice"] == "voice.cli:main"
     wrapper = WRAPPER.read_text()
     assert "voice.cli" in wrapper
-    assert "python3.12" in wrapper, "the app runs on the interpreter the lock resolves for"
+    assert "/usr/bin/python3" in wrapper, "the app runs on Arch's own interpreter"
     assert " -P " in wrapper, "-P keeps a stray ./voice directory off sys.path"
 
 
@@ -245,14 +357,16 @@ def test_the_wrapper_survives_a_cuda_directory_with_no_libraries(tmp_path):
 
 
 def test_the_overlay_wrapper_uses_the_system_interpreter():
-    """The pill needs PyGObject and pycairo, which are distro packages; the
-    app's own 3.12 has neither, and `probe_helper()` tries this path first."""
+    """The pill needs PyGObject and pycairo, which are distro packages, and
+    `probe_helper()` tries this path first. The app runs on that same
+    interpreter now, so what this pins is the *path*: the helper gets `app`
+    and not `deps`, whose gigabytes it has no use for."""
     from voice.ui.overlay_client import SYSTEM_PYTHON
     body = code(OVERLAY_WRAPPER)
     assert SYSTEM_PYTHON in body
     assert "voice.ui.overlay" in body
     assert APP_DIR in body
-    assert DEPS_DIR not in body, "the helper must not see the 3.12 extension modules"
+    assert DEPS_DIR not in body, "the pill has no use for the bundled wheels"
 
 
 def test_the_scriptlet_reloads_udev_and_points_the_user_at_the_next_step():
@@ -330,9 +444,8 @@ def _stage(tmp_path: Path, env: dict | None = None) -> Path:
         'umask 0022;'                       # makepkg sets this before it builds
         f'startdir={PKG}; source "{PKGBUILD}";'
         f'export srcdir="{src}" pkgdir="{pkg}";'
-        # python3.12 is the *target* interpreter and need not exist on the
-        # machine writing the package; only compileall uses it here.
-        '_py=$(command -v python3.12 || command -v python3);'
+        # No _py override: the PKGBUILD names /usr/bin/python3, which is the
+        # interpreter this staging run should actually use for compileall.
         'package'
     )
     done = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
@@ -372,7 +485,7 @@ def test_the_packaged_files_are_not_group_writable(tmp_path):
 
 
 def test_the_app_directory_holds_only_this_project(tmp_path):
-    """repo_root() hands this directory to the pill helper on the *system*
-    interpreter; a third-party module built for 3.12 must not be in it."""
+    """repo_root() hands this directory to the pill helper; it must hold this
+    project and nothing else, or the helper picks up bundled wheels."""
     pkg = _stage(tmp_path)
     assert {p.name for p in (pkg / "usr/lib/voice/app").iterdir()} == {"voice"}

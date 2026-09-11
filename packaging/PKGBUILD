@@ -11,14 +11,26 @@
 # why a split build was rejected (a dependency cycle pacman resolves badly on
 # removal) and what the CPU-only escape hatch costs.
 #
-# Why the app does not live in /usr/lib/python3.X/site-packages: the project
-# pins `requires-python = ">=3.12,<3.13"` and its uv.lock resolves the whole
-# dependency set - including the CTranslate2 and onnxruntime wheels that no
-# Arch package provides - for CPython 3.12, while Arch's `python` is 3.14. So
-# the locked, tested set is installed under /usr/lib/voice and run on the
-# `python312` interpreter, and only the pieces the *desktop* owns (PyGObject,
-# GTK 4, pycairo, gtk4-layer-shell, PipeWire, wl-clipboard, libnotify) come
-# from pacman. See packaging/README.md for the full reasoning.
+# Why the app does not live in /usr/lib/python3.X/site-packages: the locked
+# dependency set includes wheels no Arch package provides - CTranslate2 and
+# onnxruntime - plus a CUDA 12 runtime that Arch's `cuda` (13.x) cannot supply.
+# So the locked, tested set is installed under /usr/lib/voice and imported from
+# there, and only the pieces the *desktop* owns (PyGObject, GTK 4, pycairo,
+# gtk4-layer-shell, PipeWire, wl-clipboard, libnotify) come from pacman.
+#
+# It runs on Arch's own `python`, and that has a price worth stating plainly:
+# the wheels under deps/ are compiled for one CPython minor version, so when
+# Arch bumps `python` (3.14 -> 3.15) this package stops importing until it is
+# rebuilt. The fix is to run `makepkg -si` again; nothing detects the bump for
+# you, and the symptom is an ImportError from a native module the first time
+# voice runs afterwards. That is the ordinary situation for an Arch package
+# that bundles compiled Python wheels, and it is what dropping the AUR buys:
+# the package used to depend on `python312`, which exists only in the AUR, and
+# `makepkg -s` does not fetch from there - so the very first install failed on
+# a clean machine for a reason the owner could do nothing about. There is no
+# middle option: python311, python312 and python313 are all AUR-only, and
+# `python` is the only interpreter in the official repositories.
+# See packaging/README.md for the full reasoning.
 
 pkgname=voice
 pkgver=0.1.0
@@ -29,7 +41,7 @@ url="https://github.com/vampyren/voice"
 # The repository has no LICENSE file yet (README: "all-rights-reserved until
 # one is added"). Replace both this and the install -Dm644 below once it has.
 license=('LicenseRef-all-rights-reserved')
-makedepends=('git' 'uv' 'python312')
+makedepends=('git' 'uv')   # the interpreter itself is a runtime depend
 # The wheels under deps/ and cuda/ are prebuilt and already stripped upstream;
 # letting makepkg walk several gigabytes of them costs minutes and gains nothing.
 options=('!strip' '!debug')
@@ -65,16 +77,20 @@ sha256sums=('SKIP')
 #: Where the Python install lands. `app` holds this project and nothing else -
 #: `voice.ui.overlay_client.repo_root()` is the parent of the `voice` package
 #: and the daemon hands it to the pill helper as PYTHONPATH, so anything else
-#: in there would be on the *system* interpreter's path. `deps` is the locked
-#: third-party set (CPython 3.12 extension modules), `cuda` the CUDA 12 runtime.
+#: in there would be on the pill helper's path too. `deps` is the locked
+#: third-party set (compiled for `_py`), `cuda` the CUDA 12 runtime.
+#:
+#: _py is Arch's `python`. Everything that consumes the bundled wheels - the
+#: build below, compileall, /usr/bin/voice - has to name this one interpreter,
+#: because the extension modules under deps/ are built for exactly its ABI.
 _prefix=/usr/lib/voice
-_py=/usr/bin/python3.12
+_py=/usr/bin/python3
 #: Must equal voice.APP_ID: the desktop portal resolves our app id (needed by
 #: the GlobalShortcuts hotkey backend) through an entry with exactly this name.
 _appid=io.github.vampyren.voice
 
 depends=(
-  'python312'          # the interpreter the lock resolves for; see the header
+  'python'             # Arch's own interpreter; see the header for the cost
   'pipewire'           # pw-dump: the microphone list
   'pipewire-audio'     # pw-record: the capture itself (NOT in `pipewire`)
   'wl-clipboard'       # wl-copy / wl-paste: how text reaches the focused window
@@ -111,7 +127,7 @@ build() {
   cd "$srcdir/$pkgname"
 
   export UV_CACHE_DIR="$srcdir/uv-cache"   # keep the build out of the user cache
-  export UV_PYTHON_DOWNLOADS=never         # build against python312, nothing else
+  export UV_PYTHON_DOWNLOADS=never         # build against $_py, never a download
   export UV_NO_CONFIG=1                    # ignore any uv.toml on the build host
 
   # --frozen: the versions the test suite runs against, no re-resolution here.

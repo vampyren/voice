@@ -321,3 +321,40 @@ def test_portal_shortcuts_probe_ignores_a_daemon_that_predates_the_field(monkeyp
 
 def _never_run(argv, **kwargs):
     raise AssertionError(f"doctor must not run {argv} here")
+
+
+def test_the_placement_probe_says_where_the_pill_will_actually_go(monkeypatch, isolated_xdg):
+    """`ui.overlay_position` is recorded everywhere and honoured only where
+    there is a layer surface; doctor has to say which of the two this is."""
+    from voice.config import Config
+    from voice.doctor import default_probes
+    from voice.ui.overlay_client import HelperProbe
+    from voice.ui.placement import NO_LAYER_SHELL_NOTE
+
+    cfg = Config.load()
+    cfg.set("ui.overlay_position", "top-right")
+    cfg.save()
+
+    monkeypatch.setattr("voice.doctor.probe_helper", lambda: HelperProbe(
+        ["/usr/bin/python3", "-m", "voice.ui.overlay"], ("gtk4", "layer-shell-unsupported")))
+    ok, detail = default_probes()["pill placement"]()
+    assert ok is True                                   # informational, never a failure
+    assert "top-right" in detail
+    assert NO_LAYER_SHELL_NOTE.rstrip(".").lower() in detail.lower()
+
+    monkeypatch.setattr("voice.doctor.probe_helper", lambda: HelperProbe(
+        ["/usr/bin/python3", "-m", "voice.ui.overlay"], ("gtk4", "layer-shell")))
+    ok, detail = default_probes()["pill placement"]()
+    assert "top-right" in detail and NO_LAYER_SHELL_NOTE.lower() not in detail.lower()
+
+
+def test_the_placement_probe_is_quiet_when_there_is_no_pill(monkeypatch, isolated_xdg):
+    from voice.config import Config
+    from voice.doctor import default_probes
+    from voice.ui.overlay_client import HelperProbe
+
+    cfg = Config.load()
+    cfg.set("ui.overlay", False)
+    cfg.save()
+    monkeypatch.setattr("voice.doctor.probe_helper", lambda: HelperProbe(None, (), "no PyGObject"))
+    assert default_probes()["pill placement"]()[0] is True

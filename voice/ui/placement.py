@@ -79,6 +79,14 @@ def is_margin(value: object) -> bool:
             and -MARGIN_LIMIT <= value <= MARGIN_LIMIT)
 
 
+#: What a desktop without a layer shell does with a placement, in one sentence.
+#: The settings window shows it under the placer and `voice doctor` repeats it:
+#: the owner dragged the pill on GNOME, saw it appear in the middle anyway, and
+#: the only record of why was a log line in the daemon's journal.
+NO_LAYER_SHELL_NOTE = ("Your desktop places this window itself, so this only takes "
+                       "effect on KDE/wlroots.")
+
+
 def placement_note(position: str, margin_x: int, margin_y: int) -> str | None:
     """What to say when the pill cannot be placed, or None if nothing was asked.
 

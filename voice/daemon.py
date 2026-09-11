@@ -28,7 +28,8 @@ from voice.pipeline import Dictation, Services, State, detail_method
 from voice.stt import make_transcriber
 from voice.stt.base import TranscriptionError
 from voice.ui.notify import Notifier
-from voice.ui.overlay_client import OverlayClient, default_launcher, pill_takes_focus
+from voice.ui.overlay_client import (OverlayClient, cached_probe, default_launcher,
+                                     pill_takes_focus)
 from voice.ui.settings import SettingsDialog
 from voice.ui.tray import Tray
 
@@ -228,6 +229,7 @@ class _Bridge(QObject):
     quit = Signal()
     triggers_refreshed = Signal()
     sources_listed = Signal(object)
+    layer_shell_probed = Signal(object)
 
 
 class Daemon:
@@ -262,6 +264,9 @@ class Daemon:
         self._pill_policy = "none"
         #: One background refresh of each kind at a time; see _refresh_off_thread.
         self._refreshers: dict[str, threading.Thread] = {}
+        #: Whether this desktop can put the pill where the config says; None
+        #: until the helper probe has answered. See _on_layer_shell_probed.
+        self._layer_shell: bool | None = None
         #: Set by rebind_hotkeys(): the desktop's own shortcut store moved under
         #: us, which no config snapshot can see. Cleared by the rebind it asks for.
         self._force_rebind = False
@@ -293,6 +298,7 @@ class Daemon:
         self._bridge.quit.connect(self._quit)
         self._bridge.triggers_refreshed.connect(self._on_triggers_refreshed)
         self._bridge.sources_listed.connect(self._on_sources_listed)
+        self._bridge.layer_shell_probed.connect(self._on_layer_shell_probed)
         self._server = Server(self.handle)
 
     def _make_injector(self) -> Injector:
@@ -601,6 +607,12 @@ class Daemon:
         self._refresh_off_thread("triggers", self._refresh_shortcut_triggers,
                                  lambda _: self._bridge.triggers_refreshed.emit())
         self._refresh_off_thread("sources", list_sources, self._bridge.sources_listed.emit)
+        # Whether the pill can be placed at all. The probe spawns two
+        # interpreters on a cold cache, which is not something the Qt thread may
+        # do while a window is opening - and the answer cannot change under a
+        # running daemon, so it is asked once and remembered.
+        self._refresh_off_thread("layer_shell", lambda: cached_probe().layer_shell,
+                                 self._bridge.layer_shell_probed.emit)
 
     def _on_triggers_refreshed(self) -> None:
         """Qt thread: the desktop has answered. Update the window, if any is up.
@@ -611,6 +623,16 @@ class Daemon:
         """
         if self._settings is not None:
             self._settings.refresh_effective_triggers()
+
+    def _on_layer_shell_probed(self, available) -> None:
+        """Qt thread: the helper probe has answered.
+
+        Kept here as well as pushed, so a window opened later starts out saying
+        the right thing instead of waiting for its own probe.
+        """
+        self._layer_shell = bool(available)
+        if self._settings is not None:
+            self._settings.set_layer_shell(self._layer_shell)
 
     def _on_sources_listed(self, sources) -> None:
         """Qt thread: `pw-dump` has answered."""
@@ -917,6 +939,7 @@ class Daemon:
             log.warning("cannot open settings: %s", exc)
             self._notifier.notify("Config error", str(exc), "critical")
             return
+        self._settings.set_layer_shell(self._layer_shell)
         self._settings.show()
         self._settings.raise_()
         self._settings.activateWindow()

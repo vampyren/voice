@@ -2211,3 +2211,44 @@ def test_the_desktops_answer_reaches_a_window_that_is_already_open(
     assert settle(qapp, lambda: ReadyPortalListener.key in label.text()), label.text()
     d._settings.close()
     d.shutdown()
+
+
+# -- and whether the pill can be placed at all --------------------------------
+def test_the_settings_window_is_told_this_desktop_cannot_place_the_pill(
+        isolated_xdg, qapp, monkeypatch):
+    """The probe spawns interpreters, so it runs off the Qt thread and lands in
+    the window afterwards - like the microphone list and the triggers."""
+    from voice.ui.overlay_client import HelperProbe
+
+    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.cached_probe", lambda: HelperProbe(
+        ["/usr/bin/python3", "-m", "voice.ui.overlay"], ("gtk4",)))
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray(),
+               notifier=QuietNotifier())
+    d.build()
+    d.open_settings()
+    warning = d._settings.placement_warning
+    assert settle(qapp, lambda: warning.isVisibleTo(d._settings)), "the window never said so"
+    d._settings.close()
+    d.shutdown()
+
+
+def test_a_desktop_that_can_place_the_pill_gets_no_warning(isolated_xdg, qapp, monkeypatch):
+    from voice.ui.overlay_client import HelperProbe
+
+    monkeypatch.setattr("voice.daemon.list_sources", lambda: [])
+    monkeypatch.setattr("voice.daemon.cached_probe", lambda: HelperProbe(
+        ["/usr/bin/python3", "-m", "voice.ui.overlay"], ("gtk4", "layer-shell")))
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray(),
+               notifier=QuietNotifier())
+    d.build()
+    d.open_settings()
+    assert settle(qapp, lambda: not d._refreshers["layer_shell"].is_alive())
+    qapp.processEvents()
+    assert d._settings.placement_warning.isVisibleTo(d._settings) is False
+    d._settings.close()
+    d.shutdown()

@@ -13,6 +13,7 @@ from voice import APP_ID, __version__
 from voice.hotkey.portal_listener import NO_TRIGGER, STATE_BOUND, STATE_UNASSIGNED
 from voice.inject.injector import insertion_status, pill_policy
 from voice.ui.overlay_client import pill_takes_focus, probe_helper
+from voice.ui.placement import NO_LAYER_SHELL_NOTE
 
 REQUIRED = {"portal", "wl-clipboard", "pw-record", "keyboard access", "config"}
 
@@ -173,6 +174,30 @@ def _overlay() -> tuple[bool, str]:
     return True, line
 
 
+def _pill_placement() -> tuple[bool, str]:
+    """Informational: whether `ui.overlay_position` can be honoured here at all.
+
+    The owner dragged the pill into a corner in the settings window and the pill
+    kept appearing in the middle. That is what a plain GTK window on a
+    compositor with no layer shell does - it cannot position itself, and GNOME
+    has no zwlr_layer_shell_v1 - and the only record of it was a line in the
+    daemon's log. It is not a failure: the placement is still recorded and still
+    applies on a machine that has one.
+    """
+    from voice.config import Config
+    cfg = Config.load()
+    position, margin_x, margin_y = cfg.overlay_placement()
+    where = f"{position} (margins {margin_x}/{margin_y})"
+    if not cfg.get("ui.overlay", True):
+        return True, f"{where}, but the pill is off (ui.overlay = false)"
+    probe = probe_helper()
+    if probe.command is None:
+        return True, f"{where}, but no pill helper can run here"
+    if probe.layer_shell:
+        return True, f"{where}, honoured through gtk4-layer-shell"
+    return True, f"{where} is saved, but not applied here: {NO_LAYER_SHELL_NOTE}"
+
+
 def _sources() -> tuple[bool, str]:
     from voice.audio.capture import list_sources
     srcs = list_sources()
@@ -253,6 +278,7 @@ def default_probes() -> dict[str, Callable[[], tuple[bool, str]]]:
         "cuda": _cuda,
         "model cache": _model_cache,
         "overlay": _overlay,
+        "pill placement": _pill_placement,
         "notify-send": lambda: _which("notify-send"),
         "fallback senders": _senders,
     }

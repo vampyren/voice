@@ -946,3 +946,35 @@ def test_the_hotkeys_tab_says_what_the_key_does_and_where_it_lives(qapp):
     assert "global-shortcuts" in words                    # where it is stored
     assert "ctrl+space" in words                          # what to press
     assert "save" in words                                # and that saving applies it
+
+
+# -- and whether this desktop will honour it at all -----------------------------
+def test_the_placer_says_when_this_desktop_places_the_window_itself(qapp):
+    """The owner dragged the pill and reported "it doesn't work, always in the
+    middle". It is a GTK window on GNOME: nothing can move it, and the only
+    record of that was a log line nobody sees."""
+    from voice.ui.placement import NO_LAYER_SHELL_NOTE
+
+    cfg, dlg, _ = make(qapp)
+    assert dlg.placement_warning.isVisibleTo(dlg) is False      # nothing known yet
+    dlg.set_layer_shell(False)
+    assert dlg.placement_warning.isVisibleTo(dlg) is True
+    assert NO_LAYER_SHELL_NOTE in dlg.placement_warning.text()
+    # The setting is still recorded: it applies on the owner's KDE machine.
+    assert dlg.pill_placer.isEnabled() is True
+
+
+def test_a_desktop_that_can_place_it_says_nothing(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.set_layer_shell(True)
+    assert dlg.placement_warning.isVisibleTo(dlg) is False
+    dlg.set_layer_shell(None)                                   # unknown again
+    assert dlg.placement_warning.isVisibleTo(dlg) is False
+
+
+def test_the_warning_survives_a_reload_of_the_window(qapp):
+    """Reopening re-reads the file; what the desktop can do has not changed."""
+    cfg, dlg, _ = make(qapp)
+    dlg.set_layer_shell(False)
+    dlg.reload_from_disk()
+    assert dlg.placement_warning.isVisibleTo(dlg) is True

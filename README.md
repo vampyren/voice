@@ -158,8 +158,11 @@ stealing focus mid-dictation - and a layer-shell surface has no position to
 drag, only anchors and margins. That is why the dragging happens in the
 preview, and why what is stored is an anchor and a margin. Where there is no
 layer-shell (GNOME, see below) not even that applies: the compositor places the
-window, and the helper says so once in the log rather than pretending the
-setting was honoured.
+window. The settings window says so under the placer — *"Your desktop places
+this window itself, so this only takes effect on KDE/wlroots"* — and `voice
+doctor`'s **pill placement** line says the same, so the setting is never
+silently ignored. The control stays live either way: the placement is recorded
+and applies on a machine that does have a layer shell.
 
 #### The pill and auto-paste, per desktop
 

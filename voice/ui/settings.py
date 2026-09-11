@@ -19,7 +19,7 @@ from voice.hotkey.desktop_shortcuts import (GNOME_KEY_TEMPLATE, ShortcutStoreErr
 from voice.hotkey.keyspec import parse_keyspec
 from voice.hotkey.portal_listener import DIALOG_MESSAGE, NO_TRIGGER
 from voice.ui.pill_placer import PillPlacer
-from voice.ui.placement import placement_summary
+from voice.ui.placement import NO_LAYER_SHELL_NOTE, placement_summary
 
 log = logging.getLogger(__name__)
 
@@ -159,6 +159,8 @@ class SettingsDialog(QDialog):
         #: slow enough that the daemon does it in the background and calls
         #: `set_sources` later, and that must not overwrite a live choice.
         self._device_choice: str | None = None
+        #: Whether this desktop can place the pill at all; None until probed.
+        self._layer_shell: bool | None = None
         self._current_profile: str | None = None
         self._active_changed = False       # True once "Use this profile" was pressed
         self._language_changed = False     # True once the user picked a language here
@@ -228,10 +230,17 @@ class SettingsDialog(QDialog):
         self.pill_placer.placement_changed.connect(self._on_pill_placement_picked)
         self.pill_placement_label = QLabel()
         self.pill_placement_label.setWordWrap(True)
+        # Shown only where it is true, and never as an error: the placement is
+        # still recorded and still applies on a desktop that can honour it.
+        self.placement_warning = _wrapped(NO_LAYER_SHELL_NOTE)
+        self.placement_warning.setVisible(False)
+        beside = QVBoxLayout()
+        beside.addWidget(self.pill_placement_label)
+        beside.addWidget(self.placement_warning)
+        beside.addStretch()
         placement = QHBoxLayout()
         placement.addWidget(self.pill_placer)
-        placement.addWidget(self.pill_placement_label, 1,
-                            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        placement.addLayout(beside, 1)
         self.language_profile_table = QTableWidget(0, 2)
         self.language_profile_table.setHorizontalHeaderLabels(["Language", "Profile"])
         self.language_profile_table.horizontalHeader().setStretchLastSection(True)
@@ -423,6 +432,19 @@ class SettingsDialog(QDialog):
         """
         self.pill_placer.set_placement(position, margin_x, margin_y)
         self.pill_placement_label.setText(placement_summary(position, margin_x, margin_y))
+
+    def set_layer_shell(self, available: bool | None) -> None:
+        """Say whether this desktop can put the pill where the placer says.
+
+        `False` is the GNOME case the owner hit: a plain GTK window on Wayland
+        cannot position itself and GNOME has no layer shell, so the compositor
+        decides and the pill appears in the middle whatever is dragged here.
+        The control stays live - the setting is recorded, and it applies on a
+        machine that does have one. `None` is "nobody has probed yet", which is
+        not a claim either way and shows nothing.
+        """
+        self._layer_shell = available
+        self.placement_warning.setVisible(available is False)
 
     def _chosen_pill_placement(self) -> tuple[str, int, int]:
         """The placement as this dialog would save it."""

@@ -613,3 +613,39 @@ def test_the_release_workflow_signs_what_it_uploads():
     assert "--no-armor" in workflow, "pacman reads a binary .sig, not an armoured one"
     assert "gpg --verify" in workflow, "the workflow does not check its own signature"
     assert "pkg.tar.zst.sig" in workflow, "the signature is never uploaded"
+
+
+def test_every_place_the_version_is_written_agrees():
+    """A release bumps four files by hand and nothing tied them together.
+
+    A missed one ships a package whose `voice doctor` prints a different
+    version from the package that contains it.
+    """
+    import re
+    import tomllib
+
+    pkgver = shell_vars()["pkgver"].strip('"')
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    init = re.search(r'__version__ = "([^"]+)"', (ROOT / "voice" / "__init__.py").read_text())
+    assert init, "voice/__init__.py has no __version__"
+    assert pkgver == pyproject == init.group(1), (
+        f"PKGBUILD pkgver={pkgver!r}, pyproject={pyproject!r}, "
+        f"__version__={init.group(1)!r} - these have to agree")
+
+
+def test_the_readme_download_url_names_the_matching_tag():
+    """The tag segment was matched as `[^/]+` and never checked.
+
+    So `releases/download/v0.1.2/voice-0.1.3-...` passed and 404ed - the same
+    broken-install class this test was added to prevent.
+    """
+    import re
+
+    readme = (ROOT / "README.md").read_text()
+    urls = re.findall(r"releases/download/([^/]+)/(voice-[\d.]+-\d+-\w+\.pkg\.tar\.zst)", readme)
+    assert urls, "the README no longer links a release asset to install from"
+    var = shell_vars()
+    pkgver, pkgrel = var["pkgver"].strip('"'), var["pkgrel"].strip('"')
+    for tag, name in urls:
+        assert tag == f"v{pkgver}", f"the README installs from tag {tag!r}, but this builds {pkgver!r}"
+        assert name == f"voice-{pkgver}-{pkgrel}-x86_64.pkg.tar.zst", name

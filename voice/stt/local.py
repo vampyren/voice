@@ -14,6 +14,17 @@ from voice.stt.base import Transcript, TranscriptionError
 log = logging.getLogger(__name__)
 
 
+def _is_cpu(device: str) -> bool:
+    """Is this device definitely not a GPU?
+
+    Everything else is treated as one, `"auto"` included - that is
+    faster-whisper's own default, it selects the GPU whenever a card is
+    counted, and keying on the exact string `"cuda"` let it reach the loader
+    with no fallback behind it at all.
+    """
+    return str(device).strip().lower() in ("cpu", "")
+
+
 def _cuda_available() -> bool:
     try:
         import ctranslate2
@@ -38,8 +49,13 @@ class LocalTranscriber:
         self._cuda = cuda_available or _cuda_available
         self._model = None
         self._lock = threading.Lock()
-        self._device = profile.get("device", "cuda")
-        self._compute = profile.get("compute_type", "float16")
+        #: What the owner asked for, which never changes, and what is actually
+        #: in use, which `describe()` reports. Kept apart: a fallback used to
+        #: write back over the request, so one failed load pinned every later
+        #: attempt to CPU even once the GPU was healthy again.
+        self._wanted = profile.get("device", "cuda")
+        self._wanted_compute = profile.get("compute_type", "float16")
+        self._device, self._compute = self._wanted, self._wanted_compute
         self.fallback_reason: str | None = None
 
     def warmup(self) -> None:
@@ -48,30 +64,36 @@ class LocalTranscriber:
                 self._model = self._load()
 
     def _load(self):
-        device, compute = self._device, self._compute
-        if device == "cuda" and not self._cuda():
+        device, compute = self._wanted, self._wanted_compute
+        if not _is_cpu(device) and not self._cuda():
             self.fallback_reason = "CUDA not available; using CPU int8 (slower)"
             log.warning(self.fallback_reason)
-            device, compute = "cpu", "int8"
-        if device == "cuda":
+            return self._build("cpu", "int8")
+        if _is_cpu(device):
+            return self._build(device, compute)
+
+        try:
+            return self._build(device, compute)
+        except Exception as exc:
+            # A card is present and the libraries to drive it are not - exactly
+            # the CPU-only build on a machine with an NVIDIA driver:
+            # `get_cuda_device_count()` counts the card, then CTranslate2
+            # cannot dlopen libcublas 12 because this package deliberately does
+            # not ship it. Counting devices can never see that; only loading
+            # can. Failing here would cost a dictation and a model download.
             try:
-                return self._build(device, compute)
-            except Exception as exc:
-                # A card is present and the libraries it needs are not - which
-                # is exactly the CPU-only build on a machine with an NVIDIA
-                # driver: `get_cuda_device_count()` counts the card, then
-                # CTranslate2 cannot dlopen libcublas 12 because this package
-                # deliberately does not ship it. Counting devices can never see
-                # that; only loading can. Failing here would cost the owner a
-                # dictation and 1.6 GB of model download for nothing.
-                self.fallback_reason = (f"the GPU could not be used ({exc}); "
-                                        f"using CPU int8 (slower)")
-                log.warning(self.fallback_reason)
-                device, compute = "cpu", "int8"
-        return self._build(device, compute)
+                model = self._build("cpu", "int8")
+            except Exception:
+                # CPU failed the same way, so the GPU was never the problem -
+                # a bad model name, no network, a full disk. Blaming the card
+                # would send the owner off debugging CUDA for a download.
+                raise exc from None
+            self.fallback_reason = (f"the GPU could not be used ({exc}); "
+                                    f"using CPU int8 (slower)")
+            log.warning(self.fallback_reason)
+            return model
 
     def _build(self, device: str, compute: str):
-        self._device, self._compute = device, compute
         # The configured name goes through untouched: faster-whisper resolves its
         # own short names ("large-v3-turbo", "small"), and anything else is a
         # Hugging Face repository id, which is how KBLab/kb-whisper-* works. We
@@ -79,7 +101,13 @@ class LocalTranscriber:
         # exist - the shipped default could not load a model at all.
         name = self._profile["model"]
         log.info("loading %s on %s/%s", name, device, compute)
-        return self._factory(name, device, compute)
+        model = self._factory(name, device, compute)
+        # Only once it has actually loaded. Recorded before, a failed attempt
+        # pinned the instance to whatever it fell back to for the life of the
+        # process: `_load` reads `self._device` as its starting point, so the
+        # next attempt never tried the GPU again even once it was healthy.
+        self._device, self._compute = device, compute
+        return model
 
     def describe(self) -> str:
         return f"local {self._profile.get('model')} ({self._device}/{self._compute})"

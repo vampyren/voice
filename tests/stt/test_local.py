@@ -219,3 +219,88 @@ def test_a_cpu_profile_never_tries_the_gpu():
                            cuda_available=lambda: True)
     stt.warmup()
     assert tried == ["cpu"]
+
+
+def test_a_failed_load_does_not_pin_the_instance_to_cpu():
+    """`_load` reads `self._device` as its starting point.
+
+    Recorded before the load succeeded, one failure sent every later attempt
+    straight to CPU for the life of the process - so a GPU that came back
+    healthy was never tried again, and nothing said why.
+    """
+    from voice.stt.local import LocalTranscriber
+
+    broken = {"gpu": True}
+    tried = []
+
+    def factory(name, device, compute, **kw):
+        tried.append(device)
+        if device == "cuda" and broken["gpu"]:
+            raise RuntimeError("libcublas.so.12 not found")
+        return object()
+
+    stt = LocalTranscriber({"model": "m", "device": "cuda", "compute_type": "float16"},
+                           model_factory=factory, cuda_available=lambda: True)
+    stt.warmup()
+    assert tried == ["cuda", "cpu"]
+
+    broken["gpu"], stt._model, tried[:] = False, None, []
+    stt.warmup()
+    assert tried == ["cuda"], "the GPU was never tried again after one failure"
+
+
+def test_a_failure_that_is_not_the_gpu_is_reported_as_itself():
+    """A download that failed is not a GPU problem.
+
+    Blaming the card sent the owner a "Running on CPU" notification for a
+    network error, and would have them debugging CUDA.
+    """
+    import pytest
+
+    from voice.stt.base import TranscriptionError
+    from voice.stt.local import LocalTranscriber
+
+    def always_fails(name, device, compute, **kw):
+        raise OSError("connection reset while downloading model")
+
+    stt = LocalTranscriber({"model": "m", "device": "cuda", "compute_type": "float16"},
+                           model_factory=always_fails, cuda_available=lambda: True)
+    with pytest.raises(Exception) as caught:
+        stt.warmup()
+    assert "connection reset" in str(caught.value)
+    assert stt.fallback_reason is None, \
+        f"a download failure was blamed on the GPU: {stt.fallback_reason}"
+
+
+def test_device_auto_gets_the_same_net_as_cuda():
+    """`auto` is faster-whisper's own default and picks the GPU when there is one.
+
+    Keyed on the exact string "cuda", both guards missed it and it reached the
+    loader with no fallback behind it.
+    """
+    from voice.stt.local import LocalTranscriber
+
+    tried = []
+
+    def factory(name, device, compute, **kw):
+        tried.append(device)
+        if device == "auto":
+            raise RuntimeError("libcublas.so.12 not found")
+        return object()
+
+    stt = LocalTranscriber({"model": "m", "device": "auto", "compute_type": "float16"},
+                           model_factory=factory, cuda_available=lambda: True)
+    stt.warmup()
+    assert tried == ["auto", "cpu"], tried
+    assert "GPU could not be used" in stt.fallback_reason
+
+
+def test_auto_with_no_card_goes_straight_to_cpu():
+    from voice.stt.local import LocalTranscriber
+
+    tried = []
+    stt = LocalTranscriber({"model": "m", "device": "auto", "compute_type": "float16"},
+                           model_factory=lambda n, d, c, **kw: (tried.append(d), object())[1],
+                           cuda_available=lambda: False)
+    stt.warmup()
+    assert tried == ["cpu"]

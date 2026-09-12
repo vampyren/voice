@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import site
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -211,15 +212,39 @@ def _portal() -> tuple[bool, str]:
     return (True, "RemoteDesktop portal v2+") if portal_available() else (False, "RemoteDesktop portal missing (xdg-desktop-portal-kde/gnome)")
 
 
-def _bundled_cuda_runtime() -> bool:
-    """Did this install ship the CUDA libraries, or is it the CPU-only build?
+#: Where a CUDA runtime lands, in the two ways voice is installed. The package
+#: puts the wheels under its own prefix; `install.sh` and a dev checkout leave
+#: them in site-packages, which is also where `uv run` finds them. Checked for
+#: the library CTranslate2 actually dlopens rather than for a directory: the
+#: package wrapper already keys on `nvidia/*/lib` existing, and a bare `cuda`
+#: directory proves nothing about what is in it.
+CUDA_LIBRARY = "libcublas.so.12"
+PACKAGED_CUDA = Path("/usr/lib/voice/cuda")
 
-    A card being present says nothing about whether it can be used: the CPU
-    build leaves the libraries out on purpose, so `get_cuda_device_count()`
-    counts the card and CTranslate2 then cannot load it.
+
+def _bundled_cuda_runtime() -> bool:
+    """Can this install actually drive a card, or is it the CPU-only build?
+
+    A card being present says nothing: the CPU build leaves the libraries out
+    on purpose, so `get_cuda_device_count()` counts the card and CTranslate2
+    then cannot load it. Looked for where *this* process would find them -
+    hardcoding the package path told every source install, with a working GPU
+    in use, that it was the CPU-only build and to replace itself with a package.
     """
-    from pathlib import Path
-    return Path("/usr/lib/voice/cuda").is_dir()
+    import site
+    roots = [PACKAGED_CUDA]
+    try:
+        roots += [Path(p) for p in site.getsitepackages()]
+    except Exception:
+        pass
+    roots += [Path(p) for p in sys.path if p]
+    for root in roots:
+        try:
+            if any(root.glob(f"nvidia/*/lib/{CUDA_LIBRARY}")):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _cuda() -> tuple[bool, str]:
@@ -231,13 +256,14 @@ def _cuda() -> tuple[bool, str]:
     if n == 0:
         return False, "no CUDA device; local transcription will run on CPU (install with --extra gpu on the NVIDIA PC)"
     if not _bundled_cuda_runtime():
-        # The card is there and this build cannot use it. Saying "1 CUDA
-        # device(s)" and nothing else reads as "your GPU is in use", which is
-        # what the CPU-only package told its first owner right up until the
-        # model failed to load.
-        return True, (f"{n} CUDA device(s), but this is the CPU-only build - no CUDA "
-                      f"runtime is bundled, so transcription runs on CPU int8. "
-                      f"Rebuild with `cd packaging && makepkg -si` to use the card.")
+        # False, not True: the practical outcome is identical to having no card
+        # at all - CPU int8 - and that case renders as a cross. A green tick
+        # beside "your card cannot be used" is read as "the GPU is fine" by
+        # anyone scanning the marks, which is the whole mistake being fixed.
+        return False, (f"{n} CUDA device(s), but no CUDA runtime is installed with "
+                       f"voice, so transcription runs on CPU int8. For the card: "
+                       f"rebuild the package with `cd packaging && makepkg -si`, or "
+                       f"re-run `./install.sh --gpu` in a checkout.")
     return True, f"{n} CUDA device(s)"
 
 

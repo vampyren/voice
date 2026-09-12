@@ -69,7 +69,11 @@ timeout_seconds = 300      # give up on a transcription still running after this
 
 [stt.profiles.local]
 backend = "local"
-model = "large-v3-turbo"   # or "KBLab/kb-whisper-large" for Swedish
+model = "large-v3"         # the best Whisper there is. "large-v3-turbo" decodes
+                           # ~3x faster and is a little worse, mostly on
+                           # non-English; "medium" or "small" are lighter again.
+                           # For Swedish, "KBLab/kb-whisper-large" beats all of
+                           # them - see docs/usage.md on language profiles.
 device = "cuda"            # falls back to cpu/int8 with a warning
 compute_type = "float16"
 beam_size = 5

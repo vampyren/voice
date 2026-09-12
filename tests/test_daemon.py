@@ -113,6 +113,21 @@ def test_hotkey_specs_reads_all_bindings(isolated_xdg):
     assert specs["cancel"] == parse_keyspec("KEY_ESC")
 
 
+#: The model the shipped config names for the `local` profile. Read from the
+#: config rather than repeated here: these tests are about profile switching,
+#: not about which Whisper is the default, and hardcoding it turned a change of
+#: default into five failures that said nothing about profile switching.
+def _default_local_model() -> str:
+    import re
+
+    from voice.config import DEFAULT_CONFIG
+    block = DEFAULT_CONFIG.split("[stt.profiles.local]", 1)[1]
+    return re.search(r'model = "([^"]+)"', block).group(1)
+
+
+LOCAL_MODEL = _default_local_model()
+
+
 def test_handle_commands_and_profile_switch(isolated_xdg, qapp, monkeypatch):
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda profile, secret: type("T", (), {
         "name": profile["backend"], "describe": lambda self: f"fake {profile['model']}",
@@ -122,7 +137,7 @@ def test_handle_commands_and_profile_switch(isolated_xdg, qapp, monkeypatch):
     d.build()
     assert d.handle({"cmd": "ping"}) == {"ok": True}
     st = d.handle({"cmd": "status"})
-    assert st["ok"] and st["state"] == "idle" and st["profile"] == "local" and "large-v3-turbo" in st["backend"]
+    assert st["ok"] and st["state"] == "idle" and st["profile"] == "local" and LOCAL_MODEL in st["backend"]
     assert d.handle({"cmd": "profile", "name": "openai"})["ok"]
     assert Config.load().get("stt.active") == "openai"
     assert "gpt-transcribe" in d.handle({"cmd": "status"})["backend"]
@@ -2320,7 +2335,7 @@ def test_switching_language_activates_the_mapped_profile(isolated_xdg, qapp, mon
     """One reload, one save, one apply: the language and its model move together."""
     cfg = _with_language_profiles({"en": "local", "sv": "openai"})
     d, built = _profile_daemon(cfg, monkeypatch)
-    assert built == ["large-v3-turbo"]
+    assert built == [LOCAL_MODEL]
 
     d.handle({"cmd": "language", "code": "sv"})
     qapp.processEvents()
@@ -2329,7 +2344,7 @@ def test_switching_language_activates_the_mapped_profile(isolated_xdg, qapp, mon
     assert on_disk.get("general.language") == "sv"
     assert on_disk.get("stt.active") == "openai"        # switched in the same save
     assert on_disk.errors() == []
-    assert built == ["large-v3-turbo", "gpt-transcribe"]   # rebuilt exactly once
+    assert built == [LOCAL_MODEL, "gpt-transcribe"]   # rebuilt exactly once
     assert d.handle({"cmd": "status"})["profile"] == "openai"
     d.shutdown()
 
@@ -2345,7 +2360,7 @@ def test_the_language_toggle_hotkey_also_moves_the_profile(isolated_xdg, qapp, m
     qapp.processEvents()
     on_disk = Config.load()
     assert (on_disk.get("general.language"), on_disk.get("stt.active")) == ("en", "local")
-    assert built == ["large-v3-turbo", "gpt-transcribe", "large-v3-turbo"]
+    assert built == [LOCAL_MODEL, "gpt-transcribe", LOCAL_MODEL]
     d.shutdown()
 
 
@@ -2355,7 +2370,7 @@ def test_a_language_that_maps_to_the_active_profile_changes_nothing(isolated_xdg
     d.handle({"cmd": "language", "code": "sv"})
     qapp.processEvents()
     assert Config.load().get("stt.active") == "local"
-    assert built == ["large-v3-turbo"]        # nothing to rebuild
+    assert built == [LOCAL_MODEL]        # nothing to rebuild
     d.shutdown()
 
 
@@ -2372,7 +2387,7 @@ def test_a_missing_mapped_profile_notifies_and_keeps_the_current_one(isolated_xd
     on_disk = Config.load()
     assert on_disk.get("general.language") == "sv"      # the language switch stands
     assert on_disk.get("stt.active") == "local"         # the profile is untouched
-    assert built == ["large-v3-turbo"]                  # so nothing was rebuilt
+    assert built == [LOCAL_MODEL]                  # so nothing was rebuilt
     assert len(notifier.sent) == 1
     title, body, urgency = notifier.sent[0]
     assert title == "Language profile missing"

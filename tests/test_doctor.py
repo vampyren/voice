@@ -556,24 +556,64 @@ def test_paste_target_fails_when_the_daemon_has_given_up_on_its_window_command(m
 
 
 def test_cuda_says_so_when_the_build_cannot_use_the_card(monkeypatch):
-    """A card present and no runtime bundled is not "your GPU is in use".
+    """A card present and no runtime installed is not "your GPU is in use".
 
-    The CPU-only package on a machine with an NVIDIA driver reported
-    "1 CUDA device(s)" and nothing else, right up until the model failed to
-    load after a 1.6 GB download.
+    The previous version of this test hid behind `if ok:` and so asserted
+    nothing on any machine without an NVIDIA card - which is every CI runner
+    and the development VM. The card is faked here so the branch actually runs.
     """
+    import sys, types
+
     from voice.doctor import default_probes
 
+    monkeypatch.setitem(sys.modules, "ctranslate2",
+                        types.SimpleNamespace(get_cuda_device_count=lambda: 1))
     monkeypatch.setattr("voice.doctor._bundled_cuda_runtime", lambda: False)
+
     ok, detail = default_probes()["cuda"]()
-    if ok:                                  # only meaningful where a card exists
-        assert "CPU-only build" in detail, detail
+
+    assert ok is False, "an unusable card must not render as a green tick"
+    assert "CPU int8" in detail and "makepkg" in detail, detail
 
 
 def test_cuda_is_reported_plainly_when_the_runtime_is_there(monkeypatch):
+    import sys, types
+
     from voice.doctor import default_probes
 
+    monkeypatch.setitem(sys.modules, "ctranslate2",
+                        types.SimpleNamespace(get_cuda_device_count=lambda: 2))
     monkeypatch.setattr("voice.doctor._bundled_cuda_runtime", lambda: True)
+
     ok, detail = default_probes()["cuda"]()
-    if ok:
-        assert "CPU-only build" not in detail
+
+    assert ok is True and detail == "2 CUDA device(s)"
+
+
+def test_a_source_install_with_the_wheels_is_not_called_the_cpu_build(tmp_path, monkeypatch):
+    """Hardcoding the package path told every checkout it was the CPU build.
+
+    `install.sh --gpu` puts the wheels in site-packages, not under
+    /usr/lib/voice - so a working GPU install was told to replace itself with
+    a package.
+    """
+    import voice.doctor as doctor
+
+    lib = tmp_path / "nvidia" / "cublas" / "lib"
+    lib.mkdir(parents=True)
+    (lib / doctor.CUDA_LIBRARY).write_bytes(b"")
+
+    monkeypatch.setattr(doctor.site, "getsitepackages", lambda: [str(tmp_path)], raising=False)
+    monkeypatch.setattr(doctor, "PACKAGED_CUDA", tmp_path / "nowhere")
+
+    assert doctor._bundled_cuda_runtime() is True
+
+
+def test_no_wheels_anywhere_is_the_cpu_build(tmp_path, monkeypatch):
+    import voice.doctor as doctor
+
+    monkeypatch.setattr(doctor.site, "getsitepackages", lambda: [str(tmp_path)], raising=False)
+    monkeypatch.setattr(doctor, "PACKAGED_CUDA", tmp_path / "nowhere")
+    monkeypatch.setattr(doctor.sys, "path", [str(tmp_path)])
+
+    assert doctor._bundled_cuda_runtime() is False

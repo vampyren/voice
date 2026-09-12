@@ -62,6 +62,8 @@ overlay_position = "bottom-center"   # top|middle|bottom with left|center|right,
                                      # e.g. "bottom-right"; needs gtk4-layer-shell
 overlay_margin_x = 0       # pixels in from the anchored side; a "center" or
 overlay_margin_y = 48      # "middle" half is centred and ignores its margin
+settings_width = 0         # the settings window reopens at the size you left it;
+settings_height = 0        # 0 means "whatever the window asks for"
 overlay_allow_fallback = false   # show the pill without gtk4-layer-shell, accepting
                                  # that it takes keyboard focus when it appears
 

@@ -38,6 +38,11 @@ PROFILE_TEMPLATES: dict[str, dict] = {
 }
 _LOCAL_FIELDS = ["model", "device", "compute_type", "beam_size", "prompt"]
 
+#: Smaller than this is a stored size nothing could be read in - a window
+#: dragged shut, or a compositor reporting nonsense while it maps. Ignored
+#: rather than obeyed, so a bad number cannot make settings unopenable.
+MIN_SETTINGS_SIZE = 320
+
 #: The two the shipped config uses, and what we suggest to anyone who has not
 #: measured their own machine: the best of each family. Marked in the list so
 #: "which one do I want?" has an answer without reading nine tooltips.
@@ -299,6 +304,24 @@ REFUSAL_NOTE_MS = 6000
 #: and normally tells us; this is only what to do when it has not.
 ASSUMED_PREVIEW_SECONDS = 5.0
 #: Behind the other "?" buttons, one paragraph each.
+def _model_help() -> str:
+    """The whole list, in the "?" - not one tooltip at a time.
+
+    Written from MODEL_NOTES rather than beside it: two lists of nine models
+    would disagree within a release.
+    """
+    lines = ["Which speech model does the listening. Bigger is more accurate and "
+             "slower; the KBLab ones are trained on Swedish speech rather than on a "
+             "hundred languages at once.\n"]
+    for name in MODEL_CHOICES:
+        mark = " (Recommended)" if name in RECOMMENDED_MODELS else ""
+        lines.append(f"{name}{mark}\n    {MODEL_NOTES[name]}\n")
+    lines.append("You can also type the name of any speech model on Hugging Face.")
+    return "\n".join(lines)
+
+
+_MODEL_HELP = _model_help()
+
 HELP = {
     "pill_position": PILL_PLACEMENT_NOTE,
     "profile_per_language": (
@@ -312,23 +335,27 @@ HELP = {
         "let one program press keys in another."),
     "max_seconds": ("A recording stops itself after this many seconds, so a key left held "
                     "down by accident cannot record all afternoon."),
-    "model": (
-        "Which speech model does the listening. Hover a name in the list to see what "
-        "it is.\n\n"
-        "Bigger models are more accurate and slower, and the Swedish ones "
-        "(KBLab/kb-whisper-*) are trained on Swedish speech rather than on a hundred "
-        "languages at once - much better at Swedish, no use for English.\n\n"
-        "You can also type the name of any model on Hugging Face."),
+    "model": _MODEL_HELP,
     "device": (
         "Where the model runs.\n\n"
         "\"cuda\" uses an NVIDIA graphics card, which is many times faster. \"cpu\" "
         "uses the processor. Leave it on \"cuda\": if there is no usable card, voice "
         "falls back to the processor on its own and tells you it did."),
     "compute_type": (
-        "How precisely the numbers inside the model are stored. Smaller means less "
-        "memory and more speed, for a little accuracy.\n\n"
-        "\"float16\" on a graphics card, \"int8\" on a processor. These two are the "
-        "ones worth using; voice picks the right one when it falls back."),
+        "How precisely the numbers inside the model are stored. Fewer bits means less "
+        "memory and more speed, for a little accuracy. The usual ones:\n\n"
+        "float16 — half precision on a graphics card. The normal choice with "
+        "Processor \"cuda\": full accuracy for practical purposes, half the memory of "
+        "float32.\n\n"
+        "int8 — whole numbers, a quarter of the size. The normal choice with Processor "
+        "\"cpu\", and several times faster there. A little more likely to mis-hear an "
+        "unusual word.\n\n"
+        "int8_float16 — int8 weights with float16 arithmetic, on a graphics card. "
+        "Saves memory on a small card; rarely worth it on a big one.\n\n"
+        "float32 — full precision. Twice the memory and slower, for no accuracy you "
+        "will hear. Only useful on hardware with no float16 support.\n\n"
+        "Leave it as it is: voice picks the right one when it falls back from the "
+        "graphics card to the processor."),
     "beam_size": (
         "How many possible sentences the model keeps in play before choosing one.\n\n"
         "5 is the default and a good balance. Higher (8-10) is slightly more accurate "
@@ -353,6 +380,13 @@ HELP = {
         "The name of an environment variable holding the key - OPENAI_API_KEY - so "
         "the key itself stays out of config.toml. Used only when the API key box "
         "above is empty."),
+    "activate": (
+        "Makes the selected profile the one that does the transcribing, from the next "
+        "dictation on. The row in the list above is marked \"in use\".\n\n"
+        "It does not change your language. If a language is paired with a profile "
+        "(General tab), switching to that language switches the profile too, and will "
+        "override this.\n\n"
+        "Nothing is written until you press Save."),
     "add_template": (
         "Adds a ready-made profile so you do not have to type its settings in.\n\n"
         "The online services need an API key pasting in afterwards. \"local-swedish\" "
@@ -971,6 +1005,9 @@ class SettingsDialog(QDialog):
         #: Whether this desktop can place the pill at all; None until probed.
         self._layer_shell: bool | None = None
         self._current_profile: str | None = None
+        #: "Use this profile" pressed here, before Save. The list has to mark
+        #: the profile the owner just chose, not the one still on disk.
+        self._chosen_active: str | None = None
         self._active_changed = False       # True once "Use this profile" was pressed
         self._language_changed = False     # True once the user picked a language here
         self._inject_mode_changed = False  # True once the user picked a text insertion mode here
@@ -1008,9 +1045,18 @@ class SettingsDialog(QDialog):
         layout.addWidget(tabs)
         layout.addWidget(self.error_label)
         layout.addLayout(buttons)
+        self._restore_size()
         self._load()
 
     # -- the pieces every tab is built from -----------------------------------
+    def _restore_size(self) -> None:
+        """The size this window was last closed at, if it is a usable one."""
+        width = self._cfg.get("ui.settings_width")
+        height = self._cfg.get("ui.settings_height")
+        if all(isinstance(v, int) and not isinstance(v, bool) and v >= MIN_SETTINGS_SIZE
+               for v in (width, height)):
+            self.resize(width, height)
+
     def _form(self, parent: QWidget | None = None) -> QFormLayout:
         """One form layout, spaced and aligned like every other one here."""
         form = QFormLayout(parent) if parent is not None else QFormLayout()
@@ -1376,6 +1422,8 @@ class SettingsDialog(QDialog):
         self.add_profile_button.clicked.connect(self._add_profile)
         self.activate_button = QPushButton("Use this profile")
         self.activate_button.clicked.connect(self._activate_profile)
+        self.remove_profile_button = QPushButton("Remove")
+        self.remove_profile_button.clicked.connect(self._remove_profile)
         left = QVBoxLayout()
         left.setSpacing(ROW_SPACING // 2)
         left.addWidget(self.profile_list, 1)
@@ -1387,7 +1435,12 @@ class SettingsDialog(QDialog):
         add.addWidget(self.add_profile_combo, 1)
         add.addWidget(self.add_profile_button)
         left.addLayout(add)
-        left.addWidget(self.activate_button)
+        actions = QHBoxLayout()
+        actions.setSpacing(ROW_SPACING // 2)
+        actions.addWidget(self._with_help(self.activate_button, "activate",
+                                          HELP["activate"]), 1)
+        actions.addWidget(self.remove_profile_button)
+        left.addLayout(actions)
         self.profile_form: dict[str, QLineEdit] = {}
         self._form_widget = QWidget()
         self._form_layout = self._form(self._form_widget)
@@ -1685,21 +1738,53 @@ class SettingsDialog(QDialog):
         is nothing to a reader. Annotated because five bare names gave no clue
         which two the owner's own languages actually use.
         """
+        chosen = self._current_profile
         self.profile_list.clear()
         used_by: dict[str, list[str]] = {}
         for code, name in self._cfg.language_profiles().items():
             used_by.setdefault(name, []).append(language_name(code))
+        active = self._active_profile_name()
         for name in sorted(self._cfg.get("stt.profiles", {}) or {}):
-            self._add_profile_row(name, used_by.get(name, []))
+            self._add_profile_row(name, used_by.get(name, []), name == active)
+        row = self._profile_row(chosen) if chosen else -1
+        self.profile_list.setCurrentRow(row if row >= 0 else 0)
 
-    def _add_profile_row(self, name: str, languages: Iterable[str] = ()) -> None:
+    def _active_profile_name(self) -> str:
+        """Which profile actually transcribes, counting an unsaved choice here."""
+        return str(self._chosen_active or self._cfg.get("stt.active") or "")
+
+    def _add_profile_row(self, name: str, languages: Iterable[str] = (),
+                         active: bool = False) -> None:
         """One row: the name is the data, the label is what it is for."""
-        languages = list(languages)
-        item = QListWidgetItem(f"{name} — {', '.join(languages)}" if languages else name)
+        parts = list(languages)
+        if active:
+            # "I press Use this profile but don't see what it does." Now the
+            # list says so, on the row, in the same words as the button.
+            parts.append("in use")
+        item = QListWidgetItem(f"{name} — {', '.join(parts)}" if parts else name)
         # The real name lives in the data, so the label can say anything: every
         # reader of this list asks the item for its data, never its text.
         item.setData(Qt.ItemDataRole.UserRole, name)
+        if active:
+            font = item.font()
+            font.setBold(True)
+            item.setFont(font)
         self.profile_list.addItem(item)
+
+    def _refresh_profile_buttons(self) -> None:
+        """What can be done to the selected profile, said by the buttons.
+
+        A button that is pressable and does nothing is worse than one that is
+        greyed out: the first time, it reads as the program ignoring you.
+        """
+        name = self._current_profile
+        active = self._active_profile_name()
+        self.activate_button.setEnabled(bool(name) and name != active)
+        self.activate_button.setText("Already in use" if name and name == active
+                                     else "Use this profile")
+        # The last profile is not removable either: stt.active has to name one.
+        removable = bool(name) and name != active and self.profile_list.count() > 1
+        self.remove_profile_button.setEnabled(removable)
 
     def _profile_at(self, row: int) -> str | None:
         item = self.profile_list.item(row)
@@ -1741,6 +1826,7 @@ class SettingsDialog(QDialog):
             row = self._with_help(edit, field, HELP[field])
             self.profile_help_buttons[field] = row.findChild(QToolButton)
             self._form_layout.addRow(_FIELD_LABELS.get(field, field), row)
+        self._refresh_profile_buttons()
 
     def _commit_profile_form(self) -> bool:
         if not self._current_profile or not self.profile_form:
@@ -1779,9 +1865,30 @@ class SettingsDialog(QDialog):
 
     def _activate_profile(self) -> None:
         if self._current_profile:
+            self._chosen_active = self._current_profile
             self._cfg.set("stt.active", self._current_profile)
             self._active_changed = True
             self.active_label.setText(f"Active profile: {self._current_profile}")
+            self._load_profile_list()
+
+    def _remove_profile(self) -> None:
+        """Delete the selected profile, and anything that pointed at it.
+
+        A language left mapped to a profile that is gone is a config error, and
+        one this window would have no row to fix - it would block every later
+        save. Unpairing here is the only way the removal can be legal.
+        """
+        name = self._current_profile
+        if not name or name == self._active_profile_name():
+            return
+        self._current_profile = None          # so nothing commits into a dead table
+        self.profile_form = {}
+        self._cfg.unset(f"stt.profiles.{name}")
+        for code, mapped in list(self._cfg.language_profiles().items()):
+            if mapped == name:
+                self._cfg.unset(f"general.language_profiles.{code}")
+        self._load_profile_list()
+        self._load_language_profiles(self._chosen_language_profiles())
 
     def _change_route(self) -> str:
         """What "Change…" has to do on this machine.
@@ -2088,7 +2195,26 @@ class SettingsDialog(QDialog):
     def closeEvent(self, event) -> None:
         """Never leave this window reading the keyboard after it is gone."""
         self._stop_change("")
+        self._remember_size()
         super().closeEvent(event)
+
+    def _remember_size(self) -> None:
+        """Reopen at the size it was left at.
+
+        Written straight to the file rather than waiting for Save: the size is
+        not a setting anyone edits, and closing without saving is exactly when
+        the window was resized to something worth keeping. A failure here is
+        never allowed to stop the window closing.
+        """
+        try:
+            fresh = Config.load(self._cfg.path)
+            fresh.set("ui.settings_width", int(self.width()))
+            fresh.set("ui.settings_height", int(self.height()))
+            fresh.save()
+            self._cfg.set("ui.settings_width", int(self.width()))
+            self._cfg.set("ui.settings_height", int(self.height()))
+        except Exception:
+            log.debug("could not remember the settings window size", exc_info=True)
 
     def _carry_over_external_edits(self) -> bool:
         """Keep settings switched from the tray, a hotkey or the CLI since this

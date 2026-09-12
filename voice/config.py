@@ -71,6 +71,8 @@ overlay_position = "bottom-center"   # top|middle|bottom with left|center|right,
                                      # e.g. "bottom-right"; needs gtk4-layer-shell
 overlay_margin_x = 0       # pixels in from the anchored side; a "center" or
 overlay_margin_y = 48      # "middle" half is centred and ignores its margin
+settings_width = 0         # the settings window reopens at the size you left it;
+settings_height = 0        # 0 means "whatever the window asks for"
 overlay_allow_fallback = false   # show the pill without gtk4-layer-shell, accepting
                                  # that it takes keyboard focus when it appears
 
@@ -454,6 +456,7 @@ class Config:
             errs.append("stt.timeout_seconds must be a positive number of seconds, "
                         f"got {timeout!r}")
         errs += self._placement_errors()
+        errs += self._window_size_errors()
         for key in ("inject.paste_chord", "inject.terminal_chord"):
             chord = self.get(key)
             if chord is None:
@@ -483,6 +486,18 @@ class Config:
                 # this was typed in - the models would land somewhere nobody
                 # could find again.
                 errs.append(f'{key} must be an absolute path like "~/Apps/models", '
+                            f"got {value!r}")
+        return errs
+
+    def _window_size_errors(self) -> list[str]:
+        """The remembered settings size. Absent, or 0, means "no preference"."""
+        errs = []
+        for key in ("ui.settings_width", "ui.settings_height"):
+            value = self.get(key)
+            if value is None:
+                continue
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                errs.append(f"{key} must be a whole number of pixels, or 0 for none, "
                             f"got {value!r}")
         return errs
 

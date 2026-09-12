@@ -43,7 +43,8 @@ def test_loads_values_from_config(qapp):
     assert dlg.language_combo.currentData() == "en"
     assert dlg.device_combo.itemText(1) == "OBSBOT Tiny 3 (default)"
     assert [dlg.profile_list.item(i).text() for i in range(dlg.profile_list.count())] == [
-        "groq", "local — English", "local-swedish — Swedish", "openai", "openrouter"]
+        "groq", "local — English, in use", "local-swedish — Swedish",
+        "openai", "openrouter"]
 
 
 def test_edit_and_save_writes_config_and_emits(qapp):
@@ -2217,7 +2218,7 @@ def test_the_profile_list_says_which_language_uses_each_one(qapp):
     shown = {dlg.profile_list.item(i).data(Qt.ItemDataRole.UserRole):
              dlg.profile_list.item(i).text()
              for i in range(dlg.profile_list.count())}
-    assert shown["local"] == "local — English"
+    assert shown["local"] == "local — English, in use"
     assert shown["local-swedish"] == "local-swedish — Swedish"
     assert shown["groq"] == "groq", "an unpaired profile is just its name"
 
@@ -2282,3 +2283,100 @@ def test_the_template_dropdown_is_labelled(qapp):
     cfg, dlg, _ = make(qapp)
     assert "add_template" in HELP
     assert dlg.add_profile_label.text()
+
+
+# -- removing a profile, and seeing which one is live -------------------------
+
+def test_the_help_for_the_model_row_lists_the_models(qapp):
+    """"I expected you to list the models and a short explainer in the ?" -
+    hovering nine rows one at a time is not a list."""
+    from voice.ui.settings import HELP, MODEL_CHOICES
+
+    text = HELP["model"]
+    for name in MODEL_CHOICES:
+        assert name in text, f"the model help never mentions {name}"
+    assert "Recommended" in text
+
+
+def test_the_help_for_the_number_format_lists_the_usual_ones(qapp):
+    from voice.ui.settings import HELP
+
+    text = HELP["compute_type"]
+    for value in ("float16", "int8", "int8_float16", "float32"):
+        assert value in text, f"the number format help never mentions {value}"
+
+
+def test_the_active_profile_is_marked_in_the_list(qapp):
+    """"I press Use this profile but don't see what it does" - now the row says."""
+    cfg, dlg, _ = make(qapp)
+    rows = {dlg.profile_list.item(i).data(Qt.ItemDataRole.UserRole):
+            dlg.profile_list.item(i).text() for i in range(dlg.profile_list.count())}
+    assert "in use" in rows["local"], rows["local"]
+    assert "in use" not in rows["groq"]
+
+    select_profile(dlg, "groq")
+    dlg.activate_button.click()
+    rows = {dlg.profile_list.item(i).data(Qt.ItemDataRole.UserRole):
+            dlg.profile_list.item(i).text() for i in range(dlg.profile_list.count())}
+    assert "in use" in rows["groq"] and "in use" not in rows["local"]
+
+
+def test_the_button_says_it_is_already_in_use(qapp):
+    """Pressing it on the profile that is already active did nothing, silently."""
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "local")
+    assert not dlg.activate_button.isEnabled()
+    select_profile(dlg, "groq")
+    assert dlg.activate_button.isEnabled()
+
+
+def test_a_profile_can_be_removed(qapp):
+    """"I added mistral and together but can't remove them."""
+    cfg, dlg, _ = make(qapp)
+    dlg.add_profile_combo.setCurrentText("mistral")
+    dlg.add_profile_button.click()
+    assert "mistral" in _profile_names(dlg)
+
+    select_profile(dlg, "mistral")
+    dlg.remove_profile_button.click()
+    assert "mistral" not in _profile_names(dlg)
+    dlg.save_button.click()
+    again = Config.load()
+    assert "mistral" not in (again.get("stt.profiles") or {})
+    assert again.errors() == []
+
+
+def test_the_profile_in_use_cannot_be_removed(qapp):
+    """Removing it would leave stt.active naming nothing, and no transcription."""
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "local")
+    assert not dlg.remove_profile_button.isEnabled()
+    dlg.remove_profile_button.click()
+    assert "local" in _profile_names(dlg)
+
+
+def test_removing_a_profile_unpairs_the_language_that_used_it(qapp):
+    """A map naming a profile that is gone is a config error that would block
+    every later save from a window with no row to fix it in."""
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "local-swedish")
+    dlg.remove_profile_button.click()
+    dlg.save_button.click()
+    again = Config.load()
+    assert "local-swedish" not in (again.get("stt.profiles") or {})
+    assert again.language_profiles() == {"en": "local"}
+    assert again.errors() == []
+
+
+def test_the_window_remembers_how_big_it_was(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.resize(1100, 820)
+    dlg.close()
+    again = Config.load()
+    assert again.get("ui.settings_width") == 1100
+    assert again.get("ui.settings_height") == 820
+    assert again.errors() == []
+
+    reopened = SettingsDialog(Config.load(), capture_key=lambda cb: None,
+                              sources=lambda: [])
+    assert (reopened.width(), reopened.height()) == (1100, 820)

@@ -15,10 +15,17 @@ from voice.ui.settings import (ACTION_LABELS, ACTIONS, CHANGE, CHANGE_BUSY, CHAN
 
 
 def select_profile(dlg, name):
-    """Pick a profile by name. Row numbers move whenever one is shipped."""
-    found = dlg.profile_list.findItems(name, Qt.MatchFlag.MatchExactly)
-    assert found, f"no profile called {name!r}"
-    dlg.profile_list.setCurrentItem(found[0])
+    """Pick a profile by name.
+
+    By the name it carries, not the text it shows: rows are in name order and
+    labelled with the language that uses them, so neither position nor caption
+    is the profile's identity.
+    """
+    for row in range(dlg.profile_list.count()):
+        if dlg.profile_list.item(row).data(Qt.ItemDataRole.UserRole) == name:
+            dlg.profile_list.setCurrentRow(row)
+            return
+    raise AssertionError(f"no profile called {name!r}")
 
 
 def make(qapp):
@@ -36,7 +43,7 @@ def test_loads_values_from_config(qapp):
     assert dlg.language_combo.currentData() == "en"
     assert dlg.device_combo.itemText(1) == "OBSBOT Tiny 3 (default)"
     assert [dlg.profile_list.item(i).text() for i in range(dlg.profile_list.count())] == [
-        "local", "local-swedish", "openai", "groq", "openrouter"]
+        "groq", "local — English", "local-swedish — Swedish", "openai", "openrouter"]
 
 
 def test_edit_and_save_writes_config_and_emits(qapp):
@@ -78,7 +85,7 @@ def test_capture_button_requests_key_and_fills_field(qapp):
 
 def test_invalid_beam_size_blocks_save(qapp):
     cfg, dlg, _ = make(qapp)
-    dlg.profile_list.setCurrentRow(0)                       # local
+    select_profile(dlg, "local")
     fired = []
     dlg.saved.connect(lambda: fired.append(True))
     dlg.profile_form["beam_size"].setText("abc")
@@ -92,7 +99,9 @@ def test_add_profile_from_template_and_replacements_roundtrip(qapp):
     cfg, dlg, _ = make(qapp)
     dlg.add_profile_combo.setCurrentText("mistral")
     dlg.add_profile_button.click()
-    assert dlg.profile_list.item(dlg.profile_list.count() - 1).text() == "mistral"
+    # Name order, so a new profile lands where its name puts it - not last.
+    assert "mistral" in _profile_names(dlg)
+    assert dlg.profile_list.currentItem().data(Qt.ItemDataRole.UserRole) == "mistral"
     assert dlg.profile_form["base_url"].text() == PROFILE_TEMPLATES["mistral"]["base_url"]
     dlg.replacements_table.setRowCount(1)
     dlg.set_replacement_row(0, "obs bot", "OBSBOT", "icase")
@@ -133,8 +142,7 @@ def test_reload_from_disk_repopulates_the_widgets(qapp):
 
     dlg.reload_from_disk()                                # what reopening does
     assert dlg.hotkey_edit.text() == "KEY_F13"
-    assert [dlg.profile_list.item(i).text() for i in range(dlg.profile_list.count())] == \
-        ["local", "local-swedish", "openai", "groq", "openrouter"]
+    assert _profile_names(dlg) == ["groq", "local", "local-swedish", "openai", "openrouter"]
 
 
 def test_save_writes_to_disk_and_the_caller_config_sees_it_after_reload(qapp):
@@ -2186,3 +2194,91 @@ def test_each_language_gets_its_own_model(qapp):
     assert again.get("stt.profiles.local.model") == "medium"
     assert again.get("stt.profiles.local-swedish.model") == "KBLab/kb-whisper-medium"
     assert again.errors() == []
+
+
+# -- explaining the Transcription tab -----------------------------------------
+
+def _profile_names(dlg):
+    from PySide6.QtCore import Qt
+    return [dlg.profile_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(dlg.profile_list.count())]
+
+
+def test_the_profile_list_is_alphabetical(qapp):
+    """Config order is the order they were added, which is meaningless to read."""
+    cfg, dlg, _ = make(qapp)
+    assert _profile_names(dlg) == sorted(_profile_names(dlg))
+
+
+def test_the_profile_list_says_which_language_uses_each_one(qapp):
+    """"I assume local and local-swedish are the ones I use?" - a fair question
+    about a list of five names with nothing to tell them apart."""
+    cfg, dlg, _ = make(qapp)
+    shown = {dlg.profile_list.item(i).data(Qt.ItemDataRole.UserRole):
+             dlg.profile_list.item(i).text()
+             for i in range(dlg.profile_list.count())}
+    assert shown["local"] == "local — English"
+    assert shown["local-swedish"] == "local-swedish — Swedish"
+    assert shown["groq"] == "groq", "an unpaired profile is just its name"
+
+
+def test_selecting_a_profile_still_works_from_the_decorated_row(qapp):
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "local-swedish")
+    dlg.profile_form["model"].setText("medium")
+    dlg.save_button.click()
+    assert Config.load().get("stt.profiles.local-swedish.model") == "medium"
+
+
+def test_every_row_of_a_local_profile_explains_itself(qapp):
+    """"What the hell is search width? 5 is what?" - every row owes an answer."""
+    from voice.ui.settings import _LOCAL_FIELDS, HELP
+
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "local")
+    missing = [f for f in _LOCAL_FIELDS if f not in HELP]
+    assert not missing, f"no help text for {missing}"
+    assert len(dlg.profile_help_buttons) == len(_LOCAL_FIELDS)
+
+
+def test_every_row_of_a_cloud_profile_explains_itself(qapp):
+    from voice.ui.settings import _CLOUD_FIELDS, HELP
+
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "openai")
+    missing = [f for f in _CLOUD_FIELDS if f not in HELP]
+    assert not missing, f"no help text for {missing}"
+    assert len(dlg.profile_help_buttons) == len(_CLOUD_FIELDS)
+
+
+def test_search_width_says_what_the_number_means(qapp):
+    """The complaint was specific: the row says "5" and nothing else."""
+    from voice.ui.settings import HELP
+
+    text = HELP["beam_size"].lower()
+    assert "5" in text and ("slower" in text or "faster" in text)
+
+
+def test_every_model_in_the_dropdown_explains_itself(qapp):
+    """"What is large-v3 vs KBLab/kb-whisper-large?" - hovering has to answer."""
+    from voice.ui.settings import MODEL_CHOICES
+
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "local")
+    chooser = dlg.profile_form["model"]
+    for i, name in enumerate(MODEL_CHOICES):
+        tip = chooser.itemData(i, Qt.ItemDataRole.ToolTipRole)
+        assert tip, f"{name} has no explanation"
+        assert len(tip) > 20, f"{name}: {tip!r} explains nothing"
+    swedish = chooser.itemData(list(MODEL_CHOICES).index("KBLab/kb-whisper-large"),
+                               Qt.ItemDataRole.ToolTipRole)
+    assert "swedish" in swedish.lower()
+
+
+def test_the_template_dropdown_is_labelled(qapp):
+    """A bare combo reading "openai" under a list of profiles explains nothing."""
+    from voice.ui.settings import HELP
+
+    cfg, dlg, _ = make(qapp)
+    assert "add_template" in HELP
+    assert dlg.add_profile_label.text()

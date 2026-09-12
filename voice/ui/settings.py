@@ -12,7 +12,8 @@ from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPalette, QRegion
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFormLayout, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
-                               QSizePolicy, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget,
+                               QListWidgetItem, QSizePolicy, QSpinBox, QTableWidget,
+                               QTableWidgetItem, QTabWidget,
                                QFileDialog, QToolButton, QToolTip, QVBoxLayout, QWidget)
 
 from voice.audio.capture import Source
@@ -37,15 +38,41 @@ PROFILE_TEMPLATES: dict[str, dict] = {
 }
 _LOCAL_FIELDS = ["model", "device", "compute_type", "beam_size", "prompt"]
 
+#: The two the shipped config uses, and what we suggest to anyone who has not
+#: measured their own machine: the best of each family. Marked in the list so
+#: "which one do I want?" has an answer without reading nine tooltips.
+RECOMMENDED_MODELS = ("large-v3", "KBLab/kb-whisper-large")
+
 #: What the Model row offers, largest first within each family. Not a limit -
 #: the row is editable and any Hugging Face repository id works - but "medium
 #: or large?" should be a choice from a list, not a name to remember. The
 #: KB-Whisper entries are the Swedish ones; everything above them is
 #: faster-whisper's own short name, which it resolves itself.
-MODEL_CHOICES = (
-    "large-v3", "large-v3-turbo", "medium", "small", "base", "tiny",
-    "KBLab/kb-whisper-large", "KBLab/kb-whisper-medium", "KBLab/kb-whisper-small",
-)
+MODEL_NOTES = {
+    "large-v3": "OpenAI Whisper, the full size. The most accurate of these for "
+                "English and the best all-rounder. About 3 GB, and the slowest.",
+    "large-v3-turbo": "The same size model with a cut-down decoder: roughly 3x "
+                      "faster than large-v3 and a little less accurate, mostly on "
+                      "languages other than English. About 1.6 GB.",
+    "medium": "Half the size of large. Noticeably less accurate on names, accents "
+              "and noisy rooms, but quick on a CPU. About 1.5 GB.",
+    "small": "Faster again, and starts to misspell anything unusual. About 500 MB.",
+    "base": "For a slow machine. Expect to correct it often. About 150 MB.",
+    "tiny": "The smallest there is. Useful for testing that dictation works at "
+            "all, not for writing. About 75 MB.",
+    "KBLab/kb-whisper-large": "Swedish. Trained by the National Library of Sweden "
+                              "on Swedish speech, and clearly better at it than "
+                              "large-v3 - which knows Swedish, but as one language "
+                              "among a hundred. Useless for English. About 3 GB.",
+    "KBLab/kb-whisper-medium": "The same Swedish training at half the size: quicker "
+                               "on a CPU, less sure of unusual words. About 1.5 GB.",
+    "KBLab/kb-whisper-small": "The lightest Swedish one. About 500 MB.",
+}
+
+#: What the Model row offers, largest first within each family. Not a limit -
+#: the row is editable and any Hugging Face repository id works - but "medium
+#: or large?" should be a choice from a list, not a name to remember.
+MODEL_CHOICES = tuple(MODEL_NOTES)
 
 
 class ModelChooser(QComboBox):
@@ -59,7 +86,19 @@ class ModelChooser(QComboBox):
         super().__init__(parent)
         self.setEditable(True)
         self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.addItems(list(MODEL_CHOICES))
+        for index, name in enumerate(MODEL_CHOICES):
+            self.addItem(name)
+            note = MODEL_NOTES[name]
+            if name in RECOMMENDED_MODELS:
+                # Bold in the list and said in words on hover: the row's text
+                # has to stay the model name, because that is what is saved.
+                note = f"Recommended. {note}"
+                font = self.font()
+                font.setBold(True)
+                self.setItemData(index, font, Qt.ItemDataRole.FontRole)
+            # Hovering a row is the only place there is room to say what the
+            # difference between two model names actually is.
+            self.setItemData(index, note, Qt.ItemDataRole.ToolTipRole)
 
     def text(self) -> str:
         return self.currentText().strip()
@@ -78,6 +117,14 @@ _FIELD_LABELS = {"backend": "Where it runs", "base_url": "Service address",
 _BACKEND_LABELS = {"local": "On this computer", "openai_compatible": "On an online service"}
 _CLOUD_FIELDS = ["base_url", "model", "api_key", "api_key_env", "prompt"]
 _LANGUAGES = [("English", "en"), ("Swedish", "sv"), ("Auto-detect", "auto")]
+
+
+def language_name(code: str) -> str:
+    """"en" is a thing a config file says; "English" is the thing it means."""
+    for label, known in _LANGUAGES:
+        if known == str(code).strip().lower():
+            return label
+    return str(code)
 #: The same names, for the per-language table: "en" is a code, not a language.
 _LANGUAGE_NAMES = {code: label for label, code in _LANGUAGES}
 #: inject.mode, in the order the combo shows it; the data is the config value.
@@ -265,6 +312,51 @@ HELP = {
         "let one program press keys in another."),
     "max_seconds": ("A recording stops itself after this many seconds, so a key left held "
                     "down by accident cannot record all afternoon."),
+    "model": (
+        "Which speech model does the listening. Hover a name in the list to see what "
+        "it is.\n\n"
+        "Bigger models are more accurate and slower, and the Swedish ones "
+        "(KBLab/kb-whisper-*) are trained on Swedish speech rather than on a hundred "
+        "languages at once - much better at Swedish, no use for English.\n\n"
+        "You can also type the name of any model on Hugging Face."),
+    "device": (
+        "Where the model runs.\n\n"
+        "\"cuda\" uses an NVIDIA graphics card, which is many times faster. \"cpu\" "
+        "uses the processor. Leave it on \"cuda\": if there is no usable card, voice "
+        "falls back to the processor on its own and tells you it did."),
+    "compute_type": (
+        "How precisely the numbers inside the model are stored. Smaller means less "
+        "memory and more speed, for a little accuracy.\n\n"
+        "\"float16\" on a graphics card, \"int8\" on a processor. These two are the "
+        "ones worth using; voice picks the right one when it falls back."),
+    "beam_size": (
+        "How many possible sentences the model keeps in play before choosing one.\n\n"
+        "5 is the default and a good balance. Higher (8-10) is slightly more accurate "
+        "on difficult audio and slower. 1 makes it take the first thing it thinks of: "
+        "fastest, and noticeably worse."),
+    "prompt": (
+        "A sentence describing the kind of speech, to steer wording and punctuation - "
+        "\"Notes on a meeting.\", say.\n\n"
+        "Leave it empty unless you have a reason. Names and jargon do NOT belong here: "
+        "put those in the Dictionary tab, where they are given to the model as a word "
+        "list. Prose here drags ordinary sentences towards its own wording."),
+    "base_url": (
+        "The address of the online service that does the transcribing, up to and "
+        "including the version - https://api.openai.com/v1. \"Add from template\" "
+        "fills this in for the services voice knows."),
+    "api_key": (
+        "Your key for that service, pasted in. It is stored in config.toml, which is "
+        "readable only by you.\n\n"
+        "If you would rather not keep it in a file at all, leave this empty and use "
+        "the API key variable below instead."),
+    "api_key_env": (
+        "The name of an environment variable holding the key - OPENAI_API_KEY - so "
+        "the key itself stays out of config.toml. Used only when the API key box "
+        "above is empty."),
+    "add_template": (
+        "Adds a ready-made profile so you do not have to type its settings in.\n\n"
+        "The online services need an API key pasting in afterwards. \"local-swedish\" "
+        "is the Swedish model, and is already there in a new install."),
     "model_dir": (
         "Leave this empty and the models go to ~/.cache/huggingface, shared with any "
         "other program on this computer that uses Hugging Face models.\n\n"
@@ -1287,6 +1379,9 @@ class SettingsDialog(QDialog):
         left = QVBoxLayout()
         left.setSpacing(ROW_SPACING // 2)
         left.addWidget(self.profile_list, 1)
+        self.add_profile_label = _caption("Add another profile:")
+        left.addWidget(self._with_help(self.add_profile_label, "add_template",
+                                       HELP["add_template"]))
         add = QHBoxLayout()                       # the two halves of one action
         add.setSpacing(ROW_SPACING // 2)
         add.addWidget(self.add_profile_combo, 1)
@@ -1430,9 +1525,7 @@ class SettingsDialog(QDialog):
         self.set_sources(self._sources())
         self.max_seconds.setValue(int(c.get("audio.max_seconds", 120)))
         self.model_dir_edit.setText(str(c.get("stt.model_dir", "") or ""))
-        self.profile_list.clear()
-        for name in (c.get("stt.profiles", {}) or {}):
-            self.profile_list.addItem(name)
+        self._load_profile_list()
         self.active_label.setText(f"Active profile: {c.get('stt.active')}")
         self.profile_list.setCurrentRow(0)
         words = c.get("dictionary.hotwords", []) or []
@@ -1585,17 +1678,50 @@ class SettingsDialog(QDialog):
         for col, val in enumerate((src, dst, flags)):
             self.replacements_table.setItem(row, col, QTableWidgetItem(str(val)))
 
+    def _load_profile_list(self) -> None:
+        """The profiles, in name order, each saying which language picks it.
+
+        Alphabetical because config order is the order they were added, which
+        is nothing to a reader. Annotated because five bare names gave no clue
+        which two the owner's own languages actually use.
+        """
+        self.profile_list.clear()
+        used_by: dict[str, list[str]] = {}
+        for code, name in self._cfg.language_profiles().items():
+            used_by.setdefault(name, []).append(language_name(code))
+        for name in sorted(self._cfg.get("stt.profiles", {}) or {}):
+            self._add_profile_row(name, used_by.get(name, []))
+
+    def _add_profile_row(self, name: str, languages: Iterable[str] = ()) -> None:
+        """One row: the name is the data, the label is what it is for."""
+        languages = list(languages)
+        item = QListWidgetItem(f"{name} — {', '.join(languages)}" if languages else name)
+        # The real name lives in the data, so the label can say anything: every
+        # reader of this list asks the item for its data, never its text.
+        item.setData(Qt.ItemDataRole.UserRole, name)
+        self.profile_list.addItem(item)
+
+    def _profile_at(self, row: int) -> str | None:
+        item = self.profile_list.item(row)
+        return None if item is None else item.data(Qt.ItemDataRole.UserRole)
+
+    def _profile_row(self, name: str) -> int:
+        for row in range(self.profile_list.count()):
+            if self._profile_at(row) == name:
+                return row
+        return -1
+
     def _show_profile(self, row: int) -> None:
         self._commit_profile_form()
-        item = self.profile_list.item(row)
-        if item is None:
+        name = self._profile_at(row)
+        if name is None:
             return
-        name = item.text()
         self._current_profile = name
         profile = self._cfg.get(f"stt.profiles.{name}", {}) or {}
         while self._form_layout.rowCount():
             self._form_layout.removeRow(0)
         self.profile_form = {}
+        self.profile_help_buttons = {}
         fields = _LOCAL_FIELDS if profile.get("backend") == "local" else _CLOUD_FIELDS
         kind = str(profile.get("backend", ""))
         self._form_layout.addRow(_FIELD_LABELS["backend"],
@@ -1609,7 +1735,12 @@ class SettingsDialog(QDialog):
             if field == "api_key":
                 edit.setEchoMode(QLineEdit.EchoMode.Password)
             self.profile_form[field] = edit
-            self._form_layout.addRow(_FIELD_LABELS.get(field, field), edit)
+            # Every row, not the ones that happened to seem obvious: "what the
+            # hell is search width, and 5 is what?" was asked about a row that
+            # had no "?" precisely because it looked self-explanatory.
+            row = self._with_help(edit, field, HELP[field])
+            self.profile_help_buttons[field] = row.findChild(QToolButton)
+            self._form_layout.addRow(_FIELD_LABELS.get(field, field), row)
 
     def _commit_profile_form(self) -> bool:
         if not self._current_profile or not self.profile_form:
@@ -1634,12 +1765,14 @@ class SettingsDialog(QDialog):
 
     def _add_profile(self) -> None:
         name = self.add_profile_combo.currentText()
-        if self.profile_list.findItems(name, Qt.MatchFlag.MatchExactly):
+        if self._profile_row(name) >= 0:
             return
         for field, value in PROFILE_TEMPLATES[name].items():
             self._cfg.set(f"stt.profiles.{name}.{field}", value)
-        self.profile_list.addItem(name)
-        self.profile_list.setCurrentRow(self.profile_list.count() - 1)
+        # Rebuilt rather than appended: the list is in name order, and a new
+        # profile belongs where its name puts it.
+        self._load_profile_list()
+        self.profile_list.setCurrentRow(max(0, self._profile_row(name)))
         # The new profile has to be selectable per language straight away: adding
         # local-swedish and mapping sv to it is one visit to this window.
         self._load_language_profiles(self._chosen_language_profiles())

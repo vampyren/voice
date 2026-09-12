@@ -325,9 +325,19 @@ _MODEL_HELP = _model_help()
 HELP = {
     "pill_position": PILL_PLACEMENT_NOTE,
     "profile_per_language": (
-        "Switching to one of these languages also switches to the profile beside it, so a "
-        "Swedish dictation uses a Swedish model without a second change. \"(keep current)\" "
-        "leaves the profile alone. Add the profile first, on the Transcription tab."),
+        "Two ways to decide which model transcribes. This table picks one of them.\n\n"
+        "PAIRED — give a language a profile, and switching to that language switches "
+        "to that profile. Swedish speech gets a Swedish model without a second "
+        "change. This is how a new install ships.\n\n"
+        "\"(keep current)\" — that language does not touch the profile. Set every "
+        "language to \"(keep current)\" and nothing is paired at all: the language "
+        "switch changes only the language, and you choose the model yourself with "
+        "\"Use this profile\" on the Transcription tab. That is the other way, and it "
+        "is the one to use if you keep a cloud profile for everything.\n\n"
+        "With a pairing in force, \"Use this profile\" still works - but only until "
+        "the next language switch puts the paired profile back.\n\n"
+        "A profile has to exist before a language can point at it; add it on the "
+        "Transcription tab first."),
     "text_insertion": (
         "\"Paste automatically\" copies the text and presses Ctrl+V for you.\n\n"
         "\"Copy only\" leaves the text on the clipboard and tells you to press Ctrl+V "
@@ -1233,6 +1243,8 @@ class SettingsDialog(QDialog):
         self._row(dictation, "Inserting text", self.inject_mode_combo, "text_insertion")
         self._row(dictation, "Profile per language", self.language_profile_table,
                   "profile_per_language")
+        self.profile_mode_label = _caption("")
+        dictation.addRow("", self.profile_mode_label)
         layout = QVBoxLayout(w)
         layout.setContentsMargins(MARGIN, MARGIN, MARGIN, MARGIN)
         layout.setSpacing(ROW_SPACING)
@@ -1589,6 +1601,7 @@ class SettingsDialog(QDialog):
         for i, rule in enumerate(rules):
             self.set_replacement_row(i, *(list(rule) + ["", "", ""])[:3])
         self._load_language_profiles()
+        self._update_profile_mode()
         self._language_changed = False     # populating the combos is not a user edit
         self._inject_mode_changed = False
         self._pill_placement_changed = False
@@ -1771,6 +1784,26 @@ class SettingsDialog(QDialog):
             item.setFont(font)
         self.profile_list.addItem(item)
 
+    def _update_profile_mode(self) -> None:
+        """One line saying which way round this machine is set up.
+
+        The two controls are alternatives and nothing said so: with a pairing,
+        the language chooses the model; without one, you choose it yourself and
+        the language never touches it.
+        """
+        paired = [code for code, name in self._chosen_language_profiles().items()
+                  if name]
+        if paired:
+            names = ", ".join(language_name(code) for code in sorted(paired))
+            text = (f"Switching to {names} also switches the model. "
+                    f'"Use this profile" on the Transcription tab overrides that '
+                    f"until the next language switch.")
+        else:
+            text = ('Nothing is paired, so switching language never changes the '
+                    'model - you choose it yourself with "Use this profile" on the '
+                    'Transcription tab.')
+        self.profile_mode_label.setText(text)
+
     def _refresh_profile_buttons(self) -> None:
         """What can be done to the selected profile, said by the buttons.
 
@@ -1862,14 +1895,33 @@ class SettingsDialog(QDialog):
         # The new profile has to be selectable per language straight away: adding
         # local-swedish and mapping sv to it is one visit to this window.
         self._load_language_profiles(self._chosen_language_profiles())
+        self._update_profile_mode()
 
     def _activate_profile(self) -> None:
-        if self._current_profile:
-            self._chosen_active = self._current_profile
-            self._cfg.set("stt.active", self._current_profile)
-            self._active_changed = True
-            self.active_label.setText(f"Active profile: {self._current_profile}")
-            self._load_profile_list()
+        """Make the selected profile the one that transcribes.
+
+        And, when exactly one language is paired with it, switch to that
+        language too. Otherwise choosing the row that reads "local — English"
+        left the dictation in Swedish with the English model loaded - the pill
+        said SE, the model said English, and the button looked like it had done
+        nothing at all. Two languages sharing a profile have no single answer,
+        so that case changes only the model.
+        """
+        name = self._current_profile
+        if not name:
+            return
+        self._chosen_active = name
+        self._cfg.set("stt.active", name)
+        self._active_changed = True
+        self.active_label.setText(f"Active profile: {name}")
+        claimed = [code for code, mapped in self._chosen_language_profiles().items()
+                   if mapped == name]
+        if len(claimed) == 1:
+            index = self.language_combo.findData(claimed[0])
+            if index >= 0:
+                self.language_combo.setCurrentIndex(index)
+        self._load_profile_list()
+        self._update_profile_mode()
 
     def _remove_profile(self) -> None:
         """Delete the selected profile, and anything that pointed at it.
@@ -1889,6 +1941,7 @@ class SettingsDialog(QDialog):
                 self._cfg.unset(f"general.language_profiles.{code}")
         self._load_profile_list()
         self._load_language_profiles(self._chosen_language_profiles())
+        self._update_profile_mode()
 
     def _change_route(self) -> str:
         """What "Change…" has to do on this machine.
@@ -2401,6 +2454,7 @@ class SettingsDialog(QDialog):
         c.set("dictionary.hotwords", [word.strip() for word in self.hotwords_edit.text().split(",")
                                       if word.strip()])
         self._save_language_profiles()
+        self._update_profile_mode()
         if not self._carry_over_external_edits():
             return
         errs = c.errors()

@@ -2380,3 +2380,70 @@ def test_the_window_remembers_how_big_it_was(qapp):
     reopened = SettingsDialog(Config.load(), capture_key=lambda cb: None,
                               sources=lambda: [])
     assert (reopened.width(), reopened.height()) == (1100, 820)
+
+
+# -- what "Use this profile" is actually for ----------------------------------
+
+def test_using_a_profile_that_belongs_to_a_language_switches_that_language_too(qapp):
+    """The confusion, reported exactly: toggle to Swedish, pick the English
+    profile, press Use this profile - and the next dictation is still Swedish.
+
+    The button set the model and left the language alone, so the pill said SE
+    while the English model ran. A row that reads "local — English" has to mean
+    English when you choose it.
+    """
+    _with_map({"en": "local", "sv": "local-swedish"}, general__language="sv",
+              stt__active="local-swedish")
+    cfg, dlg, _ = make(qapp)
+    assert dlg.language_combo.currentData() == "sv"
+
+    select_profile(dlg, "local")
+    dlg.activate_button.click()
+    assert dlg.language_combo.currentData() == "en", "the language followed the profile"
+
+    dlg.save_button.click()
+    again = Config.load()
+    assert (again.get("general.language"), again.get("stt.active")) == ("en", "local")
+    assert again.errors() == []
+
+
+def test_using_a_profile_no_language_claims_leaves_the_language_alone(qapp):
+    """A cloud profile is not a language; choosing it must not silently
+    re-language the dictation."""
+    _with_map({"en": "local", "sv": "local-swedish"}, general__language="sv")
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "openai")
+    dlg.activate_button.click()
+    assert dlg.language_combo.currentData() == "sv"
+    dlg.save_button.click()
+    again = Config.load()
+    assert (again.get("general.language"), again.get("stt.active")) == ("sv", "openai")
+
+
+def test_a_profile_two_languages_share_does_not_pick_one_for_you(qapp):
+    _with_map({"en": "local", "sv": "local"}, general__language="sv")
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "local")
+    dlg.activate_button.click()
+    assert dlg.language_combo.currentData() == "sv", "there is no single answer"
+
+
+def test_the_window_says_which_of_the_two_ways_is_in_force(qapp):
+    """Paired, the language drives the model. Unpaired, you choose it yourself.
+    Which one you are in is the thing the window never said."""
+    cfg, dlg, _ = make(qapp)
+    assert "language" in dlg.profile_mode_label.text().lower()
+
+    for code in ("en", "sv"):
+        combo = dlg.language_profile_combos[code]
+        combo.setCurrentIndex(combo.findData(""))
+    dlg.save_button.click()
+    assert "yourself" in dlg.profile_mode_label.text().lower(), dlg.profile_mode_label.text()
+
+
+def test_the_help_explains_what_keep_current_means(qapp):
+    from voice.ui.settings import HELP
+
+    text = HELP["profile_per_language"].lower()
+    assert "keep current" in text
+    assert "every" in text or "both" in text, "it never says what all-kept means"

@@ -336,7 +336,9 @@ def _models_in_use() -> list[tuple[str, Path | None]]:
         model = str(profile.get("model", "")).strip()
         own = str(profile.get("model_dir") or "").strip()
         root = Path(own).expanduser() if own else shared
-        if model and not any(model == m for m, _ in models):
+        # Keyed on both: the same model in two directories is two things to
+        # check, and deduping on the name alone hid the second one entirely.
+        if model and (model, root) not in models:
             models.append((model, root))
     return models
 
@@ -345,13 +347,7 @@ def _model_cache() -> tuple[bool, str]:
     models = _models_in_use()
     if not models:
         return True, "nothing runs locally; no model to cache"
-    unwritable = _unwritable_roots(models)
-    if unwritable:
-        return False, (", ".join(unwritable) + " - stt.model_dir cannot be written. "
-                       "The download fails there, and the error the pill shows "
-                       "blames the GPU. Create it, or point stt.model_dir somewhere "
-                       'you own; "" puts the models back in the Hugging Face cache.')
-    found, missing = [], []
+    found, missing, wanted = [], [], []
     for model, root in models:
         hub = _hub_directory(model, root)
         # Asked once. Two calls chose the list and the wording independently,
@@ -362,18 +358,29 @@ def _model_cache() -> tuple[bool, str]:
             # Named in the spelling the config uses, not the repository's: that
             # is what the owner would have to go and change.
             missing.append(f"{model} not downloaded yet")
+            wanted.append(root)
+    # Only where something still has to be written. A read-only models share
+    # that already holds every model is a working machine, and failing it said
+    # the download would fail when there is no download left to do.
+    unwritable = _unwritable_roots(wanted)
+    if unwritable:
+        return False, (", ".join(unwritable) + " - stt.model_dir cannot be written. "
+                       "The download fails there, and the error the pill shows "
+                       "blames the GPU. Create it, or point stt.model_dir somewhere "
+                       'you own; "" puts the models back in the Hugging Face cache.')
     if missing:
         when = ("the first dictation in that language downloads it" if len(models) > 1
                 else "the first dictation downloads it")
-        # Where it will land, when that is somewhere the owner chose. Without
-        # it the line says a model is missing and nothing about where to look.
-        roots = sorted({str(root) for _, root in models if root is not None})
+        # Where the *missing* ones land, and only those: naming a directory
+        # that belongs to a model already on the disk sent the owner to look
+        # in the wrong place.
+        roots = sorted({str(root) for root in wanted if root is not None})
         into = f", into {' and '.join(roots)}" if roots else ""
         return False, ", ".join([*missing, *found]) + f" ({when}{into})"
     return True, ", ".join(found)
 
 
-def _unwritable_roots(models: list[tuple[str, Path | None]]) -> list[str]:
+def _unwritable_roots(roots: list[Path | None]) -> list[str]:
     """Configured directories nothing could be downloaded into, named once each.
 
     Only a directory the owner chose: the Hugging Face cache is Hugging Face's
@@ -381,7 +388,7 @@ def _unwritable_roots(models: list[tuple[str, Path | None]]) -> list[str]:
     anything.
     """
     out: list[str] = []
-    for _, root in models:
+    for root in roots:
         if root is None or str(root) in out:
             continue
         if not os.access(_first_existing(root), os.W_OK | os.X_OK):

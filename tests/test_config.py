@@ -385,6 +385,16 @@ def test_a_cloud_profile_is_not_given_a_model_directory(isolated_xdg):
     assert "model_dir" not in cfg.stt_profile()[1]
 
 
+def test_a_relative_model_dir_is_refused(isolated_xdg):
+    """"models" would be resolved against the daemon's working directory, not
+    the shell it was typed in - a folder nobody could find afterwards."""
+    cfg = Config.load()
+    cfg.set("stt.model_dir", "models")
+    assert [e for e in cfg.errors() if "model_dir" in e and "absolute" in e]
+    cfg.set("stt.model_dir", "~/Apps/models")       # expands to an absolute one
+    assert [e for e in cfg.errors() if "model_dir" in e] == []
+
+
 def test_a_model_dir_that_is_not_a_path_is_a_config_error(isolated_xdg):
     cfg = Config.load()
     cfg.set("stt.model_dir", 5)

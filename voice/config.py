@@ -432,9 +432,9 @@ class Config:
         if not isinstance(settle, (int, float)) or isinstance(settle, bool) or settle < 0:
             errs.append("inject.pill_settle_ms must be a non-negative number of milliseconds, "
                         f"got {settle!r}")
+        errs += self._model_dir_errors(profiles)
         # Absent in a config written before a transcription could time out;
         # such a file gets the shipped default, which is what it had before.
-        errs += self._model_dir_errors(profiles)
         timeout = self.get("stt.timeout_seconds")
         if timeout is not None and (not isinstance(timeout, (int, float))
                                     or isinstance(timeout, bool) or timeout <= 0):
@@ -458,10 +458,19 @@ class Config:
         named += [(f"stt.profiles.{name}.model_dir", prof.get("model_dir"))
                   for name, prof in profiles.items() if "model_dir" in prof]
         for key, value in named:
-            if value is None or isinstance(value, str):
+            if value is None:
                 continue
-            errs.append(f'{key} must be a directory path, or "" for the Hugging Face '
-                        f"cache, got {value!r}")
+            if not isinstance(value, str):
+                errs.append(f'{key} must be a directory path, or "" for the Hugging '
+                            f"Face cache, got {value!r}")
+                continue
+            text = value.strip()
+            if text and not Path(text).expanduser().is_absolute():
+                # Resolved against the daemon's working directory, not the shell
+                # this was typed in - the models would land somewhere nobody
+                # could find again.
+                errs.append(f'{key} must be an absolute path like "~/Apps/models", '
+                            f"got {value!r}")
         return errs
 
     def _placement_errors(self) -> list[str]:

@@ -514,6 +514,91 @@ def test_the_model_cache_probe_says_when_it_cannot_write_where_it_was_told(
     assert "cannot be written" in detail and str(closed / "models") in detail
 
 
+def _two_local_profiles(**dirs):
+    """`local` = medium and `local-swedish` = KB-Whisper, paired to a language.
+
+    Directories are passed by their full dotted key, because "local-swedish"
+    has a hyphen in it and no keyword argument can spell that.
+    """
+    from voice.config import Config
+
+    cfg = Config.load()
+    cfg.set("stt.profiles.local.model", "medium")
+    cfg.set("stt.profiles.local-swedish.model", "KBLab/kb-whisper-large")
+    cfg.set("general.language_profiles", {"en": "local", "sv": "local-swedish"})
+    cfg.set("stt.active", "local")
+    for key, value in dirs.items():
+        cfg.set(key, str(value))
+    cfg.save()
+    return cfg
+
+
+def test_the_destination_named_is_the_one_the_missing_model_goes_to(
+        isolated_xdg, monkeypatch, tmp_path):
+    """"into X" has to mean the missing model, not any directory in play.
+
+    With one profile on a folder of its own and the other on the cache, the
+    line named the folder while the model that was actually missing was going
+    to the cache - sending the owner to look in the wrong place.
+    """
+    from voice.doctor import default_probes
+
+    chosen = tmp_path / "srv"
+    _two_local_profiles(**{"stt.profiles.local-swedish.model_dir": chosen})
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+    (chosen / "models--KBLab--kb-whisper-large").mkdir(parents=True)
+
+    ok, detail = default_probes()["model cache"]()
+    assert ok is False
+    assert "medium not downloaded yet" in detail
+    assert f"into {chosen}" not in detail, (
+        f"medium goes to the Hugging Face cache, not {chosen}: {detail}")
+
+
+def test_a_read_only_model_folder_that_already_holds_everything_is_fine(
+        isolated_xdg, monkeypatch, tmp_path):
+    """A models share on a NAS, or a folder root filled in, is not a fault.
+
+    Nothing has to be written there, so refusing it fails a machine on which
+    dictation works perfectly."""
+    from voice.doctor import default_probes
+
+    shared = tmp_path / "ro"
+    shared.mkdir()
+    (shared / "models--Systran--faster-whisper-medium").mkdir()
+    (shared / "models--KBLab--kb-whisper-large").mkdir()
+    _two_local_profiles(**{"stt.model_dir": shared})
+    shared.chmod(0o500)
+    try:
+        ok, detail = default_probes()["model cache"]()
+    finally:
+        shared.chmod(0o700)
+    assert ok is True, detail
+    assert "cannot be written" not in detail
+
+
+def test_the_same_model_in_two_places_is_checked_in_both(
+        isolated_xdg, monkeypatch, tmp_path):
+    """Deduping on the name alone hid the second location entirely."""
+    from voice.config import Config
+    from voice.doctor import default_probes
+
+    here, there = tmp_path / "here", tmp_path / "there"
+    cfg = Config.load()
+    cfg.set("stt.profiles.local.model", "medium")
+    cfg.set("stt.profiles.local.model_dir", str(here))
+    cfg.set("stt.profiles.local-swedish.model", "medium")
+    cfg.set("stt.profiles.local-swedish.model_dir", str(there))
+    cfg.set("general.language_profiles", {"en": "local", "sv": "local-swedish"})
+    cfg.save()
+    (here / "models--Systran--faster-whisper-medium").mkdir(parents=True)
+    there.mkdir()
+
+    ok, detail = default_probes()["model cache"]()
+    assert ok is False, f"the second copy is missing and was not looked for: {detail}"
+    assert str(there) in detail
+
+
 def test_the_model_cache_probe_asks_the_disk_once_per_model(
         isolated_xdg, monkeypatch, tmp_path):
     """Two `exists()` calls picked the list and the wording independently.

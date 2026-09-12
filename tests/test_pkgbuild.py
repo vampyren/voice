@@ -78,7 +78,7 @@ def run_wrapper(prefix: str, show: str) -> str:
     with tempfile.TemporaryDirectory() as tmp:
         script = Path(tmp) / "voice.sh"
         script.write_text(body)
-        done = subprocess.run(["sh", str(script)], capture_output=True, text=True)
+        done = subprocess.run(["sh", str(script)], capture_output=True, text=True, timeout=HELPER_TIMEOUT_S)
     assert done.returncode == 0, done.stderr
     return done.stdout
 
@@ -97,6 +97,16 @@ def scriptlet_code() -> str:
     return "\n".join(out)
 
 
+#: Every helper this file runs gets a bound. `package()` copies thousands of
+#: files through `cp`, `install`, `chmod` and `mkdir`, and on Ubuntu 26.04
+#: those are the Rust `uutils` reimplementations, which have segfaulted on this
+#: machine (crash reports for `du` and `timeout`). Unbounded, one wedged helper
+#: hangs the whole suite until pytest-timeout fires at 60 s and dumps every
+#: thread's stack - which reads like a crash in the tests and is not one. With
+#: a bound it fails here, named, in seconds.
+HELPER_TIMEOUT_S = 120
+
+
 def shell_vars(env: dict | None = None) -> dict:
     """Source the PKGBUILD the way makepkg does and read back what it defined.
 
@@ -112,7 +122,7 @@ def shell_vars(env: dict | None = None) -> dict:
     )
     done = subprocess.run(["bash", "-c", script, "_", str(PKGBUILD)],
                           capture_output=True, text=True,
-                          env={**os.environ, **(env or {})})
+                          env={**os.environ, **(env or {})}, timeout=HELPER_TIMEOUT_S)
     assert done.returncode == 0, done.stderr
     out = {}
     for line in done.stdout.splitlines():
@@ -130,7 +140,7 @@ def shell_array(name: str, env: dict | None = None) -> list[str]:
               f'printf "%s\\n" "${{{name}[@]}}"')
     done = subprocess.run(["bash", "-c", script, "_", str(PKGBUILD)],
                           capture_output=True, text=True,
-                          env={**os.environ, **(env or {})})
+                          env={**os.environ, **(env or {})}, timeout=HELPER_TIMEOUT_S)
     assert done.returncode == 0, done.stderr
     return [line for line in done.stdout.splitlines() if line]
 
@@ -138,7 +148,7 @@ def shell_array(name: str, env: dict | None = None) -> list[str]:
 @pytest.mark.parametrize("path", [PKGBUILD, SCRIPTLET, WRAPPER, OVERLAY_WRAPPER])
 def test_every_shipped_shell_file_parses(path):
     assert path.exists(), f"{path} is missing"
-    assert subprocess.run(["bash", "-n", str(path)]).returncode == 0
+    assert subprocess.run(["bash", "-n", str(path)], timeout=HELPER_TIMEOUT_S).returncode == 0
 
 
 def test_pkgbuild_has_the_fields_makepkg_requires():
@@ -477,7 +487,7 @@ def test_the_license_text_the_package_ships_is_not_empty():
     """There is no LICENSE file upstream; the package carves the statement that
     stands in for one out of the README, so that section has to stay there."""
     text = subprocess.run(["sed", "-n", "/^## License/,$p", str(ROOT / "README.md")],
-                          capture_output=True, text=True).stdout
+                          capture_output=True, text=True, timeout=HELPER_TIMEOUT_S).stdout
     assert "## License" in text and len(text.split()) > 5
 
 
@@ -507,7 +517,7 @@ def _stage(tmp_path: Path, env: dict | None = None) -> Path:
         'package'
     )
     done = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                          env={**os.environ, **(env or {})})
+                          env={**os.environ, **(env or {})}, timeout=HELPER_TIMEOUT_S)
     assert done.returncode == 0, done.stderr
     return pkg
 

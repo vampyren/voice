@@ -2,16 +2,22 @@ import os
 import subprocess
 from pathlib import Path
 
+#: A bound on every helper this file runs - `install.sh` shells out, and on
+#: Ubuntu 26.04 the coreutils it calls are the Rust `uutils` rewrites, which
+#: have segfaulted on this machine. Unbounded, one wedged helper hangs the
+#: suite until pytest-timeout fires at 60 s and dumps every thread's stack.
+HELPER_TIMEOUT_S = 120
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def run(*args, env=None):
     e = {**os.environ, "DRY_RUN": "1", "HOME": "/tmp/voice-home", **(env or {})}
-    return subprocess.run(["bash", str(ROOT / "install.sh"), *args], capture_output=True, text=True, env=e)
+    return subprocess.run(["bash", str(ROOT / "install.sh"), *args], capture_output=True, text=True, env=e, timeout=HELPER_TIMEOUT_S)
 
 
 def test_script_parses_and_dry_run_lists_steps():
-    assert subprocess.run(["bash", "-n", str(ROOT / "install.sh")]).returncode == 0
+    assert subprocess.run(["bash", "-n", str(ROOT / "install.sh")], timeout=HELPER_TIMEOUT_S).returncode == 0
     cp = run("--cpu", "--no-udev")
     assert cp.returncode == 0, cp.stderr
     assert "uv sync" in cp.stdout and "--extra gpu" not in cp.stdout
@@ -88,5 +94,5 @@ def test_the_wrapper_survives_a_cpu_only_install(tmp_path):
     body = _wrapper_body()
     body = body[:body.index("exec uv")] + 'echo "LDPATH=[${LD_LIBRARY_PATH:-}]"\n'
     body = body.replace("$ROOT", str(tmp_path))
-    out = subprocess.run(["bash", "-c", body], capture_output=True, text=True, check=True)
+    out = subprocess.run(["bash", "-c", body], capture_output=True, text=True, check=True, timeout=HELPER_TIMEOUT_S)
     assert out.stdout.strip() == "LDPATH=[]", out.stdout

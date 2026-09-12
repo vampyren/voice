@@ -108,3 +108,26 @@ def test_the_docs_do_not_invent_buttons_the_settings_window_does_not_have():
             assert label not in text, (
                 f"{page.relative_to(ROOT)} names a button that does not exist: "
                 f"{label!r}. The real ones are {sorted(real)}.")
+
+
+def test_no_test_shells_out_without_a_bound():
+    """One wedged helper must not take the whole suite with it.
+
+    On Ubuntu 26.04 the coreutils these tests call are the Rust `uutils`
+    rewrites, and two of them have segfaulted on the development machine.
+    Unbounded, such a call hangs until pytest-timeout fires at 60 s and dumps
+    every thread's stack - which reads like a crash in the tests, and sent a
+    real investigation down the wrong path.
+    """
+    import ast
+
+    unbounded = []
+    for path in sorted((ROOT / "tests").rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (isinstance(node, ast.Call)
+                    and getattr(node.func, "attr", None) == "run"
+                    and isinstance(getattr(node.func, "value", None), ast.Name)
+                    and node.func.value.id == "subprocess"
+                    and "timeout" not in {kw.arg for kw in node.keywords}):
+                unbounded.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+    assert not unbounded, f"subprocess.run with no timeout=: {unbounded}"

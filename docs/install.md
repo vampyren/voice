@@ -85,7 +85,6 @@ Not installed by default; pacman lists them as optional dependencies.
 | `ydotool` | the other fallback injection backend |
 | `ttf-jetbrains-mono` | the font for the pill's timer (any monospace font does) |
 | `dconf` | lets `voice doctor` read back the shortcut GNOME stored |
-| `kdotool` *(AUR)* | **KDE only, and worth having.** Lets voice see which window has focus, so it sends Ctrl+Shift+V to a terminal and Ctrl+V everywhere else. Without it, voice cannot tell, leaves the text on the clipboard and says so — see [Desktop setup](desktops.md). |
 | `uv` | only for the git-clone development route, not for the package |
 
 ### Downloaded on first use, not shipped

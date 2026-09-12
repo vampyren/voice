@@ -60,7 +60,8 @@ class InjectResult:
 #: How long the focused-window command may take. It runs between the pill
 #: being unmapped and the chord being sent, so every extra second is a second
 #: of the window in which focus has come back and nothing has been pasted yet.
-#: kdotool registers a KWin script per invocation and is the slow case.
+#: Only reached by a command the owner configured: KDE is asked in-process
+#: instead, so nothing here runs a subprocess on Plasma at all.
 WINDOW_COMMAND_TIMEOUT_S = 1.0
 
 

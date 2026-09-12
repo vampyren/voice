@@ -130,10 +130,10 @@ optdepends=(
   'ttf-jetbrains-mono: the pill timer font (any monospace font does)'
   'dconf: let `voice doctor` read the shortcut GNOME stored'
 )
-# Deliberately NOT an optdepend: kdotool is AUR-only, and nothing this package
-# declares may come from the AUR (see test_no_dependency_comes_from_the_aur -
-# a python312 dependency once broke the first install on a clean machine).
-# docs/desktops.md explains what it buys on KDE and the no-install alternative.
+# No window-detection dependency, on purpose. KDE needs none: voice asks KWin
+# for the focused window itself, through a script KWin runs (voice/inject/kwin.py).
+# kdotool would have done the same job and is AUR-only, which nothing this
+# package declares may be - see test_no_dependency_comes_from_the_aur.
 backup=("etc/xdg/autostart/$_appid.desktop")
 # 0.1.0-1 was a split build whose second half carried the CUDA wheels. Those
 # files live here now, so an old voice-cuda has to go. Drop these two lines once

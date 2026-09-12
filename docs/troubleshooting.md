@@ -58,9 +58,9 @@ Some common problems doctor doesn't cover directly:
   something else, so voice has to know it is aiming at one. That needs two things: the
   window class in `inject.terminal_classes` (already includes `konsole`,
   `org.kde.konsole`, `kitty`, `alacritty`, `foot`, `wezterm`, `org.gnome.Ptyxis`,
-  `gnome-terminal`), **and** a way to read the focused window at all. On KDE that means
-  `kdotool` or an `inject.active_window_command`; **on GNOME it is impossible**, so the
-  text is left on the clipboard and the pill says **Copied**. See
+  `gnome-terminal`), **and** a way to read the focused window at all. On KDE that is
+  automatic - voice asks KWin directly, with nothing installed. **On GNOME it is
+  impossible**, so the text is left on the clipboard and the pill says **Copied**. See
   [Desktop setup](desktops.md#2-whether-voice-can-tell-which-window-you-are-in).
 - **The portal shortcut does nothing, and `hotkeys.portal_dictate` changes nothing.** Both
   have the same cause: the desktop owns the key once it knows the shortcut, and it may be

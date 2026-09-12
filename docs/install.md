@@ -205,6 +205,29 @@ Git clone:
 ./install.sh --uninstall
 ```
 
+### What the udev rule actually does
+
+The whole rule is one line:
+
+```
+SUBSYSTEM=="input", KERNEL=="event*", TAG+="uaccess"
+```
+
+`uaccess` is a systemd-logind tag. Tagging a device with it makes logind put an ACL on
+that device for **the user of the active local session** — the person physically logged
+in at the screen — and remove it again when they log out.
+
+So voice can read your push-to-talk key without running as root, without you joining the
+`input` group, and without a re-login. The device does not become world-readable, and a
+remote or SSH session is not the active local session, so it gets nothing.
+
+It only matters for the **evdev** hotkey backend. On GNOME — and on any session with no
+local seat — voice uses the desktop's own global-shortcut portal instead, and the rule is
+unused. `voice doctor`'s **hotkey backend** line says which one you are on.
+
+`--no-udev` skips it: then you need to be in the `input` group (and re-login), or use the
+portal backend.
+
 `pacman -R` removes every file the package owns, including the udev rule and both desktop
 entries, and reloads udev. `install.sh --uninstall` removes the `~/.local/bin/voice`
 wrapper, both desktop entries, and the udev rule (asks for sudo once). Neither touches

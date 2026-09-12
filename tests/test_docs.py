@@ -15,10 +15,15 @@ ROOT = Path(__file__).resolve().parents[1]
 PAGES = [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md")),
          ROOT / "packaging" / "README.md"]
 
-#: The README is a landing page: what it is, how to install it, how to use it.
-#: It reached 958 lines once - requirements, every config key, troubleshooting
-#: and the roadmap in one scroll - and nobody could find the install command.
-LANDING_PAGE_MAX_LINES = 200
+#: The README is a landing page: what it is, what it puts on your machine, how
+#: to install it, how to use it. It reached 958 lines once - requirements, every
+#: config key, troubleshooting and the roadmap in one scroll - and nobody could
+#: find the install command.
+#:
+#: This is a shape check, not a byte budget. Raise it when a section genuinely
+#: belongs on the front page, as "what the package installs" did; do not raise
+#: it to make room for detail that has a page of its own.
+LANDING_PAGE_MAX_LINES = 240
 
 
 def _slugs(text: str) -> set[str]:

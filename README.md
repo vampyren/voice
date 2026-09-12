@@ -54,6 +54,40 @@ Keeps the code in your checkout so edits are live on the next daemon start. Need
 
 📖 **[Full requirements, options and uninstall →](docs/install.md)**
 
+### What it puts on your system
+
+| Where | What |
+|---|---|
+| `/usr/lib/voice/` | the app and its Python dependencies — nearly all of the 346 MB |
+| `/usr/bin/voice` · `/usr/bin/voice-overlay` | the command, and the recording pill's helper |
+| `/usr/lib/udev/rules.d/70-voice-input.rules` | one line — see below |
+| `/usr/share/applications/…voice.desktop` | the entry in your app launcher |
+| `/etc/xdg/autostart/…voice.desktop` | starts the daemon when you log in (`Exec=voice daemon`) |
+| `/usr/share/doc/voice/` | this page and everything under `docs/` |
+
+**The udev rule, in full — it is one line:**
+
+```
+SUBSYSTEM=="input", KERNEL=="event*", TAG+="uaccess"
+```
+
+It tags keyboard event devices with `uaccess`, which tells systemd-logind to grant **the
+user currently logged in at the screen** read access to them. That is the whole reason
+it exists: voice can see your push-to-talk key without running as root.
+
+It does **not** make anything world-readable, does **not** add you to a group, and does
+**not** need a re-login. A remote or SSH session gets nothing from it. On desktops where
+voice uses the portal shortcut backend instead — GNOME always does — the rule is not
+even used.
+
+**In your home**, created as you use it, never by the installer:
+
+`~/.config/voice/` (settings) · `~/.local/state/voice/` (history) ·
+`~/.cache/huggingface/` (the speech model, downloaded on first dictation)
+
+`pacman -R voice` removes everything in the table. Your home files stay — those are
+yours to delete.
+
 ---
 
 ## Set up your desktop

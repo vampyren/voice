@@ -26,7 +26,7 @@ jobs:
 
     steps:
       - name: Install the build tools
-        run: pacman -Syu --noconfirm --needed git uv github-cli
+        run: pacman -Syu --noconfirm --needed git uv github-cli gnupg
 
       - uses: actions/checkout@v4
         with:
@@ -63,10 +63,34 @@ jobs:
           bsdtar -tf "$pkg" | grep -q 'usr/share/doc/voice/docs/install.md'
           echo "ok: $pkg"
 
+      - name: Sign it
+        # pacman refuses a remote package with no detached signature beside it,
+        # so an unsigned release makes the documented `pacman -U <url>` install
+        # fail on a 404 for the .sig. Binary, not armoured: that is what
+        # `makepkg --sign` produces and what pacman reads.
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo "::error::GPG_PRIVATE_KEY is not set; the release would be unsigned"
+            exit 1
+          fi
+          printenv GPG_PRIVATE_KEY | gpg --batch --quiet --import
+          cd packaging
+          for pkg in ./*.pkg.tar.zst; do
+            printenv GPG_PASSPHRASE | gpg --batch --yes --pinentry-mode loopback \
+              --passphrase-fd 0 --detach-sign --no-armor "$pkg"
+            gpg --verify "$pkg.sig" "$pkg"
+          done
+          ls -l ./*.sig
+
       - uses: actions/upload-artifact@v4
         with:
           name: voice-cpu-package
-          path: packaging/*.pkg.tar.zst
+          path: |
+            packaging/*.pkg.tar.zst
+            packaging/*.pkg.tar.zst.sig
           if-no-files-found: error
 
       - name: Attach it to the release
@@ -78,4 +102,5 @@ jobs:
           # so a tag pushed on its own still produces something installable.
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
-          gh release upload "$GITHUB_REF_NAME" packaging/*.pkg.tar.zst --clobber
+          gh release upload "$GITHUB_REF_NAME" \
+            packaging/*.pkg.tar.zst packaging/*.pkg.tar.zst.sig --clobber

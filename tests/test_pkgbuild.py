@@ -592,3 +592,24 @@ def test_the_readme_download_url_matches_the_package_it_would_build():
     for name in urls:
         assert name == expected, (
             f"the README installs {name!r} but this PKGBUILD builds {expected!r}")
+
+
+def test_the_signing_key_is_published_with_the_repository():
+    """The install tells people to import this; it has to be there to import.
+
+    Without a signature beside the package, `pacman -U <url>` fails on a 404
+    for the .sig - which is how the documented install broke on first use.
+    """
+    key = ROOT / "packaging" / "voice-signing-key.asc"
+    assert key.exists(), "packaging/voice-signing-key.asc is missing"
+    text = key.read_text()
+    assert text.startswith("-----BEGIN PGP PUBLIC KEY BLOCK-----"), "not an armoured public key"
+    assert "PRIVATE" not in text, "a private key must never be committed"
+
+
+def test_the_release_workflow_signs_what_it_uploads():
+    workflow = (ROOT / ".github" / "workflows" / "package.yml").read_text()
+    assert "--detach-sign" in workflow, "the workflow does not sign the package"
+    assert "--no-armor" in workflow, "pacman reads a binary .sig, not an armoured one"
+    assert "gpg --verify" in workflow, "the workflow does not check its own signature"
+    assert "pkg.tar.zst.sig" in workflow, "the signature is never uploaded"

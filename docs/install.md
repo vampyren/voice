@@ -190,6 +190,30 @@ activating a virtualenv, installs `voice.desktop` to both
 `~/.local/share/applications/` (app launcher) and `~/.config/autostart/` (login
 autostart), and finishes by running `voice doctor`.
 
+## Verifying what you downloaded
+
+Every release asset is signed with the project's package-signing key, and the detached
+signature is published beside it. Fingerprint:
+
+```
+1CDA13B410AC7B21BE0227CFF2F5DB243D66BBB9
+```
+
+`pacman-key --lsign-key` above tells pacman you trust it; from then on pacman checks the
+signature on every package it installs from a release and refuses one that does not
+match. To check by hand instead:
+
+```bash
+curl -LO https://github.com/vampyren/voice/releases/download/v0.1.1/voice-0.1.1-1-x86_64.pkg.tar.zst
+curl -LO https://github.com/vampyren/voice/releases/download/v0.1.1/voice-0.1.1-1-x86_64.pkg.tar.zst.sig
+gpg --import packaging/voice-signing-key.asc
+gpg --verify voice-0.1.1-1-x86_64.pkg.tar.zst.sig voice-0.1.1-1-x86_64.pkg.tar.zst
+```
+
+The key is signing-only, expires in 2031, and its private half exists only as a GitHub
+Actions secret used by the release build - it is not on any developer machine you would
+have to trust separately.
+
 ## Uninstall
 
 Packaged install:

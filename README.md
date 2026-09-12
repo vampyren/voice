@@ -20,15 +20,21 @@ still runs about 3× faster than you speak. [Why](docs/install.md#do-i-need-a-gp
 
 ### Arch / CachyOS — one command, nothing to build
 
+Releases are GPG-signed, so pacman verifies what it downloads. Import the signing key
+once:
+
 ```bash
-curl -LO https://github.com/vampyren/voice/releases/download/v0.1.1/voice-0.1.1-1-x86_64.pkg.tar.zst
-sudo pacman -U ./voice-0.1.1-1-x86_64.pkg.tar.zst
-voice doctor
+curl -sL https://raw.githubusercontent.com/vampyren/voice/main/packaging/voice-signing-key.asc -o /tmp/voice-key.asc
+sudo pacman-key --add /tmp/voice-key.asc
+sudo pacman-key --lsign-key F2F5DB243D66BBB9
 ```
 
-Downloaded first, then installed: the package is not signed yet, and `pacman -U` against
-a URL insists on a detached `.sig` beside it. A local file is checked under
-`LocalFileSigLevel`, which does not.
+Then install, now and for every future release:
+
+```bash
+sudo pacman -U https://github.com/vampyren/voice/releases/download/v0.1.1/voice-0.1.1-1-x86_64.pkg.tar.zst
+voice doctor
+```
 
 That is the whole install — the app, its locked dependencies, the desktop entry, the
 autostart entry and the udev rule. Remove it with `pacman -R voice`.

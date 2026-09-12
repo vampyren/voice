@@ -784,3 +784,239 @@ def test_the_vocabulary_reaches_the_backend_with_every_transcription():
     d.start()
     d.stop()
     assert stt.hotwords == "CachyOS, OBSBOT"
+
+
+# -- what the daemon says about itself ---------------------------------------
+#: The incident that prompted these: a daemon that had run for thirteen hours
+#: wrote twenty-five journal lines, none of which said what state it was in, so
+#: nothing about a misbehaving dictation could be reconstructed after the fact.
+
+def test_every_state_transition_is_logged_where_the_owner_can_read_it(caplog):
+    d, sv, states, _ = make()
+    with caplog.at_level("INFO", logger="voice.pipeline"):
+        d.start()
+        d.stop()
+    logged = [r.getMessage() for r in caplog.records if r.name == "voice.pipeline"]
+    for state in ("recording", "transcribing", "injecting", "idle"):
+        assert any(state in line for line in logged), \
+            f"{state} never reached the log at INFO: {logged}"
+
+
+def test_the_idle_line_says_what_the_dictation_actually_did(caplog):
+    d, sv, states, _ = make()
+    with caplog.at_level("INFO", logger="voice.pipeline"):
+        d.start()
+        d.stop()
+    idle = [r.getMessage() for r in caplog.records if "idle" in r.getMessage()]
+    assert idle and "via portal" in idle[-1], \
+        f"the idle line must name the insertion method, got {idle}"
+
+
+# -- a press the pipeline cannot act on --------------------------------------
+#: Pressing the dictate key while a dictation is still transcribing or pasting
+#: used to do nothing whatsoever - no log line, no notification, no change to
+#: the pill. The owner pressed again, that second press landed after the
+#: pipeline had gone idle, and it started a recording instead of stopping one.
+
+def test_a_press_while_transcribing_is_reported_rather_than_swallowed():
+    pending = []
+    d, sv, states, _ = make({"hotkeys.dictate_mode": "toggle"}, executor=pending.append)
+    busy = []
+    d.on_busy = lambda state: busy.append(state)
+    d.start()
+    d.stop()
+    assert d.state == State.TRANSCRIBING
+
+    d.on_hotkey("dictate", "press")
+
+    assert busy == [State.TRANSCRIBING], \
+        "a press that cannot be acted on must still tell somebody"
+
+
+def test_a_press_while_injecting_is_reported_rather_than_swallowed():
+    pending = []
+    d, sv, states, _ = make({"hotkeys.dictate_mode": "toggle"}, executor=pending.append)
+    busy = []
+    d.on_busy = lambda state: busy.append(state)
+    sv.history.add(Entry("hello world", time.time(), "fake", 1.0, 0.1))
+    d.recall()                                # reserves INJECTING; the paste is still queued
+    assert d.state == State.INJECTING
+
+    d.on_hotkey("dictate", "press")
+
+    assert busy == [State.INJECTING]
+
+
+def test_a_busy_notice_that_raises_cannot_kill_the_listener_thread():
+    pending = []
+    d, sv, states, _ = make({"hotkeys.dictate_mode": "toggle"}, executor=pending.append)
+    d.on_busy = lambda state: (_ for _ in ()).throw(RuntimeError("pill is gone"))
+    d.start()
+    d.stop()
+
+    d.on_hotkey("dictate", "press")           # must not raise
+
+    assert d.state == State.TRANSCRIBING
+
+
+# -- the state write and its backstop must be one step -----------------------
+#: `_set` wrote `self._state` outside the lock and only then armed the guard.
+#: A hotkey press landing in that gap saw an IDLE the worker had written but
+#: not yet finished acting on: it started a recording, and the worker's late
+#: `_arm_guard(IDLE)` then cancelled the backstop that recording had just
+#: armed - leaving the daemon recording with no watchdog and a pill that had
+#: already been told the previous dictation was done.
+
+def test_a_press_landing_on_the_workers_idle_transition_cannot_start_a_blind_recording():
+    pending = []
+    d, sv, states, _ = make({"hotkeys.dictate_mode": "toggle", "audio.max_seconds": 7},
+                            executor=pending.append)
+    d.start()
+    d.stop()
+    assert d.state == State.TRANSCRIBING
+
+    real, fired = d._lock, []
+
+    class PressAtTheIdleTransition:
+        """Runs the user's press exactly as the worker hands the state back."""
+
+        def __enter__(self):
+            # The injector has produced text, so the next lock this worker takes
+            # is the one behind `_set(State.IDLE)` at the end of `_inject`.
+            if sv.injector.texts and not fired:
+                fired.append(True)
+                press = threading.Thread(target=d.start, name="hotkey")
+                press.start()
+                press.join(5)
+            return real.__enter__()
+
+        def __exit__(self, *exc):
+            return real.__exit__(*exc)
+
+    d._lock = PressAtTheIdleTransition()
+    try:
+        pending.pop()()                       # transcribe, inject, hand back to idle
+    finally:
+        d._lock = real
+
+    assert fired, "the interleaving under test was never reached"
+    assert d.state == State.IDLE, \
+        "a press arriving while the paste is still finishing must not start a recording"
+    assert sv.recorder.is_recording is False, \
+        "the recorder was left running by a press the pipeline had already refused"
+
+
+def test_a_recording_always_has_a_live_backstop():
+    d, sv, states, _ = make({"audio.max_seconds": 7})
+    d.start()
+    assert d.state == State.RECORDING
+    live = [t for t in FakeTimer.instances if t.seconds == 7 + STUCK_GRACE and not t.cancelled]
+    assert len(live) == 1, \
+        f"a recording with no watchdog runs until something else notices: {FakeTimer.instances}"
+
+
+def test_a_press_that_races_the_max_seconds_timer_is_still_answered():
+    """The read and the command it chooses must be one step.
+
+    `toggle()` read `_state` with no lock and only then called `stop()`, which
+    re-checked under one. Between those two, the max-seconds timer's own
+    `stop()` could land: the re-check then found TRANSCRIBING, returned, and
+    the owner's press did nothing and said nothing - the silence this branch
+    exists to remove.
+    """
+    pending, fired = [], []
+    d, sv, states, _ = make({"hotkeys.dictate_mode": "toggle", "audio.max_seconds": 7},
+                            executor=pending.append)
+    busy = []
+    d.on_busy = busy.append
+    d.start()
+    assert d.state == State.RECORDING
+    real = d._lock
+
+    class MaxSecondsGetsInFirst:
+        def __enter__(self):
+            if not fired:
+                fired.append(True)
+                _timer(7).fire()          # the recording ends on the timer thread
+            return real.__enter__()
+
+        def __exit__(self, *exc):
+            return real.__exit__(*exc)
+
+    d._lock = MaxSecondsGetsInFirst()
+    try:
+        d.on_hotkey("dictate", "press")
+    finally:
+        d._lock = real
+
+    assert fired, "the interleaving under test was never reached"
+    assert d.state == State.TRANSCRIBING
+    assert busy == [State.TRANSCRIBING], \
+        "the press was swallowed by a state that changed under it"
+
+
+def test_a_transition_the_pipeline_has_already_left_is_never_shown():
+    """The pill must not be told about a state that has been superseded.
+
+    `_set` releases the lock before calling `on_state`, so the worker could
+    write IDLE, let a hotkey press start a whole recording, and only then
+    announce its IDLE - repainting the pill to the previous dictation's
+    checkmark, which then auto-hides. The owner records with no pill at all.
+    """
+    pending, fired = [], []
+    d, sv, states, _ = make({"hotkeys.dictate_mode": "toggle", "audio.max_seconds": 7},
+                            executor=pending.append)
+    d.start()
+    d.stop()
+    real = d._lock
+
+    class PressAsTheLockIsReleased:
+        depth = 0
+
+        def __enter__(self):
+            PressAsTheLockIsReleased.depth += 1
+            return real.__enter__()
+
+        def __exit__(self, *exc):
+            out = real.__exit__(*exc)
+            PressAsTheLockIsReleased.depth -= 1
+            # Only once the lock is genuinely free, or the press deadlocks on it.
+            if PressAsTheLockIsReleased.depth == 0 and sv.injector.texts and not fired:
+                fired.append(True)
+                press = threading.Thread(target=d.start, name="hotkey")
+                press.start()
+                press.join(5)
+            return out
+
+    d._lock = PressAsTheLockIsReleased()
+    try:
+        pending.pop()()                   # transcribe, inject, hand back to idle
+    finally:
+        d._lock = real
+
+    assert fired, "the interleaving under test was never reached"
+    assert d.state == State.RECORDING
+    assert states[-1] == State.RECORDING, \
+        f"the pill was repainted by a state already left behind: {states}"
+
+
+def test_a_press_while_working_is_answered_in_hold_mode_too():
+    """`hotkeys.dictate_mode` defaults to "hold", and the answer must reach it.
+
+    `on_busy` fired only from `toggle()`, so in push-to-talk - the default - a
+    press during a transcription still went to `start()`, which returned
+    silently at its own state check. The silence this branch exists to remove
+    was removed for toggle users only.
+    """
+    pending = []
+    d, sv, states, _ = make(executor=pending.append)      # mode: "hold"
+    busy = []
+    d.on_busy = busy.append
+    d.on_hotkey("dictate", "press")
+    d.on_hotkey("dictate", "release")
+    assert d.state == State.TRANSCRIBING
+
+    d.on_hotkey("dictate", "press")
+
+    assert busy == [State.TRANSCRIBING]
+    assert sv.recorder.started_with == [None], "a refused press must not record"

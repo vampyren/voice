@@ -4,7 +4,8 @@ One JSON object per line, one line per event:
 
     {"state": "recording"}          {"level": 0.42}
     {"state": "transcribing"}       {"language": "sv"}
-    {"state": "done"}               {"state": "notice", "text": "EN → SV"}
+    {"state": "done"}               {"state": "notice", "text": "EN → SV",
+                                     "swaps_language": true}
     {"state": "error", "text": "pw-record: no such target"}
     {"state": "hidden"}             {"finish": true}
 
@@ -118,7 +119,8 @@ def apply_message(model: OverlayModel, message: dict,
     if "state" in message:
         text = message.get("text")
         try:
-            model.set_state(str(message["state"]), text=None if text is None else str(text))
+            model.set_state(str(message["state"]), text=None if text is None else str(text),
+                            swaps_language=bool(message.get("swaps_language")))
             applied = True
         except ValueError as exc:
             log.warning("overlay: %s", exc)

@@ -84,7 +84,10 @@ def test_restore_disabled():
 
 def test_restore_failure_reported_as_not_restored():
     clip = FakeClipboard(restore_succeeds=False)
-    inj = Injector(clip, FakeSender(), SETTINGS, lambda: False, lambda: None, sleep=lambda s: None)
+    # A known window: an unknown one is never restored over at all, which is
+    # its own test below.
+    inj = Injector(clip, FakeSender(), SETTINGS, lambda: False, lambda: "firefox",
+                   sleep=lambda s: None)
     res = inj.inject("x")
     assert res.restored is False
     assert ("restore", "old") in clip.log          # restore was attempted, just failed
@@ -256,8 +259,13 @@ def test_the_clipboard_policy_refuses_to_paste_into_the_pill():
     assert rec.log == []                         # no chord, no hide, no sleep
 
 
-def test_the_paste_policy_is_the_escape_hatch_and_changes_nothing():
-    """For a user whose compositor does hand the chord on regardless."""
+def test_the_paste_policy_is_the_escape_hatch_and_still_sends_the_chord():
+    """For a user whose compositor does hand the chord on regardless.
+
+    The pill is left holding the keyboard by design. That no longer costs the
+    chord its target: the window was read when the dictation began, before the
+    pill existed, so it is known here like anywhere else.
+    """
     rec = Recorder()
     res = _injector(rec, "paste").inject("hello")
     assert "hide pill" not in rec.log
@@ -273,7 +281,9 @@ def test_hiding_the_pill_is_never_allowed_to_stop_the_paste():
     rec = Recorder()
     inj = Injector(FakeClipboard(), rec.sender(), SETTINGS, lambda: False, lambda: None,
                    sleep=rec.sleep, pill_policy="hide", hide_pill=boom, settle_s=0.2)
-    assert inj.inject("hello").method == "fake"
+    # The window is unknown here, so the paste is reported as unverifiable -
+    # what matters to this test is that it was sent at all.
+    assert inj.inject("hello").method == "paste-blind"
     assert ("chord", [29, 47]) in rec.log
 
 
@@ -284,3 +294,179 @@ def test_an_explicit_clipboard_mode_still_wins_over_the_pill_policy():
                    lambda: False, lambda: None, sleep=rec.sleep,
                    pill_policy="clipboard", hide_pill=rec.hide_pill)
     assert inj.inject("hello").method == "clipboard"
+
+
+# -- saying where the text went ----------------------------------------------
+#: Nothing in the daemon's log said which chord a dictation was pasted with or
+#: what window it was aimed at, so a paste that silently went nowhere left
+#: nothing behind to work it out from afterwards.
+
+def test_the_chord_and_the_window_it_was_aimed_at_are_logged(caplog):
+    inj = Injector(FakeClipboard(), FakeSender(), SETTINGS, lambda: False,
+                   lambda: "Konsole", sleep=lambda s: None)
+    with caplog.at_level("INFO", logger="voice.inject.injector"):
+        inj.inject("hello")
+    assert "ctrl+shift+v" in caplog.text
+    assert "konsole" in caplog.text.lower()
+
+
+def test_an_unknown_window_is_logged_as_unknown_rather_than_left_out(caplog):
+    inj = Injector(FakeClipboard(), FakeSender(), SETTINGS, lambda: False,
+                   lambda: None, sleep=lambda s: None)
+    with caplog.at_level("INFO", logger="voice.inject.injector"):
+        inj.inject("hello")
+    assert "ctrl+v" in caplog.text
+    # The distinction that matters: "we asked and got nothing" is why the
+    # terminal chord can never be chosen, and it has to be visible.
+    assert "unknown" in caplog.text.lower()
+
+
+def test_the_window_is_asked_only_once_the_pill_is_off_screen():
+    """kdotool and friends name whatever has focus *now*.
+
+    Asked while the focus-stealing pill is still up, they name the pill - so
+    the class is never a terminal, the terminal chord can never be chosen on
+    the very desktops that will answer, and the new log line records the pill
+    as the window the paste was aimed at.
+    """
+    order = []
+
+    def window_class():
+        order.append("asked")
+        return "org.gnome.Ptyxis"
+
+    inj = Injector(FakeClipboard(), s := FakeSender(),
+                   {**SETTINGS, "terminal_classes": ["org.gnome.ptyxis"]},
+                   modifiers_held=lambda: False, window_class=window_class,
+                   sleep=lambda _: None, pill_policy="hide",
+                   hide_pill=lambda: order.append("pill hidden"))
+
+    res = inj.inject("hello")
+
+    assert order == ["pill hidden", "asked"], \
+        "the focused window was read before the pill got out of the way"
+    assert res.chord == "ctrl+shift+v"
+    assert s.chords == [[29, 42, 47]]
+
+
+# -- admitting that the paste could not be verified ---------------------------
+#: The compositor accepts the chord whatever window has focus, so a paste into
+#: a terminal that ignores ctrl+v is indistinguishable from one that worked.
+#: Where the window cannot be read at all, the result says so, and the pill
+#: turns its bare checkmark into "the text is on the clipboard, here is how".
+
+def test_a_paste_aimed_at_an_unknown_window_is_reported_as_unverified():
+    inj = Injector(FakeClipboard(), FakeSender(), SETTINGS, lambda: False,
+                   window_class=lambda: None, sleep=lambda _: None)
+    res = inj.inject("hello")
+    assert res.method == "paste-blind"
+    assert res.chord == "ctrl+v"
+
+
+def test_a_paste_into_a_window_we_could_read_is_reported_normally():
+    inj = Injector(FakeClipboard(), FakeSender(), SETTINGS, lambda: False,
+                   window_class=lambda: "firefox", sleep=lambda _: None)
+    assert inj.inject("hello").method == "fake"
+
+
+def test_an_unknown_window_is_not_flagged_when_one_chord_serves_everything():
+    # The owner has already decided: same chord for terminals and everything
+    # else, so not knowing the window costs nothing and there is nothing to say.
+    settings = {**SETTINGS, "paste_chord": "ctrl+shift+v"}
+    inj = Injector(FakeClipboard(), FakeSender(), settings, lambda: False,
+                   window_class=lambda: None, sleep=lambda _: None)
+    assert inj.inject("hello").method == "fake"
+
+
+def test_an_unverifiable_paste_never_takes_the_transcript_off_the_clipboard():
+    """The hint and the clipboard have to agree.
+
+    The pill says "Use Ctrl+Shift+V" precisely when nothing can confirm the
+    chord reached anything - so the clipboard is the only copy left. Restoring
+    the previous contents over it, which is the default, turns that hint into
+    an instruction to paste whatever happened to be on the clipboard before.
+    """
+    clip = FakeClipboard(existing="PREVIOUS CLIPBOARD")
+    inj = Injector(clip, FakeSender(), SETTINGS, lambda: False,
+                   window_class=lambda: None, sleep=lambda _: None)
+
+    res = inj.inject("the dictation")
+
+    assert res.method == "paste-blind"
+    assert res.restored is False, "the transcript was replaced by the old clipboard"
+    assert ("restore", "PREVIOUS CLIPBOARD") not in clip.log
+    assert clip.log[-1] == ("set", "the dictation")
+
+
+def test_a_verifiable_paste_still_restores_the_clipboard_as_before():
+    clip = FakeClipboard(existing="PREVIOUS CLIPBOARD")
+    inj = Injector(clip, FakeSender(), SETTINGS, lambda: False,
+                   window_class=lambda: "firefox", sleep=lambda _: None)
+
+    res = inj.inject("the dictation")
+
+    assert res.method == "fake" and res.restored is True
+    assert ("restore", "PREVIOUS CLIPBOARD") in clip.log
+
+
+# -- the window is whatever the dictation began in ---------------------------
+#: Read once, before the pill was on screen, and replayed here. The pill takes
+#: the keyboard when it maps, so a class read at paste time names the pill and
+#: never a terminal; reading it up front removes the question rather than
+#: timing a settle against it.
+
+def test_the_window_the_dictation_began_in_is_the_one_the_chord_is_chosen_for():
+    inj = Injector(FakeClipboard(), s := FakeSender(),
+                   {**SETTINGS, "terminal_classes": ["org.kde.konsole"]},
+                   modifiers_held=lambda: False,
+                   window_class=lambda: "org.kde.konsole", sleep=lambda _: None,
+                   pill_policy="hide", hide_pill=lambda: None)
+
+    res = inj.inject("hello")
+
+    assert res.chord == "ctrl+shift+v" and res.method == "fake"
+    assert s.chords == [[29, 42, 47]]
+
+
+def test_a_pill_that_could_not_be_hidden_no_longer_costs_the_chord_its_target():
+    """The hide failing used to make the window unknowable. It does not now."""
+    def boom():
+        raise RuntimeError("the helper is gone")
+
+    inj = Injector(FakeClipboard(), FakeSender(),
+                   {**SETTINGS, "terminal_classes": ["org.kde.konsole"]},
+                   modifiers_held=lambda: False,
+                   window_class=lambda: "org.kde.konsole", sleep=lambda _: None,
+                   pill_policy="hide", hide_pill=boom)
+
+    res = inj.inject("the dictation")
+
+    assert res.chord == "ctrl+shift+v"
+
+
+def test_a_hidden_pill_still_lets_the_real_window_be_trusted():
+    inj = Injector(FakeClipboard(), FakeSender(), SETTINGS, lambda: False,
+                   window_class=lambda: "konsole", sleep=lambda _: None,
+                   pill_policy="hide", hide_pill=lambda: None)
+
+    res = inj.inject("hello")
+
+    assert res.chord == "ctrl+shift+v" and res.method == "fake"
+
+
+def test_no_terminal_chord_configured_means_there_is_nothing_to_be_blind_about():
+    """An empty `inject.terminal_chord` is "one chord for every window".
+
+    Treated as a second chord we failed to reach, it made every paste
+    unverifiable: `restore_clipboard` stopped working, and the pill had no
+    chord to name so it fell back to a plain checkmark - the exact "it says it
+    worked and it didn't" illusion this is all here to remove.
+    """
+    settings = {**SETTINGS, "terminal_chord": ""}
+    inj = Injector(FakeClipboard(), FakeSender(), settings, lambda: False,
+                   window_class=lambda: None, sleep=lambda _: None)
+
+    res = inj.inject("hello")
+
+    assert res.method == "fake" and res.chord == "ctrl+v"
+    assert res.restored is True

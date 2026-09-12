@@ -418,3 +418,139 @@ def test_the_model_cache_probe_still_reports_one_that_is_not_there(
     ok, detail = default_probes()["model cache"]()
     assert ok is False
     assert "medium not downloaded yet" in detail
+
+
+# -- where the paste actually goes -------------------------------------------
+#: A terminal pastes with Ctrl+Shift+V and ignores Ctrl+V entirely. When the
+#: desktop will not say which window has the keyboard, `voice` always sends the
+#: non-terminal chord, the text stays on the clipboard, and nothing says so -
+#: the pill shows the same checkmark as a paste that worked.
+
+def _paste_target(monkeypatch, *, desktop="ubuntu:GNOME", which=None, cfg=None):
+    from voice.doctor import default_probes
+
+    monkeypatch.setattr("voice.doctor.shutil.which", which or (lambda b: None))
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", desktop)
+    monkeypatch.setattr("voice.doctor._inject_settings", lambda: cfg or {})
+    # Without this the probe opens a real socket to whatever daemon happens to
+    # be running: on the owner's own Plasma machine the live daemon answers
+    # with a working kdotool command and these assertions invert.
+    monkeypatch.setattr("voice.doctor._daemon_window_command", lambda: None)
+    monkeypatch.setattr("voice.doctor._pill_policy_now", lambda: "hide")
+    return default_probes()["paste target"]()
+
+
+def test_paste_target_warns_when_a_terminal_could_never_receive_the_text(monkeypatch):
+    ok, detail = _paste_target(monkeypatch, cfg={"mode": "paste", "paste_chord": "ctrl+v",
+                                                 "terminal_chord": "ctrl+shift+v"})
+    assert ok is False
+    assert "ctrl+shift+v" in detail and "terminal" in detail.lower()
+
+
+def test_paste_target_is_content_once_the_window_can_be_asked(monkeypatch):
+    ok, detail = _paste_target(monkeypatch, desktop="KDE",
+                               which=lambda b: "/usr/bin/kdotool" if b == "kdotool" else None,
+                               cfg={"mode": "paste", "paste_chord": "ctrl+v",
+                                    "terminal_chord": "ctrl+shift+v",
+                                    "terminal_classes": ["konsole"]})
+    assert ok is True and "kdotool" in detail
+
+
+def test_paste_target_is_content_when_one_chord_is_used_everywhere(monkeypatch):
+    ok, _ = _paste_target(monkeypatch, cfg={"mode": "paste", "paste_chord": "ctrl+shift+v",
+                                            "terminal_chord": "ctrl+shift+v"})
+    assert ok is True
+
+
+def test_paste_target_says_nothing_when_the_owner_is_not_pasting_at_all(monkeypatch):
+    ok, detail = _paste_target(monkeypatch, cfg={"mode": "clipboard", "paste_chord": "ctrl+v",
+                                                 "terminal_chord": "ctrl+shift+v"})
+    assert ok is True and "clipboard" in detail.lower()
+
+
+def test_paste_target_prefers_the_running_daemons_answer_over_its_own_shell(monkeypatch):
+    """`voice doctor` run over SSH has no graphical environment of its own.
+
+    Diagnosing from it reports "this desktop will not say which window has the
+    keyboard" on a Plasma box where the daemon resolves kdotool perfectly well
+    - a false diagnosis from the one command whose whole job is diagnosis.
+    """
+    from voice.doctor import default_probes
+
+    monkeypatch.setattr("voice.doctor.shutil.which", lambda b: None)
+    monkeypatch.delenv("XDG_CURRENT_DESKTOP", raising=False)
+    monkeypatch.setattr("voice.doctor._inject_settings",
+                        lambda: {"mode": "paste", "paste_chord": "ctrl+v",
+                                 "terminal_chord": "ctrl+shift+v",
+                                 "terminal_classes": ["konsole"]})
+    monkeypatch.setattr("voice.doctor._daemon_window_command",
+                        lambda: ("kdotool getactivewindow getwindowclassname", True))
+
+    ok, detail = default_probes()["paste target"]()
+
+    assert ok is True and "kdotool" in detail
+
+
+def test_paste_target_names_the_desktop_it_inspected_when_no_daemon_answers(monkeypatch):
+    from voice.doctor import default_probes
+
+    monkeypatch.setattr("voice.doctor.shutil.which", lambda b: None)
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "ubuntu:GNOME")
+    monkeypatch.setattr("voice.doctor._inject_settings",
+                        lambda: {"mode": "paste", "paste_chord": "ctrl+v",
+                                 "terminal_chord": "ctrl+shift+v"})
+    monkeypatch.setattr("voice.doctor._daemon_window_command", lambda: None)
+
+    ok, detail = default_probes()["paste target"]()
+
+    assert ok is False
+    # Whoever reads this has to be able to tell a real finding from a doctor
+    # that was run somewhere the daemon does not live.
+    assert "ubuntu:GNOME" in detail
+
+
+def test_paste_target_says_nothing_about_chords_when_no_chord_is_ever_sent(monkeypatch):
+    """`inject.pill_focus = clipboard` rules the chord out before the class does.
+
+    `inject.mode` is still "paste", so the mode check alone lets this through -
+    and the owner gets a notification every startup, and a ✘ from doctor, about
+    a chord that is never sent.
+    """
+    from voice.doctor import default_probes
+
+    monkeypatch.setattr("voice.doctor.shutil.which", lambda b: None)
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "ubuntu:GNOME")
+    monkeypatch.setattr("voice.doctor._daemon_window_command", lambda: None)
+    monkeypatch.setattr("voice.doctor._inject_settings",
+                        lambda: {"mode": "paste", "paste_chord": "ctrl+v",
+                                 "terminal_chord": "ctrl+shift+v",
+                                 "terminal_classes": ["konsole"]})
+    monkeypatch.setattr("voice.doctor._pill_policy_now", lambda: "clipboard")
+
+    ok, detail = default_probes()["paste target"]()
+
+    assert ok is True and "clipboard" in detail
+
+
+def test_paste_target_fails_when_the_daemon_has_given_up_on_its_window_command(monkeypatch):
+    """A configured command that stopped answering still reads as healthy.
+
+    Without this, a machine where every paste is silently downgraded to
+    "unknown window" reports `focused window read with: <cmd>` and passes -
+    which is exactly the dictation-looks-lost condition the probe exists for.
+    """
+    from voice.doctor import default_probes
+
+    monkeypatch.setattr("voice.doctor.shutil.which", lambda b: None)
+    monkeypatch.setattr("voice.doctor._inject_settings",
+                        lambda: {"mode": "paste", "paste_chord": "ctrl+v",
+                                 "terminal_chord": "ctrl+shift+v",
+                                 "terminal_classes": ["konsole"]})
+    monkeypatch.setattr("voice.doctor._pill_policy_now", lambda: "hide")
+    monkeypatch.setattr("voice.doctor._daemon_window_command",
+                        lambda: ("qdbus6 org.kde.KWin /KWin org.kde.KWin.queryWindowInfo", False))
+
+    ok, detail = default_probes()["paste target"]()
+
+    assert ok is False
+    assert "stopped answering" in detail and "queryWindowInfo" in detail

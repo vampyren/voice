@@ -39,6 +39,17 @@ PILL_POLICIES = ("none",) + PILL_FOCUS_CHOICES
 PILL_SETTLE_S = 0.15
 
 
+#: The method reported when a chord was sent but nothing could confirm where
+#: it went: the focused window could not be read, and the chord that was
+#: therefore chosen is not the one a terminal listens to. The paste may well
+#: have worked - in a browser it will have - but it may equally have been
+#: discarded, and the two are indistinguishable from in here. The pill says
+#: "Copied" - and deliberately names no chord, because with the window unknown
+#: a terminal wants Ctrl+Shift+V and a browser wants Ctrl+V, so either answer
+#: would be wrong half the time.
+BLIND_PASTE = "paste-blind"
+
+
 @dataclass(frozen=True)
 class InjectResult:
     method: str
@@ -46,12 +57,38 @@ class InjectResult:
     restored: bool
 
 
-def run_window_command(cmd: str, run: Callable = subprocess.run) -> str | None:
+#: How long the focused-window command may take. It runs between the pill
+#: being unmapped and the chord being sent, so every extra second is a second
+#: of the window in which focus has come back and nothing has been pasted yet.
+#: kdotool registers a KWin script per invocation and is the slow case.
+WINDOW_COMMAND_TIMEOUT_S = 1.0
+
+
+def run_window_command(cmd: str, run: Callable = subprocess.run,
+                      on_timeout: Callable[[], None] | None = None) -> str | None:
+    """The focused window's class, or None for "nobody would say".
+
+    `on_timeout` separates the two ways of getting None that callers must not
+    confuse: no window focused (ask again next time) and no answer arriving
+    (something is wrong with the command itself).
+    """
     if not cmd:
         return None
     try:
-        cp = run(cmd, shell=True, capture_output=True, text=True, timeout=1)
+        cp = run(cmd, shell=True, capture_output=True, text=True,
+                 timeout=WINDOW_COMMAND_TIMEOUT_S)
         return cp.stdout.strip() or None if cp.returncode == 0 else None
+    except subprocess.TimeoutExpired:
+        if on_timeout is not None:
+            on_timeout()
+        # Worth its own line: this is not "the desktop has no answer" but "the
+        # answer did not arrive in time", and the two are indistinguishable
+        # downstream - both pick the non-terminal chord, while `voice doctor`
+        # and the startup warning, which only see that a command is configured,
+        # both report all-clear.
+        log.warning("%r did not name the focused window within %.1fs; pasting as "
+                    "though the window were unknown", cmd, WINDOW_COMMAND_TIMEOUT_S)
+        return None
     except (OSError, subprocess.SubprocessError):
         return None
 
@@ -113,11 +150,27 @@ class Injector:
         #: run, in seconds. Only the `hide` policy has anything to wait for.
         self._fill_wait = fill_wait
 
-    def _chord(self) -> str:
+    def _chord(self) -> tuple[str, bool]:
+        """The chord to send, and whether we actually knew what we were aiming at.
+
+        `window_class` reports the window this dictation BEGAN in, read before
+        the pill was on screen. That matters: a pill with no layer-shell
+        surface takes the keyboard when it maps, so a class read at paste time
+        names the pill, never a terminal. Reading it up front removes the
+        question entirely - there is no focus to distrust and no settle to race.
+        """
         cls = (self._window_class() or "").lower()
         terminals = [str(t).lower() for t in self._settings.get("terminal_classes", [])]
-        return self._settings.get("terminal_chord", "ctrl+shift+v") if cls and cls in terminals \
+        chord = self._settings.get("terminal_chord", "ctrl+shift+v") if cls and cls in terminals \
             else self._settings.get("paste_chord", "ctrl+v")
+        # The one line that makes a paste which went nowhere reconstructable
+        # afterwards. "unknown" is the interesting case and is said explicitly:
+        # it means the desktop would not name the focused window, so the
+        # terminal chord could never have been chosen however the window was
+        # configured - which is exactly how a dictation into a terminal comes
+        # to vanish while the pill still shows a checkmark.
+        log.info("pasting with %s into %s", chord, cls or "an unknown window")
+        return chord, bool(cls)
 
     def inject(self, text: str) -> InjectResult:
         if self._settings.get("mode", "paste") == "clipboard":
@@ -139,7 +192,15 @@ class Injector:
         while self._modifiers_held() and waited < MODIFIER_WAIT_S:
             self._sleep(POLL_S)
             waited += POLL_S
-        chord = self._chord()
+        # The pill gets out of the way first, and only then is the desktop
+        # asked what has the keyboard. Asked in the other order - which is how
+        # this ran - a focus-stealing pill is the answer, so the class is never
+        # a terminal, the terminal chord can never be chosen on the desktops
+        # that do answer, and the log records the pill as the window the paste
+        # was aimed at. The cost is that an unparseable chord now blinks the
+        # pill before it is found to be unparseable, which is worth it.
+        self._yield_focus()
+        chord, window_known = self._chord()
         try:
             codes = parse_chord(chord)
         except ValueError as exc:
@@ -147,25 +208,51 @@ class Injector:
             # paste failure; raising here skipped the restore and lost the text.
             log.warning("invalid paste chord %r, text left on clipboard: %s", chord, exc)
             return InjectResult("clipboard-only", chord, False)
-        self._yield_focus()
         try:
             self._sender.send_chord(codes)
         except KeySendError as exc:
             log.warning("paste failed, text left on clipboard: %s", exc)
             return InjectResult("clipboard-only", chord, False)
         self._sleep(SETTLE_S)
+        method = self._method(window_known)
         restored = False
-        if self._settings.get("restore_clipboard", True):
+        # Never restore over a transcript nobody can confirm was delivered.
+        # `BLIND_PASTE` makes the pill say "Copied", and the clipboard is the
+        # only copy that can refer to - putting the previous contents back
+        # would make the pill's one true statement false.
+        if method != BLIND_PASTE and self._settings.get("restore_clipboard", True):
             restored = self._clip.restore(snap)
-        return InjectResult(self._sender.name, chord, restored)
+        return InjectResult(method, chord, restored)
+
+    def _method(self, window_known: bool) -> str:
+        """What to call a paste that has just been sent. See `BLIND_PASTE`.
+
+        Only the case that is genuinely unverifiable is flagged. Knowing the
+        window means the chord was chosen for it; and if one chord serves every
+        window, not knowing costs nothing, because there was never a second
+        chord it could have been.
+        """
+        if window_known:
+            return self._sender.name
+        paste = str(self._settings.get("paste_chord", "ctrl+v")).strip().lower()
+        terminal = str(self._settings.get("terminal_chord", "ctrl+shift+v")).strip().lower()
+        # An empty terminal chord is "one chord for every window", the same as
+        # setting both the same: there is no second chord we failed to reach,
+        # so not knowing the window costs nothing and the paste is as verifiable
+        # as any other. Treated as a difference, it made every paste blind on a
+        # config that had simply switched terminal handling off.
+        return self._sender.name if not terminal or paste == terminal else BLIND_PASTE
 
     def _yield_focus(self) -> None:
         """Give the keyboard back before the chord, if the pill is holding it.
 
-        Last thing before `send_chord`, so a chord that never gets sent - an
-        unparseable one - does not blink the pill for nothing. The pill is
-        decoration: a helper that has already died must not cost us the text,
-        so a failure here is logged and the paste goes ahead regardless.
+        Nothing here decides the chord any more - the window was read when the
+        dictation began, before this pill ever appeared. This only gets the
+        keyboard back before the chord goes out.
+
+        The pill is decoration: a helper that has already died must not cost us
+        the text, so a failure here is logged and the paste goes ahead anyway.
+
         """
         if self._pill_policy != "hide" or self._hide_pill is None:
             return

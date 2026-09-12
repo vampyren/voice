@@ -45,7 +45,9 @@ def _model(state, levels=(1.0,) * 30, text=None, age=0.0, lang="en", to=None,
     if state != "recording":
         if to:
             model.set_language(to)
-        model.set_state(state, text=text, now=clock.t)
+        # `to` is what makes this a language switch, so it is what tells the
+        # notice to animate the chip - the model no longer infers that.
+        model.set_state(state, text=text, now=clock.t, swaps_language=bool(to))
     if age:
         model.tick(clock.advance(age))
     return model
@@ -608,3 +610,27 @@ def test_a_done_state_with_its_own_words_draws_those_words(tmp_path):
     assert img.count(lit, **label) != plain.count(lit, **label)   # and it is not "Inserted"
     # Inside the pill: a label wider than the well would be clipped by the capsule.
     assert img.count(lit, x0=natural_width(model) - 4, x1=natural_width(model)) == 0
+
+
+def test_a_long_done_label_is_cut_down_rather_than_run_through_the_timer():
+    """The daemon's wording carries a user-configurable chord.
+
+    "Copied · Ctrl+Shift+V" measured 156 px against a 132 px well and drew
+    straight over the elapsed time to its right.
+    """
+    from voice.ui.overlay_draw import done_label
+
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 600, 100)
+    ctx = cairo.Context(surface)
+    room = od.WELL_W
+
+    for text in ("Inserted", "Copied · Ctrl+V", "Use Ctrl+Shift+V"):
+        assert done_label(ctx, text, 1.0) == text, f"{text!r} should not be touched"
+
+    monster = "Use Ctrl+Shift+Alt+Super+Backspace"
+    cut = done_label(ctx, monster, 1.0)
+    assert cut != monster and cut.endswith("…")
+    # Measured the way it is drawn, tracking included - no tolerance needed.
+    cut_w = od.text_width(ctx, cut, od.LABEL_SIZE, od.LABEL_TRACK)
+    assert cut_w <= room
+    assert cut_w < od.text_width(ctx, monster, od.LABEL_SIZE, od.LABEL_TRACK)

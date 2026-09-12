@@ -177,8 +177,31 @@ class Dictation:
         self._timer_factory = timer_factory
         self._timer = None
         self._lock = threading.RLock()
+        #: Orders `on_state` callbacks against each other, and makes the
+        #: generation check in `_set` decisive rather than a guess.
+        #:
+        #: Lock order is `_lock` -> `_announce_lock`, never the reverse. It is
+        #: NOT true that `_lock` is always free while this is held: the command
+        #: paths - start, stop, cancel, recall, retry, and `_fail`/`_on_guard`
+        #: reached from them - all call `_set` with `_lock` already held, so
+        #: `on_state` runs under both on those. Only the worker's own
+        #: transitions announce with `_lock` free, which is what keeps a
+        #: finished dictation from parking the hotkey thread.
+        #:
+        #: The consequence, and it is a real constraint on callers: an
+        #: `on_state` handler must never call back into this object. Today's
+        #: handler does not - it emits a Qt signal and writes to the pill's
+        #: socket - but one that took `_lock` would deadlock a command thread
+        #: against the worker.
+        self._announce_lock = threading.Lock()
+        #: Bumped by every `_set`, so an announcement can tell whether the
+        #: state it is about is still the one the pipeline is in.
+        self._ui_gen = 0
         self._state = State.IDLE
         self.on_state: Callable[[State, str], None] = lambda s, d: None
+        #: Told when a dictate press arrives in a state that cannot act on it,
+        #: so the pill can say "still working" instead of the press vanishing.
+        self.on_busy: Callable[[State], None] = lambda s: None
         self.last_error: str | None = None
         #: The focus-stealing-pill explanation is worth saying once per daemon
         #: run, not once per dictation: it describes the desktop, and nothing
@@ -213,13 +236,46 @@ class Dictation:
         return self._state
 
     def _set(self, state: State, detail: str = "") -> None:
-        self._state = state
-        self._arm_guard(state)
-        log.debug("state %s %s", state.value, detail)
-        try:
-            self.on_state(state, detail)
-        except Exception:
-            log.exception("on_state callback failed")
+        # The write and the backstop behind it are one step. They were two, and
+        # a hotkey press landing between them saw an IDLE the worker had
+        # written but not finished handing back: it started a recording, and
+        # the worker's own `_arm_guard(IDLE)`, arriving a moment later,
+        # cancelled the watchdog that recording had just armed. The daemon was
+        # then recording with no watchdog and a pill already showing the
+        # previous dictation's checkmark.
+        with self._lock:
+            self._state = state
+            self._arm_guard(state)
+            self._ui_gen += 1
+            generation = self._ui_gen
+        # INFO, not DEBUG. A daemon that ran for thirteen hours wrote
+        # twenty-five journal lines and not one of them said what state it was
+        # in, so a misbehaving dictation left nothing to reconstruct it from.
+        # Four lines per dictation is a price worth paying for that.
+        log.info("state %s %s", state.value, detail)
+        # `on_state` reaches the tray and then the pill helper over a socket.
+        # On the worker's own transitions - the ones that end a dictation - it
+        # runs with `_lock` free, which is what stops a finished dictation
+        # parking the hotkey thread. The command paths call `_set` with `_lock`
+        # already held and cannot drop it without reopening the races above, so
+        # there `on_state` does run under it. See `_announce_lock`, whose own
+        # job is two things `_lock` cannot do: keep announcements in the order
+        # the transitions happened, and make the generation check below
+        # decisive rather than a guess.
+        #
+        # The check is what stops the pill being repainted by a state the
+        # pipeline has already left. The worker writes IDLE, a hotkey press
+        # starts a whole recording, and the worker's IDLE announcement then
+        # arrives late and paints the previous dictation's checkmark over a
+        # live recording - which then auto-hides, leaving the owner recording
+        # with no pill at all.
+        with self._announce_lock:
+            if generation != self._ui_gen:
+                return
+            try:
+                self.on_state(state, detail)
+            except Exception:
+                log.exception("on_state callback failed")
 
     # -- the backstop ---------------------------------------------------------
     #: No state may be terminal. Every non-idle state is entered with a timer
@@ -382,8 +438,13 @@ class Dictation:
                     if kind == "press":
                         self.toggle()
                 elif kind == "press":
-                    self.start()
+                    # Push-to-talk, and the default mode: the press has to be
+                    # answered here too, or the silence is only fixed for the
+                    # people who switched to toggle.
+                    self._begin()
                 else:
+                    # The release that pairs with a refused press has nothing
+                    # to stop; saying so twice would be worse than not at all.
                     self.stop()
             elif name == "cancel" and kind == "press":
                 self.cancel()
@@ -478,11 +539,50 @@ class Dictation:
             attempt = self._next_attempt(pcm, trimmed=False)
         self._executor(lambda: self._process(pcm, attempt))
 
+    def _begin(self) -> None:
+        """Start a recording, or say why not. A press must never just vanish.
+
+        The read and the command it chooses are one step. They were two, and
+        anything that moved the state in between - the max-seconds timer's own
+        stop(), the worker finishing - made the command re-check, find a state
+        it was not written for, and return in silence. `_lock` is an RLock, so
+        start() re-enters it; `_busy` is called after it is released, because
+        that reaches the pill.
+        """
+        with self._lock:
+            if self._state == State.IDLE:
+                self.start()
+                return
+            state = self._state
+        self._busy(state)
+
     def toggle(self) -> None:
-        if self._state == State.IDLE:
-            self.start()
-        elif self._state == State.RECORDING:
-            self.stop()
+        with self._lock:
+            state = self._state
+            if state == State.IDLE:
+                self.start()
+                return
+            if state == State.RECORDING:
+                self.stop()
+                return
+        # TRANSCRIBING, INJECTING and ERROR have nothing to toggle, and saying
+        # so is the entire point: the silence that used to be here is what sent
+        # the owner pressing a second time, and that second press landed after
+        # the pipeline had gone idle and started a recording instead of
+        # stopping one. Reported from outside the lock, because `_busy` reaches
+        # the pill and nothing that talks to another process belongs under the
+        # lock every hotkey press has to take.
+        self._busy(state)
+
+    def _busy(self, state: State) -> None:
+        """Report a dictate press the pipeline is in no position to act on."""
+        log.info("dictate pressed while %s; there is nothing to toggle", state.value)
+        try:
+            self.on_busy(state)
+        except Exception:
+            # Called on the hotkey listener thread: a broken pill must not take
+            # the listener down and with it every shortcut for the session.
+            log.exception("on_busy callback failed")
 
     def cancel(self) -> None:
         """Abandon whatever is in flight: the recording, or the conversion.

@@ -24,21 +24,26 @@ def has(*installed):
 
 
 def test_the_kwin_picker_is_never_chosen_automatically():
-    """`queryWindowInfo` may be an interactive window picker.
+    """`org.kde.KWin.queryWindowInfo` is an interactive window picker.
 
-    Running one before every paste would put a crosshair grab in front of the
-    owner, and the pipeline's timeout kills only the shell - `qdbus` survives
-    holding the grab. Until it is shown to answer unattended, a Plasma box with
-    qdbus and nothing else has to say it cannot tell.
+    Measured on Plasma 6: untouched it times out with no output, and it only
+    answers once a window is clicked. Running one before every paste would put
+    a crosshair grab in front of the owner, so a Plasma box with qdbus and
+    nothing else has to say it cannot tell.
     """
-    assert default_window_command(env(XDG_CURRENT_DESKTOP="KDE"), has("qdbus6")) == ""
-    assert default_window_command(env(XDG_CURRENT_DESKTOP="KDE"), has("qdbus")) == ""
+    for desktop in ("KDE", "plasma"):
+        assert default_window_command(env(XDG_CURRENT_DESKTOP=desktop), has("qdbus6")) == ""
+        assert default_window_command(env(XDG_CURRENT_DESKTOP=desktop), has("qdbus")) == ""
 
 
-def test_the_kwin_command_is_still_offered_for_an_owner_who_has_checked_it():
-    from voice.inject.window import KWIN_QUERY
+def test_nothing_offers_the_kwin_picker_as_a_command():
+    """It must not come back as a copy-pasteable suggestion either."""
+    import voice.inject.window as window
 
-    assert "queryWindowInfo" in KWIN_QUERY and "resourceClass" in KWIN_QUERY
+    values = [v for k, v in vars(window).items()
+              if isinstance(v, str) and not k.startswith("__")]
+    assert not [v for v in values if "queryWindowInfo" in v and "$" not in v], \
+        "queryWindowInfo is a window picker; it cannot be a window command"
 
 
 def test_kdotool_is_used_when_it_is_there():
@@ -187,53 +192,3 @@ def test_the_sway_command_reads_an_xwayland_client():
 def test_the_sway_command_says_nothing_rather_than_the_word_null():
     assert _run_sway_command(SWAY_TREE_NOTHING_FOCUSED) == "", \
         'an unnamed focused node must read as unknown, not as a window called "null"'
-
-
-# -- the KWin command, run against real `queryWindowInfo` output -------------
-#: Captured from the owner's Plasma 6 machine with Konsole focused. The class
-#: KWin reports, `org.kde.konsole`, is already in the default
-#: `inject.terminal_classes`, so this is the whole fix on that desktop - and it
-#: needs nothing installed, which was the requirement.
-
-KWIN_OUTPUT = pathlib.Path(__file__).parent / "_fixtures" / "kwin-querywindowinfo.txt"
-
-
-def _run_kwin_command(fixture=KWIN_OUTPUT):
-    from voice.inject.window import KWIN_QUERY
-    cmd = KWIN_QUERY.format(qdbus="qdbus6")
-    call, _, rest = cmd.partition(" | ")
-    done = subprocess.run(f"cat {fixture} | {rest}", shell=True,
-                          capture_output=True, text=True, timeout=5)
-    return done.stdout.strip()
-
-
-def test_the_kwin_command_pulls_the_class_out_of_real_querywindowinfo_output():
-    assert _run_kwin_command() == "org.kde.konsole"
-
-
-def test_that_class_is_one_the_default_config_already_calls_a_terminal():
-    from voice.config import DEFAULT_CONFIG
-
-    assert "org.kde.konsole" in DEFAULT_CONFIG, \
-        "KWin reports org.kde.konsole; inject.terminal_classes has to list it"
-
-
-def test_the_kwin_command_says_nothing_when_kwin_says_nothing(tmp_path):
-    empty = tmp_path / "empty.txt"
-    empty.write_text("")
-    assert _run_kwin_command(empty) == ""
-
-
-def test_the_caption_line_is_not_mistaken_for_the_class(tmp_path):
-    # `caption: ~ : fish - Konsole` also contains ": ", and a looser parse
-    # would take the window title for its class.
-    odd = tmp_path / "odd.txt"
-    odd.write_text("caption: ~ : fish - Konsole\nresourceClass: org.kde.konsole\n")
-    assert _run_kwin_command(odd) == "org.kde.konsole"
-
-
-def test_no_terminal_chord_configured_is_not_an_unreachable_one():
-    unreachable, _ = terminal_chord_is_unreachable(
-        window_command="", paste_chord="ctrl+v", terminal_chord="",
-        terminal_classes=["konsole"])
-    assert not unreachable

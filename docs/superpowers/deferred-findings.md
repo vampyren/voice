@@ -108,14 +108,12 @@ branch.
   silently discards the owner's previous clipboard contents on every dictation
   on GNOME. Documented in `config.py`; not surfaced by `voice doctor`, and no
   way to opt out short of setting one chord for every window.
-- `voice/inject/window.py`: the KWin `queryWindowInfo` command is written and
-  tested (`KWIN_QUERY`, plus a fixture of real output) but deliberately NOT the
-  Plasma default, because two reviews flagged it as likely
-  `startInteractiveWindowSelection()` - a crosshair picker - and one capture of
-  its output cannot tell an instant answer from a click. Settle it with
-  `time timeout 5 qdbus6 org.kde.KWin /KWin org.kde.KWin.queryWindowInfo`,
-  touching nothing; if it returns immediately, promote it in
-  `default_window_command` and this becomes the no-install Plasma answer.
+- ~~the KWin `queryWindowInfo` command is written and tested but not the Plasma
+  default, pending verification~~ - **verified 2026-09-12 on Plasma 6: it is an
+  interactive window picker.** Untouched it times out with no output; it answers
+  only after a window is clicked. Removed from the codebase entirely, with the
+  measurement recorded in `voice/inject/window.py` so nobody adds it back. The
+  fixture and its parser tests went with it.
 
 ## Accepted, with reasons (not defects)
 

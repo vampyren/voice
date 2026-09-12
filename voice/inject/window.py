@@ -19,25 +19,23 @@ from typing import Callable, Mapping
 #: Said wherever the reason has to be explained: doctor, the startup warning.
 NO_WINDOW_ANSWER = "this desktop will not say which window has the keyboard"
 
-#: Plasma through KWin's own D-Bus interface, which needs nothing installed -
-#: qdbus ships with Plasma, and `resourceClass` is exactly the form
-#: `inject.terminal_classes` already lists.
+#: NOT here, and never to be added: `org.kde.KWin.queryWindowInfo`.
 #:
-#: NOT a default, deliberately. KWin's `DBusInterface::queryWindowInfo()` sets
-#: a delayed reply and calls `startInteractiveWindowSelection()` - the
-#: crosshair-and-click flow behind "Detect Window Properties" in KWin Rules. If
-#: that is what it does, running it before every paste puts an input grab in
-#: front of the owner, and because the command is a pipeline the 1 s timeout
-#: kills only `/bin/sh` while `qdbus` survives holding the grab until somebody
-#: clicks or presses Escape. One capture of its output proves the shape of the
-#: answer, not that it arrived without a click.
+#: It looks perfect - it names the focused window, `resourceClass` is exactly
+#: the form `inject.terminal_classes` uses, and qdbus ships with Plasma so it
+#: would need nothing installed. It is an interactive window PICKER. KWin sets
+#: a delayed reply and waits for the user to click a window; the cursor becomes
+#: a crosshair. Measured on Plasma 6:
 #:
-#: To settle it, on a Plasma session, touching nothing while it runs:
-#:     time timeout 5 qdbus6 org.kde.KWin /KWin org.kde.KWin.queryWindowInfo
-#: Returning immediately makes this safe to promote to the default below.
-KWIN_QUERY = ("{qdbus} org.kde.KWin /KWin org.kde.KWin.queryWindowInfo "
-              "| sed -n 's/^resourceClass: //p' | head -n1")
-
+#:     $ time timeout 5 qdbus6 org.kde.KWin /KWin org.kde.KWin.queryWindowInfo
+#:     (no output)                        Executed in 5.01 secs   <- timed out
+#:     $ ... and again, clicking a window
+#:     resourceClass: org.kde.konsole     Executed in 3.26 secs   <- the click
+#:
+#: Used here it would put a grab in front of every paste, and because the
+#: command would be a pipeline the timeout kills only the shell - `qdbus`
+#: survives holding the grab until somebody clicks. One capture of its output
+#: cannot tell an instant answer from a click, which is how it nearly shipped.
 #: The fallback for a Plasma that predates qdbus6, or where the owner already
 #: has kdotool. Never required, only used if it happens to be there.
 _KDOTOOL = "kdotool getactivewindow getwindowclassname"

@@ -101,11 +101,11 @@ yours to delete.
 | **GNOME** | Settings → Keyboard → Keyboard Shortcuts → `voice` |
 | **KDE Plasma** | Settings window → **Change…** next to *dictate* |
 
-**2. On KDE, let voice see which window you are in** — optional, but it is what makes
+**2. On KDE, install `kdotool`** (it is in the AUR) — optional, but it is what makes
 pasting into a terminal work. Terminals need Ctrl+Shift+V and everything else needs
-Ctrl+V, and voice can only choose correctly if it can ask. Either install `kdotool` (it
-is in the AUR), or use KWin's own D-Bus interface, which needs nothing installed —
-[both routes, with the check to run first](docs/desktops.md).
+Ctrl+V, and voice can only choose correctly if something will tell it which window you
+are in. `kdotool` is the only thing on Plasma that
+[answers without asking you to click](docs/desktops.md).
 
 GNOME will not tell any app which window has focus, so voice cannot do this there. It
 still pastes — it just cannot pick between the two shortcuts, or confirm the paste

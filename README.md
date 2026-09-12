@@ -18,20 +18,28 @@ still runs about 3× faster than you speak. [Why](docs/install.md#do-i-need-a-gp
 
 ## Install
 
-### Arch / CachyOS — the supported way
+### Arch / CachyOS — one command, nothing to build
+
+```bash
+sudo pacman -U https://github.com/vampyren/voice/releases/download/v0.1.0/voice-0.1.0-2-x86_64.pkg.tar.zst
+voice doctor
+```
+
+That is the whole install — the app, its locked dependencies, the desktop entry, the
+autostart entry and the udev rule. Remove it with `pacman -R voice`.
+
+This is the **CPU build**, which is all most people need: the GPU only makes
+transcription faster, and on a plain CPU it still runs about 3× faster than you speak.
+[The measurements →](docs/install.md#do-i-need-a-gpu)
+
+### Want CUDA, or want to build it yourself?
 
 ```bash
 git clone https://github.com/vampyren/voice ~/Apps/voice
 cd ~/Apps/voice/packaging
-makepkg -si
+makepkg -si                  # adds ~3 GB of CUDA runtime; VOICE_GPU=0 leaves it out
 voice doctor
 ```
-
-One package: the app, its locked dependencies, the CUDA 12 runtime, the udev rule, the
-desktop entry and autostart. Remove it with `pacman -R voice`.
-
-No NVIDIA card? `VOICE_GPU=0 makepkg -si` — same package, ~3 GB smaller, transcribes on
-CPU.
 
 ### Any distro — from the checkout
 

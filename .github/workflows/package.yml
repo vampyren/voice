@@ -38,7 +38,12 @@ jobs:
         # whatever was checked out, so a tag builds that tag's code.
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git branch -f main HEAD
+          # A tag build arrives detached and needs the branch created; a manual
+          # run on main is already on it, and `git branch -f` refuses to move a
+          # branch that is checked out.
+          if [ "$(git rev-parse --abbrev-ref HEAD)" != "main" ]; then
+            git branch -f main HEAD
+          fi
           git log --oneline -1 main
 
       - name: Build

@@ -467,6 +467,53 @@ def test_the_model_cache_probe_covers_every_model_a_language_can_select(
     assert "models--KBLab--kb-whisper-large" in detail
 
 
+def test_the_model_cache_probe_looks_where_the_config_says(
+        isolated_xdg, monkeypatch, tmp_path):
+    """With stt.model_dir set, the Hugging Face cache is the wrong place to
+    look - and the path doctor prints is the one the owner has to go and find."""
+    from voice.config import Config
+    from voice.doctor import default_probes
+
+    chosen = tmp_path / "Apps" / "models"
+    cfg = Config.load()
+    cfg.set("stt.profiles.local.model", "medium")
+    cfg.set("stt.model_dir", str(chosen))
+    cfg.set("general.language_profiles", {})
+    cfg.save()
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+    (tmp_path / "hf" / "hub" / "models--Systran--faster-whisper-medium").mkdir(parents=True)
+
+    ok, detail = default_probes()["model cache"]()
+    assert ok is False, f"it found the model in the cache it was told not to use: {detail}"
+    assert str(chosen) in detail, f"nothing said where it will go instead: {detail}"
+
+    (chosen / "models--Systran--faster-whisper-medium").mkdir(parents=True)
+    ok, detail = default_probes()["model cache"]()
+    assert ok is True, detail
+    assert str(chosen / "models--Systran--faster-whisper-medium") in detail
+    assert "hub" not in detail, f"that layout belongs to the cache, not here: {detail}"
+
+
+def test_the_model_cache_probe_says_when_it_cannot_write_where_it_was_told(
+        isolated_xdg, monkeypatch, tmp_path):
+    """A directory that cannot be created fails the download, and the message
+    that reaches the pill blames the GPU. Say it here instead."""
+    from voice.config import Config
+    from voice.doctor import default_probes
+
+    closed = tmp_path / "closed"
+    closed.mkdir(mode=0o500)
+    cfg = Config.load()
+    cfg.set("stt.profiles.local.model", "medium")
+    cfg.set("stt.model_dir", str(closed / "models"))
+    cfg.set("general.language_profiles", {})
+    cfg.save()
+
+    ok, detail = default_probes()["model cache"]()
+    assert ok is False
+    assert "cannot be written" in detail and str(closed / "models") in detail
+
+
 def test_the_model_cache_probe_asks_the_disk_once_per_model(
         isolated_xdg, monkeypatch, tmp_path):
     """Two `exists()` calls picked the list and the wording independently.
@@ -494,7 +541,7 @@ def test_the_model_cache_probe_asks_the_disk_once_per_model(
             return len(asked) > 1
 
     monkeypatch.setattr("voice.doctor._hub_directory",
-                        lambda model: Flipping(tmp_path / "hub" / model))
+                        lambda model, root=None: Flipping(tmp_path / "hub" / model))
 
     ok, detail = default_probes()["model cache"]()
     assert asked == [1], f"the disk was asked {len(asked)} times for one model"

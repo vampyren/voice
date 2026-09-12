@@ -289,13 +289,29 @@ def _hub_repository(model: str) -> str:
     return _MODELS.get(model, model)
 
 
-def _hub_directory(model: str) -> Path:
-    """Where Hugging Face keeps `model` on this machine, downloaded or not."""
+def _hub_directory(model: str, root: Path | None = None) -> Path:
+    """Where `model` lives on this machine, downloaded or not.
+
+    `root` is `stt.model_dir`. Hugging Face lays its own cache out with a `hub`
+    level in it and a directory given to it explicitly without one, so this is
+    not the same path with a different prefix.
+    """
+    name = f"models--{_hub_repository(model).replace('/', '--')}"
+    if root is not None:
+        return Path(root) / name
     home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
-    return home / "hub" / f"models--{_hub_repository(model).replace('/', '--')}"
+    return home / "hub" / name
 
 
-def _models_in_use() -> list[str]:
+def _first_existing(path: Path) -> Path:
+    """The nearest ancestor of `path` that exists - what a write would land in."""
+    for candidate in (path, *path.parents):
+        if candidate.exists():
+            return candidate
+    return path
+
+
+def _models_in_use() -> list[tuple[str, Path | None]]:
     """Every local model a dictation could reach, active profile first.
 
     Not the active profile alone: a language profile map means the model that
@@ -309,7 +325,8 @@ def _models_in_use() -> list[str]:
     profiles = cfg.get("stt.profiles", {}) or {}
     active, _ = cfg.stt_profile()
     names = [active, *cfg.language_profiles().values()]
-    models: list[str] = []
+    shared = cfg.model_dir()
+    models: list[tuple[str, Path | None]] = []
     for name in names:
         profile = profiles.get(name)
         # A map naming a profile that is gone is already a config error, and a
@@ -317,8 +334,10 @@ def _models_in_use() -> list[str]:
         if not isinstance(profile, dict) or profile.get("backend") != "local":
             continue
         model = str(profile.get("model", "")).strip()
-        if model and model not in models:
-            models.append(model)
+        own = str(profile.get("model_dir") or "").strip()
+        root = Path(own).expanduser() if own else shared
+        if model and not any(model == m for m, _ in models):
+            models.append((model, root))
     return models
 
 
@@ -326,9 +345,15 @@ def _model_cache() -> tuple[bool, str]:
     models = _models_in_use()
     if not models:
         return True, "nothing runs locally; no model to cache"
+    unwritable = _unwritable_roots(models)
+    if unwritable:
+        return False, (", ".join(unwritable) + " - stt.model_dir cannot be written. "
+                       "The download fails there, and the error the pill shows "
+                       "blames the GPU. Create it, or point stt.model_dir somewhere "
+                       'you own; "" puts the models back in the Hugging Face cache.')
     found, missing = [], []
-    for model in models:
-        hub = _hub_directory(model)
+    for model, root in models:
+        hub = _hub_directory(model, root)
         # Asked once. Two calls chose the list and the wording independently,
         # so a download finishing between them read as missing *and* found.
         if hub.exists():
@@ -340,8 +365,28 @@ def _model_cache() -> tuple[bool, str]:
     if missing:
         when = ("the first dictation in that language downloads it" if len(models) > 1
                 else "the first dictation downloads it")
-        return False, ", ".join([*missing, *found]) + f" ({when})"
+        # Where it will land, when that is somewhere the owner chose. Without
+        # it the line says a model is missing and nothing about where to look.
+        roots = sorted({str(root) for _, root in models if root is not None})
+        into = f", into {' and '.join(roots)}" if roots else ""
+        return False, ", ".join([*missing, *found]) + f" ({when}{into})"
     return True, ", ".join(found)
+
+
+def _unwritable_roots(models: list[tuple[str, Path | None]]) -> list[str]:
+    """Configured directories nothing could be downloaded into, named once each.
+
+    Only a directory the owner chose: the Hugging Face cache is Hugging Face's
+    to create, and has been working on this machine for as long as it has held
+    anything.
+    """
+    out: list[str] = []
+    for _, root in models:
+        if root is None or str(root) in out:
+            continue
+        if not os.access(_first_existing(root), os.W_OK | os.X_OK):
+            out.append(str(root))
+    return out
 
 
 def _language_profiles() -> tuple[bool, str]:

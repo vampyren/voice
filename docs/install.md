@@ -99,7 +99,20 @@ shared with any other Hugging Face tool on the machine.
 | `KBLab/kb-whisper-large` | Swedish | ~3.1 GB |
 
 Both ship in the default config, paired to a language. Dictating only in English
-never fetches the Swedish one. If that is more disk than you want, `large-v3-turbo`
+never fetches the Swedish one.
+
+**To keep them somewhere else**, set `stt.model_dir` in `~/.config/voice/config.toml`:
+
+```toml
+[stt]
+model_dir = "~/Apps/models"
+```
+
+`voice reload`, and the next download lands there instead — `voice doctor`'s **model
+cache** line prints the path it will use. Models already downloaded are not moved: the
+new directory starts empty and fills on first use, so clear the old ones by hand if you
+want the disk back. Leave it `""` to use the Hugging Face cache, which is shared with
+every other tool on the machine that uses it. If that is more disk than you want, `large-v3-turbo`
 (~1.6 GB) decodes about 3× faster and is a little worse — see
 [language profiles](usage.md#model-per-language).
 

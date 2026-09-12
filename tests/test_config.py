@@ -343,6 +343,54 @@ def test_the_shipped_swedish_profile_is_the_same_one_the_settings_window_adds(is
     assert shipped == PROFILE_TEMPLATES["local-swedish"]
 
 
+def test_model_dir_is_empty_by_default_and_means_the_hugging_face_cache(isolated_xdg):
+    cfg = Config.load()
+    assert cfg.get("stt.model_dir") == ""
+    assert cfg.model_dir() is None
+    assert cfg.errors() == []
+
+
+def test_model_dir_expands_a_home_relative_path(isolated_xdg):
+    """`~/Apps/models` is what anyone types; faster-whisper would make a
+    directory literally called "~"."""
+    from pathlib import Path
+
+    cfg = Config.load()
+    cfg.set("stt.model_dir", "~/Apps/models")
+    assert cfg.model_dir() == Path.home() / "Apps" / "models"
+
+
+def test_model_dir_reaches_the_profile_that_loads_the_model(isolated_xdg):
+    """One setting, every local profile: the English and the Swedish model
+    belong in the same place, and nobody wants to write the path twice."""
+    cfg = Config.load()
+    cfg.set("stt.model_dir", "/srv/models")
+    for name in ("local", "local-swedish"):
+        cfg.set("stt.active", name)
+        assert cfg.stt_profile()[1]["model_dir"] == "/srv/models"
+
+
+def test_a_profile_can_still_name_its_own_directory(isolated_xdg):
+    cfg = Config.load()
+    cfg.set("stt.model_dir", "/srv/models")
+    cfg.set("stt.profiles.local.model_dir", "/mnt/fast/models")
+    assert cfg.stt_profile()[1]["model_dir"] == "/mnt/fast/models"
+
+
+def test_a_cloud_profile_is_not_given_a_model_directory(isolated_xdg):
+    """There is nothing to download; a stray key would only confuse a reader."""
+    cfg = Config.load()
+    cfg.set("stt.model_dir", "/srv/models")
+    cfg.set("stt.active", "openai")
+    assert "model_dir" not in cfg.stt_profile()[1]
+
+
+def test_a_model_dir_that_is_not_a_path_is_a_config_error(isolated_xdg):
+    cfg = Config.load()
+    cfg.set("stt.model_dir", 5)
+    assert [e for e in cfg.errors() if "model_dir" in e]
+
+
 def test_unset_removes_one_key_and_leaves_the_comments_around_it(isolated_xdg):
     """Clearing a pairing must not cost the comment that explains the table.
 

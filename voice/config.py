@@ -73,6 +73,12 @@ overlay_allow_fallback = false   # show the pill without gtk4-layer-shell, accep
 active = "local"           # name of a [stt.profiles.*] table
 timeout_seconds = 300      # give up on a transcription still running after this long;
                            # the recording is kept for "Retry last recording"
+model_dir = ""             # where the downloaded speech models are kept. "" = the
+                           # Hugging Face cache (~/.cache/huggingface), shared with
+                           # every other tool on the machine that uses it. Set a path
+                           # - "~/Apps/models" - and voice keeps its models there
+                           # instead. Models already downloaded are not moved: the
+                           # new directory starts empty and fills on first use.
 
 [stt.profiles.local]
 backend = "local"
@@ -257,12 +263,37 @@ class Config:
                 raise
 
     def stt_profile(self) -> tuple[str, dict]:
+        """The active profile, with `stt.model_dir` folded in.
+
+        A local profile is handed the directory its model belongs in, so the
+        one setting covers every profile and nothing downstream has to know
+        there is a shared default. A profile may still name its own; whichever
+        wins arrives expanded, because `~` is what people type and a literal
+        one would become a directory called "~".
+        """
         with self._lock:
             name = self.get("stt.active", "local")
             profile = self.get(f"stt.profiles.{name}")
             if not isinstance(profile, dict):
                 raise ValueError(f"stt.active refers to unknown profile '{name}'")
+            if profile.get("backend") != "local":
+                return name, profile
+            own = str(profile.get("model_dir") or "").strip()
+            chosen = Path(own).expanduser() if own else self.model_dir()
+            profile = {k: v for k, v in profile.items() if k != "model_dir"}
+            if chosen is not None:
+                profile["model_dir"] = str(chosen)
             return name, profile
+
+    def model_dir(self) -> Path | None:
+        """Where downloaded models are kept, or None for the Hugging Face cache.
+
+        Absent in a config written before this setting existed, and empty in a
+        shipped one: both mean the cache, which is where every model already
+        downloaded actually is.
+        """
+        value = str(self.get("stt.model_dir", "") or "").strip()
+        return Path(value).expanduser() if value else None
 
     def languages(self) -> list[str]:
         """The cycle order for the language toggle.
@@ -403,6 +434,7 @@ class Config:
                         f"got {settle!r}")
         # Absent in a config written before a transcription could time out;
         # such a file gets the shipped default, which is what it had before.
+        errs += self._model_dir_errors(profiles)
         timeout = self.get("stt.timeout_seconds")
         if timeout is not None and (not isinstance(timeout, (int, float))
                                     or isinstance(timeout, bool) or timeout <= 0):
@@ -417,6 +449,19 @@ class Config:
                 parse_chord(str(chord))
             except ValueError as exc:
                 errs.append(f"{key}: {exc}")
+        return errs
+
+    def _model_dir_errors(self, profiles: dict) -> list[str]:
+        """Where models are kept. Absent means the Hugging Face cache, as before."""
+        errs: list[str] = []
+        named = [("stt.model_dir", self.get("stt.model_dir"))]
+        named += [(f"stt.profiles.{name}.model_dir", prof.get("model_dir"))
+                  for name, prof in profiles.items() if "model_dir" in prof]
+        for key, value in named:
+            if value is None or isinstance(value, str):
+                continue
+            errs.append(f'{key} must be a directory path, or "" for the Hugging Face '
+                        f"cache, got {value!r}")
         return errs
 
     def _placement_errors(self) -> list[str]:

@@ -16,9 +16,11 @@ class FakeInfo:
 
 class FakeModel:
     calls = []
+    kwargs = []
 
     def __init__(self, name, device, compute_type, **kw):
         FakeModel.calls.append((name, device, compute_type))
+        FakeModel.kwargs.append(kw)
 
     def transcribe(self, audio, **kw):
         FakeModel.last_kwargs = kw
@@ -29,6 +31,47 @@ class FakeModel:
 @pytest.fixture(autouse=True)
 def _reset():
     FakeModel.calls = []
+    FakeModel.kwargs = []
+
+
+def test_a_configured_model_dir_is_where_the_model_is_downloaded():
+    """Models are big, and ~/.cache is not where everyone keeps big things."""
+    t = LocalTranscriber({"model": "medium", "model_dir": "/srv/models"},
+                         model_factory=FakeModel, cuda_available=lambda: True)
+    t.warmup()
+    assert FakeModel.kwargs == [{"download_root": "/srv/models"}]
+
+
+def test_no_model_dir_leaves_the_loader_on_its_own_default():
+    """Passing download_root=None would be the same thing, but only by luck -
+    say nothing and faster-whisper keeps using the Hugging Face cache."""
+    t = LocalTranscriber({"model": "medium"},
+                         model_factory=FakeModel, cuda_available=lambda: True)
+    t.warmup()
+    assert FakeModel.kwargs == [{}]
+
+
+def test_a_blank_model_dir_is_not_a_directory():
+    """An emptied setting means "the default", not a folder called ""."""
+    t = LocalTranscriber({"model": "medium", "model_dir": "   "},
+                         model_factory=FakeModel, cuda_available=lambda: True)
+    t.warmup()
+    assert FakeModel.kwargs == [{}]
+
+
+def test_the_model_dir_survives_the_cpu_fallback():
+    """The retry builds a second model; it must land in the same place."""
+    class FailsOnGpu(FakeModel):
+        def __init__(self, name, device, compute_type, **kw):
+            super().__init__(name, device, compute_type, **kw)
+            if device != "cpu":
+                raise RuntimeError("no cublas here")
+
+    t = LocalTranscriber({"model": "medium", "device": "cuda", "model_dir": "/srv/models"},
+                         model_factory=FailsOnGpu, cuda_available=lambda: True)
+    t.warmup()
+    assert [c[1] for c in FakeModel.calls] == ["cuda", "cpu"]
+    assert FakeModel.kwargs == [{"download_root": "/srv/models"}] * 2
 
 
 #: Every model name this project ships: the profiles in DEFAULT_CONFIG and the

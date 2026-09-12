@@ -100,8 +100,14 @@ class LocalTranscriber:
         # once rewrote "large-v3-turbo" ourselves, to a repository that does not
         # exist - the shipped default could not load a model at all.
         name = self._profile["model"]
-        log.info("loading %s on %s/%s", name, device, compute)
-        model = self._factory(name, device, compute)
+        # Only when it is set: passing download_root=None happens to mean the
+        # same thing, but saying nothing is what actually leaves faster-whisper
+        # on its own default.
+        where = str(self._profile.get("model_dir") or "").strip()
+        extra = {"download_root": where} if where else {}
+        log.info("loading %s on %s/%s%s", name, device, compute,
+                 f" from {where}" if where else "")
+        model = self._factory(name, device, compute, **extra)
         # Only once it has actually loaded. Recorded before, a failed attempt
         # pinned the instance to whatever it fell back to for the life of the
         # process: `_load` reads `self._device` as its starting point, so the

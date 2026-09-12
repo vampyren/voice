@@ -64,6 +64,12 @@ overlay_allow_fallback = false   # show the pill without gtk4-layer-shell, accep
 active = "local"           # name of a [stt.profiles.*] table
 timeout_seconds = 300      # give up on a transcription still running after this long;
                            # the recording is kept for "Retry last recording"
+model_dir = ""             # where the downloaded speech models are kept. "" = the
+                           # Hugging Face cache (~/.cache/huggingface), shared with
+                           # every other tool on the machine that uses it. Set a path
+                           # - "~/Apps/models" - and voice keeps its models there
+                           # instead. Models already downloaded are not moved: the
+                           # new directory starts empty and fills on first use.
 
 [stt.profiles.local]
 backend = "local"

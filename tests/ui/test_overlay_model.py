@@ -226,7 +226,7 @@ def test_the_badge_swaps_out_and_back_in_during_a_notice(model, clock):
     # A real switch: the chip only animates for a notice that is one, so that
     # the busy answers ("Still working") leave it alone.
     model.set_language("sv")
-    model.set_state("notice", text="EN → SV")
+    model.set_state("notice", text="EN → SV", swaps_language=True)
     assert model.badge_swap == 0.0
     model.tick(clock.advance(0.3))
     assert model.badge_swap == pytest.approx(1.0)
@@ -1027,7 +1027,7 @@ def test_a_busy_notice_does_not_claim_a_language_switch():
     m = OverlayModel(lang="en", clock=Clock())
     m.set_state("recording")
     m.set_language("sv")
-    m.set_state("notice")                       # the real switch
+    m.set_state("notice", swaps_language=True)  # the real switch
     assert m.notice_swaps_language is True
 
     m.set_state("transcribing")
@@ -1041,7 +1041,7 @@ def test_a_language_switch_still_animates_the_chip():
     m = OverlayModel(lang="en", clock=Clock())
     m.set_state("recording")
     m.set_language("sv")
-    m.set_state("notice", text="EN → SV")
+    m.set_state("notice", text="EN → SV", swaps_language=True)
     assert m.notice_swaps_language is True
 
 
@@ -1056,7 +1056,7 @@ def test_a_busy_notice_leaves_the_language_chip_completely_still():
     m = OverlayModel(lang="en", clock=(c := Clock()))
     m.set_state("recording")
     m.set_language("sv")
-    m.set_state("notice")                       # a real switch animates
+    m.set_state("notice", swaps_language=True)  # a real switch animates
     assert m.badge_swap < 1.0
 
     m.set_state("transcribing")
@@ -1070,7 +1070,7 @@ def test_a_busy_notice_landing_on_a_language_notice_does_not_inherit_its_swap():
     m = OverlayModel(lang="en", clock=Clock())
     m.set_state("recording")
     m.set_language("sv")
-    m.set_state("notice")                       # the real switch
+    m.set_state("notice", swaps_language=True)  # the real switch
     assert m.notice_swaps_language is True
 
     m.set_state("notice", text="Still working")  # straight over it
@@ -1085,7 +1085,7 @@ def test_a_language_switch_landing_on_a_busy_notice_still_animates():
     assert m.notice_swaps_language is False
 
     m.set_language("sv")
-    m.set_state("notice", text="EN → SV")
+    m.set_state("notice", text="EN → SV", swaps_language=True)
 
     assert m.notice_swaps_language is True
 
@@ -1094,8 +1094,8 @@ def test_a_consumed_switch_does_not_leak_into_a_later_notice():
     m = OverlayModel(lang="en", clock=Clock())
     m.set_state("recording")
     m.set_language("sv")
-    m.set_state("notice")
-    m.set_state("notice", text="Still working")     # consumes nothing new
+    m.set_state("notice", swaps_language=True)
+    m.set_state("notice", text="Still working")     # says nothing about language
     m.set_state("transcribing")
     m.set_state("notice", text="Still pasting")
 
@@ -1104,12 +1104,11 @@ def test_a_consumed_switch_does_not_leak_into_a_later_notice():
 
 
 def test_a_repeated_busy_notice_does_not_eat_a_pending_language_switch():
-    """The repeat is refused, so it must not spend the swap the switch owns.
+    """A notice refused as a repeat must leave the chip exactly as it was.
 
     A second dictate press during the same transcription sends the identical
-    "Still working" notice. It is dropped as a repeat - but the flag was being
-    consumed before the drop, so the refused notice flipped the chip and the
-    real "EN -> SV" that followed arrived with nothing left to animate.
+    "Still working" notice, which is dropped. It must neither start nor stop an
+    animation the notice on screen already owns.
     """
     m = OverlayModel(lang="en", clock=Clock())
     m.set_state("transcribing")
@@ -1122,7 +1121,7 @@ def test_a_repeated_busy_notice_does_not_eat_a_pending_language_switch():
     assert m.notice_swaps_language is False, \
         "a refused repeat claimed a language switch it never showed"
 
-    m.set_state("notice")                       # the switch's own notice
+    m.set_state("notice", swaps_language=True)  # the switch's own notice
     assert m.notice_swaps_language is True, \
         "the refused repeat had eaten the real switch's animation"
 
@@ -1146,3 +1145,28 @@ def test_a_checkmark_carrying_words_stays_up_longer_than_a_bare_one():
     assert worded.state == "done", "the words vanished on the bare checkmark's clock"
     worded.tick(c2.advance(DONE_TEXT_HOLD))
     assert worded.state == "hidden"
+
+
+def test_a_language_change_with_no_notice_does_not_arm_a_later_one():
+    """The settings window changes the language without any notice.
+
+    Nothing then consumed the pending-switch flag, so it sat set until some
+    unrelated notice minutes later - a "Still working" answer - picked it up
+    and animated the chip as though a switch had just happened.
+    """
+    m = OverlayModel(lang="en", clock=Clock())
+    m.set_state("recording")
+    m.set_language("sv")                    # as _sync_overlay_language does
+    m.set_state("transcribing")
+    m.set_state("notice", text="Still working")
+
+    assert m.notice_swaps_language is False
+
+
+def test_a_switch_that_announces_itself_still_animates():
+    m = OverlayModel(lang="en", clock=Clock())
+    m.set_state("recording")
+    m.set_language("sv")
+    m.set_state("notice", text="EN → SV", swaps_language=True)
+
+    assert m.notice_swaps_language is True

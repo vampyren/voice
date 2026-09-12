@@ -45,7 +45,9 @@ def _model(state, levels=(1.0,) * 30, text=None, age=0.0, lang="en", to=None,
     if state != "recording":
         if to:
             model.set_language(to)
-        model.set_state(state, text=text, now=clock.t)
+        # `to` is what makes this a language switch, so it is what tells the
+        # notice to animate the chip - the model no longer infers that.
+        model.set_state(state, text=text, now=clock.t, swaps_language=bool(to))
     if age:
         model.tick(clock.advance(age))
     return model

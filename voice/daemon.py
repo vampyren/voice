@@ -21,8 +21,9 @@ from voice.hotkey.keyspec import KeySpec, Tracker, parse_keyspec
 from voice.hotkey.portal_listener import STATE_BOUND, STATE_UNASSIGNED, PortalListener
 from voice.inject.clipboard import Clipboard
 from voice.inject.fallback import make_key_sender
-from voice.inject.injector import (BLIND_PASTE, Injector, insertion_status,
-                                   pill_policy, pill_settle_s, run_window_command)
+from voice.inject.injector import (BLIND_PASTE, WINDOW_COMMAND_TIMEOUT_S, Injector,
+                                   insertion_status, pill_policy, pill_settle_s,
+                                   run_window_command)
 from voice.inject.window import effective_window_command, terminal_chord_is_unreachable
 from voice.ipc import (NEXT_LANGUAGE, PENDING_LANGUAGE, IPCError, Server, is_running,
                        send)
@@ -209,6 +210,9 @@ def busy_messages(state: State, policy: str) -> list[dict]:
 #: nothing for the paste to wait for.
 RECALL = "recall"
 
+#: The detail on the TRANSCRIBING that re-runs the last kept recording.
+RETRY = "retry"
+
 #: How long the settings window's placement preview stays on screen. The
 #: owner's own number: "show the position on the desktop for say 5 sec".
 PREVIEW_SECONDS = 5.0
@@ -312,30 +316,60 @@ class FocusedWindow:
         #: The focused window as it was when this dictation began. Replayed at
         #: paste time rather than re-read, because by then the pill has it.
         self._captured: str | None = None
+        self._reader: threading.Thread | None = None
 
     @property
     def usable(self) -> bool:
         """False while the configured command is one that stopped answering."""
         return self._gave_up_on is None or self._gave_up_on != self._command()
 
-    def capture(self) -> None:
-        """Read the focused window now, for this dictation's paste to use.
+    def live(self) -> str | None:
+        """Read the focused window right now.
 
-        Called the moment a dictation begins, before the pill is told to
-        appear. That is the only moment the desktop names the window being
-        dictated INTO: a pill with no layer-shell surface takes the keyboard
-        when it maps, so anything asked later names the pill. Asking here also
-        keeps the command's cost out of the paste, where it sat between focus
-        coming back and the chord going out.
+        The better answer wherever it can be trusted - it follows the owner if
+        they move to another window while the transcription runs. It cannot be
+        trusted while a focus-stealing pill is on screen, which is what
+        `capture` exists for.
         """
         cmd = self._command()
         if not cmd or cmd == self._gave_up_on:
-            self._captured = None
+            return None
+        return self._run(cmd, on_timeout=lambda: self._give_up(cmd))
+
+    def capture(self) -> None:
+        """Start reading the focused window for this dictation's paste to use.
+
+        Called as a dictation begins, before the pill is told to appear: that
+        is the last moment the desktop names the window being dictated INTO,
+        because a pill with no layer-shell surface takes the keyboard when it
+        maps and anything asked later names the pill.
+
+        Started on a thread rather than run here. This runs on the hotkey
+        listener thread with the pipeline lock held, and the command can take
+        the better part of a second: done inline it delayed the recording pill
+        by that much and, worse, held up the release of a push-to-talk key, so
+        a short tap recorded until the command came back.
+        """
+        self._captured, cmd = None, self._command()
+        if not cmd or cmd == self._gave_up_on:
+            self._reader = None
             return
+        self._reader = threading.Thread(target=self._read, args=(cmd,),
+                                        name="focused-window", daemon=True)
+        self._reader.start()
+
+    def _read(self, cmd: str) -> None:
         self._captured = self._run(cmd, on_timeout=lambda: self._give_up(cmd))
 
     def __call__(self) -> str | None:
-        """The window this dictation began in, or None if nobody would say."""
+        """The window this dictation began in, or None if nobody would say.
+
+        Waits for the reader if it is somehow still going; by paste time it has
+        had the whole recording and transcription to finish in.
+        """
+        reader, self._reader = self._reader, None
+        if reader is not None:
+            reader.join(WINDOW_COMMAND_TIMEOUT_S + 0.2)
         return self._captured
 
     def _give_up(self, cmd: str) -> None:
@@ -531,7 +565,12 @@ class Daemon:
         """
         self._pill_policy = pill_policy(self.config, pill_takes_focus(self.config))
         return Injector(self._clipboard, self._sender, self.config.get("inject", {}) or {},
-                        self.listener.modifiers_held, self._focused_window,
+                        self.listener.modifiers_held,
+                        # A pill that cannot steal the keyboard leaves the live
+                        # answer trustworthy, and live is better: it follows the
+                        # owner if they change window mid-dictation.
+                        self._focused_window.live if self._pill_policy == "none"
+                        else self._focused_window,
                         pill_policy=self._pill_policy, hide_pill=self._hide_pill_for_paste,
                         fill_wait=self._pill_fill_wait, settle_s=pill_settle_s(self.config))
 
@@ -561,18 +600,29 @@ class Daemon:
             # this policy and back must not leave the warning suppressed.
             self._terminal_warning = ""
             return
-        # A command that has stopped answering is no command at all for this
-        # purpose: every paste is already going out without knowing the window.
-        resolved = (effective_window_command(self.config.get, os.environ)
-                    if self._focused_window.usable else "")
+        configured = effective_window_command(self.config.get, os.environ)
+        if configured and not self._focused_window.usable:
+            # A different fault entirely from "this desktop will not say": the
+            # command exists and names the window perfectly well, it simply
+            # stopped answering. Saying the desktop is mute would point the
+            # owner at the wrong fix, and contradicts what `voice doctor` says.
+            self._say_terminal_warning(
+                f"{configured} stopped answering, so every dictation is now pasted "
+                f"without knowing the focused window. The transcript is left on the "
+                f"clipboard and the pill says so.", notify)
+            return
         unreachable, why = terminal_chord_is_unreachable(
-            resolved,
+            configured,
             str(settings.get("paste_chord", "ctrl+v")),
             str(settings.get("terminal_chord", "ctrl+shift+v")),
             settings.get("terminal_classes", []))
         if not unreachable:
             self._terminal_warning = ""
             return
+        self._say_terminal_warning(why, notify)
+
+    def _say_terminal_warning(self, why: str, notify: bool) -> None:
+        """Say `why` once, and again only if the answer has actually changed."""
         if why == self._terminal_warning:
             return                     # already said, and nothing has changed
         self._terminal_warning = why
@@ -663,7 +713,10 @@ class Daemon:
         # The helper is started with --lang, so that is the badge it already
         # shows: what we track here is the last language it was *told*. A
         # respawn reads it again rather than the one baked in at build time.
-        self._overlay_language = str(self.config.get("general.language", "en") or "en")
+        # Under the lock like every other writer of it - this runs on the Qt
+        # thread and can interleave with the worker inside `_send_overlay`.
+        with self._overlay_lock:
+            self._overlay_language = str(self.config.get("general.language", "en") or "en")
         self._overlay_settings = self._overlay_snapshot()
         verbose = log.isEnabledFor(logging.DEBUG)
         allow_fallback = bool(self.config.get("ui.overlay_allow_fallback", False))
@@ -716,7 +769,7 @@ class Daemon:
         """
         verbose = log.isEnabledFor(logging.DEBUG)
         allow_fallback = bool(self.config.get("ui.overlay_allow_fallback", False))
-        with self._overlay_lock:       # the only writer that is not _send_overlay
+        with self._overlay_lock:
             self._overlay_language = language
         return OverlayClient(True, launcher=lambda: default_launcher(
             position=position, margin_x=margin_x, margin_y=margin_y, lang=language,
@@ -774,7 +827,15 @@ class Daemon:
         # maps, so this is the last moment the desktop still names the window
         # the owner is dictating into. A recall has no recording, but it starts
         # from idle with nothing on screen, so the same moment serves.
-        if state is State.RECORDING or (state is State.INJECTING and detail == RECALL):
+        # RETRY as well as RECORDING: a retry happens minutes after the
+        # recording it re-runs, very possibly in another window, and replaying
+        # the old class chose that window's chord while reporting the paste as
+        # verified - so the restore wiped a transcript the new window had
+        # discarded. A recall has no recording, but starts from idle with
+        # nothing on screen, so the same moment serves.
+        if (state is State.RECORDING
+                or (state is State.TRANSCRIBING and detail == RETRY)
+                or (state is State.INJECTING and detail == RECALL)):
             self._focused_window.capture()
         # A preview showing while a real recording starts would be taken for the
         # recording itself - and it is a helper at the wrong placement, on a
@@ -1398,7 +1459,7 @@ class Daemon:
             # during a paste would otherwise map a focus-stealing pill, take
             # the chord into it, and let `restore_clipboard` overwrite the
             # transcript. A notice is an answer to the owner, never a state.
-            self._send_overlay([{"state": "notice",
+            self._send_overlay([{"state": "notice", "swaps_language": True,
                                  "text": f"{previous.upper()} \u2192 {code.upper()}"}],
                                str(self.config.get("general.language", "en") or "en"),
                                refuse_while_hidden=True)

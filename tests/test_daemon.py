@@ -1184,7 +1184,7 @@ def test_language_command_validates_persists_and_tells_the_pill(isolated_xdg, qa
     assert Config.load().get("general.language") == "sv"      # persisted on the Qt thread
     assert d.handle({"cmd": "status"})["language"] == "sv"
     assert _overlay_lines(d, helper_processes)[-2:] == [
-        {"language": "sv"}, {"state": "notice", "text": "EN → SV"}]
+        {"language": "sv"}, {"state": "notice", "swaps_language": True, "text": "EN → SV"}]
     assert d.tray.languages[-1] == (["en", "sv"], "sv")
 
     bad = d.handle({"cmd": "language", "code": "svenska"})
@@ -3477,3 +3477,101 @@ def test_an_unverifiable_paste_names_no_key_it_cannot_know_is_right():
     msgs = overlay_messages(State.IDLE, "7 chars via paste-blind in 0.4s", "en",
                             blind_hint=DONE_UNVERIFIED)
     assert msgs == [{"state": "done", "text": "Copied"}]
+
+
+def test_retrying_a_recording_reads_the_window_again(isolated_xdg, qapp, monkeypatch):
+    """Retry happens minutes later, very possibly in a different window.
+
+    Replaying the class captured for the original recording chose that window's
+    chord AND reported the paste as verified, so `restore_clipboard` wiped the
+    transcript after a chord the new window had discarded.
+    """
+    from voice.pipeline import State
+
+    d = _focus_daemon(monkeypatch, window_command="echo konsole")
+    try:
+        d._focused_window.capture()
+        assert d._focused_window() == "konsole"
+
+        d.config.set("inject.active_window_command", "echo firefox")
+        d.config.save()
+        d._on_dictation_state(State.TRANSCRIBING, "retry")
+
+        assert d._focused_window() == "firefox", \
+            "a retry pasted using the window the original recording was made in"
+    finally:
+        d.shutdown()
+
+
+def test_a_pill_that_never_takes_focus_reads_the_window_at_paste_time(isolated_xdg, qapp, monkeypatch):
+    """Capturing early is a workaround for a pill that steals the keyboard.
+
+    Where the pill cannot steal it - a real layer-shell surface - reading live
+    just before the chord is strictly better: it follows the owner if they move
+    to another window while the transcription runs.
+    """
+    d = _focus_daemon(monkeypatch, layer_shell=True, window_command="echo konsole")
+    try:
+        assert d._pill_policy == "none"
+        # No capture has happened, and it still answers: it is reading now.
+        assert d.injector._window_class() == "konsole"
+    finally:
+        d.shutdown()
+
+
+def test_a_pill_that_steals_focus_uses_the_window_read_before_it_appeared(isolated_xdg, qapp, monkeypatch):
+    d = _focus_daemon(monkeypatch, window_command="echo konsole")
+    try:
+        assert d._pill_policy == "hide"
+        # Nothing captured yet, so nothing to report - it is not reading live,
+        # because live would mean reading while the pill holds the keyboard.
+        assert d.injector._window_class() is None
+        d._focused_window.capture()
+        assert d.injector._window_class() == "konsole"
+    finally:
+        d.shutdown()
+
+
+def test_reading_the_window_never_blocks_the_key_that_started_the_recording():
+    """The capture ran on the hotkey thread, holding the pipeline lock.
+
+    On a box where the command takes 400 ms, the pill did not appear for 400 ms
+    and a 150 ms push-to-talk tap could not stop before then.
+    """
+    import threading as _threading
+    import time as _time
+
+    from voice.daemon import FocusedWindow
+
+    released = _threading.Event()
+
+    def slow(cmd, on_timeout=None):
+        released.wait(3)
+        return "konsole"
+
+    window = FocusedWindow(lambda: "a-slow-command", run=slow)
+    started = _time.monotonic()
+    window.capture()
+    assert _time.monotonic() - started < 0.3, "capture blocked its caller"
+
+    released.set()
+    assert window() == "konsole", "the answer never arrived for the paste"
+
+
+def test_a_window_command_that_gave_up_is_reported_as_itself(isolated_xdg, qapp, monkeypatch, caplog):
+    """Not as "this desktop will not say which window has the keyboard".
+
+    On a Plasma box that names the window perfectly well, a command that timed
+    out once would otherwise be reported as a mute desktop - pointing the owner
+    at the wrong fix, and contradicting what `voice doctor` tells them.
+    """
+    d = _focus_daemon(monkeypatch, window_command="a-command-that-hangs")
+    try:
+        d._focused_window._give_up("a-command-that-hangs")
+        with caplog.at_level("WARNING", logger="voice.daemon"):
+            d._warn_if_terminals_can_never_be_pasted_into(notify=False)
+
+        assert "stopped answering" in caplog.text
+        assert "will not say which window" not in caplog.text
+    finally:
+        d.shutdown()

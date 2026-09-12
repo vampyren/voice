@@ -43,8 +43,10 @@ PILL_SETTLE_S = 0.15
 #: it went: the focused window could not be read, and the chord that was
 #: therefore chosen is not the one a terminal listens to. The paste may well
 #: have worked - in a browser it will have - but it may equally have been
-#: discarded, and the two are indistinguishable from in here. The pill turns
-#: this into "Copied, and here is the chord to paste it yourself".
+#: discarded, and the two are indistinguishable from in here. The pill says
+#: "Copied" - and deliberately names no chord, because with the window unknown
+#: a terminal wants Ctrl+Shift+V and a browser wants Ctrl+V, so either answer
+#: would be wrong half the time.
 BLIND_PASTE = "paste-blind"
 
 
@@ -215,10 +217,9 @@ class Injector:
         method = self._method(window_known)
         restored = False
         # Never restore over a transcript nobody can confirm was delivered.
-        # `BLIND_PASTE` makes the pill say "Use Ctrl+Shift+V", and the
-        # clipboard is the only copy that instruction can refer to - putting
-        # the previous contents back would turn the hint into an instruction to
-        # paste whatever happened to be on the clipboard beforehand.
+        # `BLIND_PASTE` makes the pill say "Copied", and the clipboard is the
+        # only copy that can refer to - putting the previous contents back
+        # would make the pill's one true statement false.
         if method != BLIND_PASTE and self._settings.get("restore_clipboard", True):
             restored = self._clip.restore(snap)
         return InjectResult(method, chord, restored)

@@ -59,11 +59,12 @@ branch.
   a lie, but it describes a state that has already been left.
 - ~~a paste the injector cannot verify still ends in a plain checkmark~~ -
   **decided and shipped on this branch.** The owner chose to be told: an
-  unverifiable paste now reports `BLIND_PASTE` and the pill says "Use
-  Ctrl+Shift+V" (the terminal chord, which is the one that cannot have been
-  sent). The cost was accepted knowingly - it appears on every dictation on a
-  desktop that will not name the focused window, i.e. GNOME - and on Plasma it
-  is nearly never seen, because KWin does name it.
+  unverifiable paste now reports `BLIND_PASTE` and the pill says "Copied". It
+  names no chord: the owner was shown "Use Ctrl+Shift+V" while pasting into a
+  browser, and with the window unknown neither chord can be recommended. The
+  cost was accepted knowingly - it appears on every dictation on a desktop that
+  will not name the focused window, i.e. GNOME - and on Plasma it is nearly
+  never seen, because KWin does name it.
 - `voice/inject/window.py`: `terminal_chord_is_unreachable` now catches "the
   window cannot be read" and "`terminal_classes` is empty", but it cannot catch
   a terminal that simply is not in the list - Ghostty

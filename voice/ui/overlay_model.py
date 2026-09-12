@@ -205,7 +205,6 @@ class OverlayModel:
         #: ignored keypress also flipped the chip and claimed a switch that had
         #: not happened. Set by the switch itself, consumed by the next notice.
         self.notice_swaps_language = False
-        self._lang_swapped = False
         self._clock = clock
         self._half = (bars + 1) // 2          # history slots: centre out to one end
         self._history = deque([0.0] * self._half, maxlen=self._half)
@@ -295,11 +294,10 @@ class OverlayModel:
         code = (code or "").strip() or self.lang
         if code != self.lang:
             self.prev_lang = self.lang
-            self._lang_swapped = True
         self.lang = code
 
     def set_state(self, state: str, text: str | None = None,
-                  now: float | None = None) -> None:
+                  now: float | None = None, swaps_language: bool = False) -> None:
         if state not in STATES:
             raise ValueError(f"unknown overlay state: {state!r}")
         now = self._clock() if now is None else now
@@ -313,17 +311,13 @@ class OverlayModel:
             # New text under the same state is news, and does re-enter.
             return
         if state == "notice":
-            # Consumed on EVERY notice that is actually entered, not only the
-            # first: notices last two seconds and either kind can land on top of
-            # the other, so a flag read only on entry goes stale in both
-            # directions - a busy answer inheriting a real switch's animation,
-            # and a real switch arriving over a busy notice without one.
-            #
-            # After the check above, never before it: a notice that is refused
-            # as a repeat has not been entered, and eating the pending swap
-            # there both flips the chip for the repeat and leaves the language
-            # switch that follows with no animation at all.
-            self.notice_swaps_language, self._lang_swapped = self._lang_swapped, False
+            # Told by the sender, not inferred from a pending `set_language`.
+            # Inferring it leaked twice: the settings window changes the
+            # language with no notice at all, leaving the guess armed for
+            # whatever notice came next, and notices land on top of each other
+            # freely. Set after the repeat check above, never before it, so a
+            # notice refused as a repeat leaves the chip exactly as it was.
+            self.notice_swaps_language = swaps_language
         self._enter(state, text, now, reset_counter=True)
 
     def _enter(self, state: str, text: str | None, now: float,

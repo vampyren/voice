@@ -121,8 +121,8 @@ terminal_classes = ["konsole", "org.kde.konsole", "kitty", "alacritty", "foot", 
 active_window_command = ""   # command printing the focused window class; "" = unknown
 # Note: wherever the focused window cannot be read, a paste cannot be confirmed
 # to have landed, so the transcript is deliberately LEFT on the clipboard and
-# restore_clipboard below does not apply to it - the pill tells you which key
-# to press, and that key needs the text to still be there.
+# restore_clipboard below does not apply to it - the pill says "Copied", and
+# that is only true while the text is still there.
 restore_clipboard = true
 pill_focus = "hide"        # what to do when the recording pill can only be an ordinary
                            # window that takes keyboard focus (GNOME, where there is no

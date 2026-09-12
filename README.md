@@ -21,7 +21,7 @@ still runs about 3× faster than you speak. [Why](docs/install.md#do-i-need-a-gp
 ### Arch / CachyOS — one command, nothing to build
 
 ```bash
-sudo pacman -U https://github.com/vampyren/voice/releases/download/v0.1.0/voice-0.1.0-3-x86_64.pkg.tar.zst
+sudo pacman -U https://github.com/vampyren/voice/releases/download/v0.1.1/voice-0.1.1-1-x86_64.pkg.tar.zst
 voice doctor
 ```
 

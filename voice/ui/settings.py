@@ -13,7 +13,7 @@ from PySide6.QtGui import QColor, QImage, QKeySequence, QPalette, QRegion
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFormLayout, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
                                QSizePolicy, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget,
-                               QToolButton, QToolTip, QVBoxLayout, QWidget)
+                               QFileDialog, QToolButton, QToolTip, QVBoxLayout, QWidget)
 
 from voice.audio.capture import Source
 from voice.config import INJECT_MODES, Config, is_language_code
@@ -36,6 +36,36 @@ PROFILE_TEMPLATES: dict[str, dict] = {
     "local-swedish": {"backend": "local", "model": "KBLab/kb-whisper-large", "device": "cuda", "compute_type": "float16", "beam_size": 5, "prompt": ""},
 }
 _LOCAL_FIELDS = ["model", "device", "compute_type", "beam_size", "prompt"]
+
+#: What the Model row offers, largest first within each family. Not a limit -
+#: the row is editable and any Hugging Face repository id works - but "medium
+#: or large?" should be a choice from a list, not a name to remember. The
+#: KB-Whisper entries are the Swedish ones; everything above them is
+#: faster-whisper's own short name, which it resolves itself.
+MODEL_CHOICES = (
+    "large-v3", "large-v3-turbo", "medium", "small", "base", "tiny",
+    "KBLab/kb-whisper-large", "KBLab/kb-whisper-medium", "KBLab/kb-whisper-small",
+)
+
+
+class ModelChooser(QComboBox):
+    """The Model row: pick a size, or type any repository id.
+
+    It answers to `text()`/`setText()` as well, so the profile form can hold it
+    beside the plain line edits and read them all the same way.
+    """
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.addItems(list(MODEL_CHOICES))
+
+    def text(self) -> str:
+        return self.currentText().strip()
+
+    def setText(self, value: str) -> None:
+        self.setCurrentText(str(value))
 #: The profile form reads as a form, not as a config file: the keys stay the
 #: keys (they are what is written), only what the user reads changes.
 _FIELD_LABELS = {"backend": "Where it runs", "base_url": "Service address",
@@ -235,6 +265,13 @@ HELP = {
         "let one program press keys in another."),
     "max_seconds": ("A recording stops itself after this many seconds, so a key left held "
                     "down by accident cannot record all afternoon."),
+    "model_dir": (
+        "Leave this empty and the models go to ~/.cache/huggingface, shared with any "
+        "other program on this computer that uses Hugging Face models.\n\n"
+        "Give a folder and voice keeps its own there instead - useful if that is a "
+        "few gigabytes you would rather have on another disk. Models already "
+        "downloaded are not moved: the new folder starts empty and fills the next "
+        "time a model is needed."),
     "profiles": (
         "A profile is one way of turning speech into text, with its settings: a model that "
         "runs on this computer, or an online service you have an account with.\n\n"
@@ -1277,7 +1314,34 @@ class SettingsDialog(QDialog):
         layout.addWidget(self._with_help(
             _caption("The active profile is the one that turns your speech into text."),
             "profiles", HELP["profiles"]))
+        layout.addWidget(self._group("Downloaded models", self._model_dir_row()))
         return w
+
+    def _model_dir_row(self) -> QVBoxLayout:
+        """Where the speech models are kept on this machine."""
+        self.model_dir_edit = QLineEdit()
+        self.model_dir_edit.setPlaceholderText(
+            "~/.cache/huggingface — the shared cache, where they are now")
+        self.model_dir_button = QPushButton("Browse…")
+        self.model_dir_button.clicked.connect(self._pick_model_dir)
+        row = QHBoxLayout()
+        row.setSpacing(ROW_SPACING // 2)
+        row.addWidget(self.model_dir_edit, 1)
+        row.addWidget(self.model_dir_button)
+        box = QVBoxLayout()
+        box.setSpacing(ROW_SPACING)
+        box.addWidget(self._with_help(
+            _caption("Each model is a few gigabytes, downloaded the first time you "
+                     "dictate in the language that uses it."),
+            "model_dir", HELP["model_dir"]))
+        box.addLayout(row)
+        return box
+
+    def _pick_model_dir(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Where to keep the downloaded models", self.model_dir_edit.text())
+        if chosen:
+            self.model_dir_edit.setText(chosen)
 
     def _dictionary_tab(self) -> QWidget:
         w = QWidget()
@@ -1365,6 +1429,7 @@ class SettingsDialog(QDialog):
         self._device_choice = None         # populating the combo is not a user edit
         self.set_sources(self._sources())
         self.max_seconds.setValue(int(c.get("audio.max_seconds", 120)))
+        self.model_dir_edit.setText(str(c.get("stt.model_dir", "") or ""))
         self.profile_list.clear()
         for name in (c.get("stt.profiles", {}) or {}):
             self.profile_list.addItem(name)
@@ -1536,7 +1601,11 @@ class SettingsDialog(QDialog):
         self._form_layout.addRow(_FIELD_LABELS["backend"],
                                  QLabel(_BACKEND_LABELS.get(kind, kind)))
         for field in fields:
-            edit = QLineEdit(str(profile.get(field, "")))
+            if field == "model" and profile.get("backend") == "local":
+                edit = ModelChooser()
+                edit.setText(str(profile.get(field, "")))
+            else:
+                edit = QLineEdit(str(profile.get(field, "")))
             if field == "api_key":
                 edit.setEchoMode(QLineEdit.EchoMode.Password)
             self.profile_form[field] = edit
@@ -2056,6 +2125,7 @@ class SettingsDialog(QDialog):
         c.set("hotkeys.dictate_mode", self.mode_combo.currentData())
         c.set("audio.device", self.device_combo.currentData() or "")
         c.set("audio.max_seconds", self.max_seconds.value())
+        c.set("stt.model_dir", self.model_dir_edit.text().strip())
         position, margin_x, margin_y = self._chosen_pill_placement()
         c.set("ui.overlay_position", position)
         c.set("ui.overlay_margin_x", margin_x)

@@ -2112,3 +2112,77 @@ def test_words_to_listen_for_roundtrip(qapp):
     assert Config.load().get("dictionary.hotwords") == ["Hollyland Lark", "Keychron"]
     _, reopened, _ = make(qapp)
     assert reopened.hotwords_edit.text() == "Hollyland Lark, Keychron"
+
+
+# -- where the models live, and which one each profile uses -------------------
+
+def test_the_model_folder_starts_empty_and_says_so(qapp):
+    """Empty means the Hugging Face cache, which is where every model already
+    downloaded actually is - the placeholder has to say that, not look unset."""
+    cfg, dlg, _ = make(qapp)
+    assert dlg.model_dir_edit.text() == ""
+    assert "cache" in dlg.model_dir_edit.placeholderText().lower()
+
+
+def test_choosing_a_model_folder_is_saved_and_reloaded(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.model_dir_edit.setText("~/Apps/models")
+    dlg.save_button.click()
+    again = Config.load()
+    assert again.get("stt.model_dir") == "~/Apps/models"
+    assert again.errors() == []
+    assert again.stt_profile()[1]["model_dir"].endswith("/Apps/models")
+
+    dlg.model_dir_edit.setText("")                  # and back to the cache
+    dlg.save_button.click()
+    assert Config.load().model_dir() is None
+
+    _with_model_dir("/srv/models")
+    cfg2, dlg2, _ = make(qapp)
+    assert dlg2.model_dir_edit.text() == "/srv/models"
+    dlg2.reload_from_disk()
+    assert dlg2.model_dir_edit.text() == "/srv/models"
+
+
+def _with_model_dir(value: str) -> None:
+    external = Config.load()
+    external.set("stt.model_dir", value)
+    external.save()
+
+
+def test_the_model_row_offers_the_sizes_instead_of_asking_for_a_name(qapp):
+    """"medium or large?" is a choice from a list, not a string to remember."""
+    from voice.ui.settings import MODEL_CHOICES
+
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "local")
+    chooser = dlg.profile_form["model"]
+    offered = [chooser.itemText(i) for i in range(chooser.count())]
+    assert offered == list(MODEL_CHOICES)
+    assert "large-v3" in offered and "medium" in offered
+    assert "KBLab/kb-whisper-large" in offered
+    assert chooser.currentText() == "large-v3"       # what the profile says
+
+
+def test_a_model_that_is_not_on_the_list_is_still_accepted(qapp):
+    """Any Hugging Face repository works; the list is a shortcut, not a limit."""
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "local")
+    dlg.profile_form["model"].setText("someone/faster-whisper-swedish")
+    dlg.save_button.click()
+    assert Config.load().get("stt.profiles.local.model") == "someone/faster-whisper-swedish"
+    assert Config.load().errors() == []
+
+
+def test_each_language_gets_its_own_model(qapp):
+    """The point of the pairing: a lighter model for one language than the other."""
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "local")
+    dlg.profile_form["model"].setText("medium")
+    select_profile(dlg, "local-swedish")
+    dlg.profile_form["model"].setText("KBLab/kb-whisper-medium")
+    dlg.save_button.click()
+    again = Config.load()
+    assert again.get("stt.profiles.local.model") == "medium"
+    assert again.get("stt.profiles.local-swedish.model") == "KBLab/kb-whisper-medium"
+    assert again.errors() == []

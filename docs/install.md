@@ -11,6 +11,30 @@ supported**, and they differ in ways that matter — see [Desktop setup](desktop
 The short version: KDE can tell voice which window has focus (so it picks the right
 paste shortcut automatically), and GNOME cannot.
 
+### Do I need a GPU?
+
+**No.** The graphics card does one thing: it makes transcription faster. Everything
+works without one.
+
+Measured on this project's own test machine — a virtual machine with **no GPU at all**,
+across 20 real dictations:
+
+| You spoke for | It took | |
+|---|---|---|
+| 13.9 s | 3.1 s | 4.5× faster than real time |
+| 25.1 s | 5.3 s | 4.7× |
+| 30.5 s | 9.5 s | 3.2× |
+
+Median **3.4× faster than real time**: half a minute of speech is transcribed in about
+nine seconds, on a machine with nothing helping it. A powerful desktop CPU does better.
+
+A GPU brings that down further, which is worth having if you dictate long passages — but
+it is a convenience, not a requirement. Build with `VOICE_GPU=0` and you save roughly
+3 GB of CUDA runtime as well.
+
+Text-to-speech does not exist yet (see [Roadmap](roadmap.md)); when it does, it will also
+run on CPU.
+
 **You do not install any of the tables below by hand.** `makepkg -si` installs the
 dependencies and the package carries the bundled set. They are listed so you know what
 lands on the machine and why.

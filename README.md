@@ -7,7 +7,12 @@ Transcribes locally on your NVIDIA GPU with faster-whisper, or through any
 OpenAI-compatible speech-to-text API. Swedish and English out of the box, switchable with
 a shortcut.
 
-> **Status:** phase 1 — the dictation core, in daily use on KDE Plasma and GNOME.
+> **Dictation works today** — speak, and your words are typed. In daily use on KDE
+> Plasma and GNOME. Reading text aloud, and tidying up what you dictate, are
+> [planned](docs/roadmap.md).
+
+**No graphics card needed.** The GPU only makes transcription faster — on a plain CPU it
+still runs about 3× faster than you speak. [Why](docs/install.md#do-i-need-a-gpu)
 
 ---
 

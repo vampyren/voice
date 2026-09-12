@@ -1,6 +1,6 @@
 [project]
 name = "voice"
-version = "0.1.1"
+version = "0.1.2"
 description = "Wayland-native voice typing: hold a key, speak, release, text appears."
 requires-python = ">=3.12,<3.15"
 dependencies = [

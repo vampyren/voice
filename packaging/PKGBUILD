@@ -33,7 +33,7 @@
 # See packaging/README.md for the full reasoning.
 
 pkgname=voice
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="Wayland-native voice typing: hold a key, speak, release, text appears"
 arch=('x86_64')

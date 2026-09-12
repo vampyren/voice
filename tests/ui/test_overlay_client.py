@@ -948,3 +948,68 @@ def test_stop_does_not_close_a_pipe_a_reader_is_parked_on():
                      name="stopper", daemon=True).start()
     assert stopped.wait(5.0), "stop() hung on the helper's stdout"
     assert proc.stdout.closed is False
+
+
+# -- gtk4-layer-shell has to be loaded before libwayland ---------------------
+#: It works by sitting between GTK and libwayland and rewriting requests as
+#: they pass, binding the real symbols with `dlsym(RTLD_NEXT, ...)`. That only
+#: reaches the call path if it is loaded first. Imported from Python it never
+#: is, so `gtk_layer_is_supported()` answered False on a Plasma 6 that
+#: advertises `zwlr_layer_shell_v1` at version 5 - and voice switched the pill
+#: off on the one desktop where it works. Measured there: False imported
+#: normally, False imported before Gtk, True with LD_PRELOAD.
+
+def test_the_library_is_found_by_soname():
+    from voice.ui.overlay_client import layer_shell_preload
+
+    assert layer_shell_preload(find=lambda name: "libgtk4-layer-shell.so.0") \
+        == "libgtk4-layer-shell.so.0"
+
+
+def test_a_machine_without_the_library_preloads_nothing():
+    """GNOME, say. "" means add nothing, not "something went wrong"."""
+    from voice.ui.overlay_client import layer_shell_preload
+
+    assert layer_shell_preload(find=lambda name: None) in ("", "libgtk4-layer-shell.so.0",
+                                                           "libgtk4-layer-shell.so")
+
+
+def test_the_preload_is_added_to_the_environment():
+    from voice.ui.overlay_client import with_layer_shell_preloaded
+
+    env = with_layer_shell_preloaded({"WAYLAND_DISPLAY": "wayland-0"}, preload="ls.so")
+    assert env["LD_PRELOAD"] == "ls.so"
+    assert env["WAYLAND_DISPLAY"] == "wayland-0", "the rest of the environment must survive"
+
+
+def test_an_existing_preload_is_kept():
+    """Someone else's LD_PRELOAD is not ours to discard."""
+    from voice.ui.overlay_client import with_layer_shell_preloaded
+
+    env = with_layer_shell_preloaded({"LD_PRELOAD": "theirs.so"}, preload="ours.so")
+    assert env["LD_PRELOAD"] == "ours.so theirs.so"
+
+
+def test_nothing_is_added_when_there_is_nothing_to_add():
+    from voice.ui.overlay_client import with_layer_shell_preloaded
+
+    env = with_layer_shell_preloaded({"A": "1"}, preload="")
+    assert "LD_PRELOAD" not in env
+
+
+def test_the_helper_is_launched_with_it_preloaded(monkeypatch):
+    """The whole point: the helper must run under the load order the library needs."""
+    from voice.ui import overlay_client
+
+    monkeypatch.setattr(overlay_client, "layer_shell_preload", lambda *a, **k: "ls.so")
+    monkeypatch.setattr(overlay_client, "cached_probe",
+                        lambda: overlay_client.HelperProbe(["python3", "-m", "voice.ui.overlay"],
+                                                           ("gtk4", "layer-shell")))
+    seen = {}
+
+    def fake_popen(cmd, **kwargs):
+        seen.update(kwargs)
+        return object()
+
+    overlay_client.default_launcher(popen=fake_popen)
+    assert seen["env"]["LD_PRELOAD"].startswith("ls.so"), seen["env"].get("LD_PRELOAD")

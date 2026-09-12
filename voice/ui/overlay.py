@@ -35,7 +35,10 @@ plain toplevel *is* focused by the compositor when it maps (measured on GNOME:
 chord to the pill instead of the user's window. gtk4-layer-shell being
 installed is not enough - the compositor has to implement zwlr_layer_shell_v1,
 which GNOME does not, so `Gtk4LayerShell.is_supported()` decides and a False
-there counts as absent. Without a usable layer shell the helper logs a warning;
+there counts as absent. It is not enough on its own either: the library has to
+be loaded before libwayland or its shim never runs and it answers False
+wherever it is asked. The daemon launches this helper with it in LD_PRELOAD -
+see `voice.ui.overlay_client.layer_shell_preload`. Without a usable layer shell the helper logs a warning;
 pass `--require-layer-shell` to make it exit 2 instead, so the daemon can
 decide to run without a pill rather than break dictation.
 """

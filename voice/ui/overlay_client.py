@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import pathlib
 import queue
 import shutil
 import subprocess
@@ -103,11 +104,66 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+#: gtk4-layer-shell works by sitting between GTK and libwayland and rewriting
+#: requests as they pass - `libwayland-shim.c` binds the real symbols with
+#: `dlsym(RTLD_NEXT, ...)`. That only reaches the call path if the library is
+#: loaded BEFORE libwayland. Imported from Python it never is: GObject
+#: Introspection dlopens it long after GTK has bound libwayland directly, the
+#: shim is never called, and `gtk_layer_is_supported()` answers False - on a
+#: compositor that advertises `zwlr_layer_shell_v1` perfectly well.
+#:
+#: Measured on the owner's Plasma 6, which advertises the protocol at version 5:
+#:     imported normally .......... False
+#:     imported before Gtk ........ False
+#:     with LD_PRELOAD ............ True
+#:
+#: So voice concluded layer-shell was unavailable and switched the pill off, on
+#: the one desktop where it works. LD_PRELOAD is how a language binding gets
+#: the load order the library's own linking rules ask for.
+LAYER_SHELL_SONAMES = ("libgtk4-layer-shell.so.0", "libgtk4-layer-shell.so")
+
+
+def layer_shell_preload(find: Callable[[str], str | None] | None = None) -> str:
+    """What to put in LD_PRELOAD so gtk4-layer-shell can do its job, or "".
+
+    "" is the normal answer on a machine without the library - GNOME, say -
+    and means "add nothing", not "something went wrong".
+    """
+    if find is None:
+        from ctypes.util import find_library
+        find = find_library
+    found = find("gtk4-layer-shell")
+    if found:
+        return found
+    for name in LAYER_SHELL_SONAMES:
+        if any(pathlib.Path(d, name).exists()
+               for d in ("/usr/lib", "/usr/lib64", "/usr/local/lib",
+                         "/usr/lib/x86_64-linux-gnu")):
+            return name
+    return ""
+
+
+def with_layer_shell_preloaded(env: dict, preload: str | None = None) -> dict:
+    """`env` with the layer-shell library prepended to LD_PRELOAD."""
+    preload = layer_shell_preload() if preload is None else preload
+    if not preload:
+        return env
+    env = dict(env)
+    existing = env.get("LD_PRELOAD", "")
+    env["LD_PRELOAD"] = f"{preload} {existing}".strip() if existing else preload
+    return env
+
+
 def _probe(python: str) -> tuple[str, ...]:
     """Which GTK pieces `python` can import, as tokens (`gtk4`, `layer-shell`)."""
     try:
+        # Preloaded here for the same reason the helper is: without it the
+        # shim never initialises and the probe reports layer-shell unsupported
+        # on a compositor that supports it perfectly well. The probe has to be
+        # asked under the conditions the helper will actually run in.
         done = subprocess.run([python, "-c", _PROBE_SCRIPT], capture_output=True,
-                              text=True, timeout=PROBE_TIMEOUT_S)
+                              text=True, timeout=PROBE_TIMEOUT_S,
+                              env=with_layer_shell_preloaded(dict(os.environ)))
     except (OSError, subprocess.SubprocessError) as exc:
         log.debug("overlay probe of %s failed: %s", python, exc)
         return ()
@@ -218,7 +274,7 @@ def default_launcher(position: str = DEFAULT_POSITION, lang: str = "en", verbose
     if probe.command is None:
         log.warning("recording overlay disabled: %s", probe.reason)
         return None
-    env = dict(os.environ)
+    env = with_layer_shell_preloaded(dict(os.environ))
     root = str(repo_root())
     env["PYTHONPATH"] = os.pathsep.join([root] + [p for p in [env.get("PYTHONPATH")] if p])
     cmd = list(probe.command)

@@ -213,14 +213,19 @@ def test_the_default_config_calls_the_portal_triggers_a_first_run_preference():
     assert "keyboard shortcuts" in comment          # and where the key is really set
 
 
-def test_readme_shows_the_current_defaults():
-    """The README prints config.toml verbatim; drift there misinforms every new user."""
+def test_the_docs_show_the_current_defaults():
+    """`docs/configuration.md` prints config.toml verbatim.
+
+    Drift there misinforms every new user. The block lived in the README until
+    that was cut down to a landing page; this follows it rather than lapsing.
+    """
     import re
     from pathlib import Path
 
-    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
-    block = re.search(r"```toml\n(# voice configuration.*?)```", readme, re.S)
-    assert block, "the README no longer contains the default config block"
+    page = Path(__file__).resolve().parents[1] / "docs" / "configuration.md"
+    assert page.exists(), f"{page} is gone; the defaults block needs a new home"
+    block = re.search(r"```toml\n(# voice configuration.*?)```", page.read_text(), re.S)
+    assert block, f"{page.name} no longer contains the default config block"
     assert block.group(1) == DEFAULT_CONFIG
 
 

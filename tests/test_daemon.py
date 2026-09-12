@@ -1515,7 +1515,12 @@ def test_quit_returns_from_run_and_leaves_nothing_holding_the_process(
         "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
     monkeypatch.setattr("voice.daemon.default_launcher", lambda **kw: helper_processes())
     monkeypatch.setattr("voice.daemon.is_running", lambda: False)
-    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
+    cfg = Config.load()
+    # A machine that has been set up. Left at the shipped default, run() opens
+    # the first-run wizard - a modal dialog with nobody to dismiss it, which
+    # hangs this test for ever rather than failing it.
+    cfg.set("general.setup_complete", True)
+    d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray(), notifier=QuietNotifier())
 
     blocked, release = threading.Event(), threading.Event()
 
@@ -3590,3 +3595,88 @@ def test_a_window_command_that_gave_up_is_reported_as_itself(isolated_xdg, qapp,
         assert "will not say which window" not in caplog.text
     finally:
         d.shutdown()
+
+
+# -- the first-run wizard -----------------------------------------------------
+
+def test_a_new_install_is_offered_the_wizard_once(isolated_xdg, qapp, monkeypatch):
+    """It runs on a machine that has never been set up, and not again after."""
+    shown = []
+    monkeypatch.setattr("voice.daemon.SetupWizard",
+                        lambda cfg, parent=None: type("W", (), {
+                            "exec": lambda self: shown.append(cfg) or 1})())
+    cfg = Config.load()
+    assert cfg.needs_setup() is True
+    d = Daemon(config=cfg, notifier=QuietNotifier(), tray=object())
+    assert d.offer_setup() is True, "answered, so the caller has to rebuild"
+    assert len(shown) == 1
+
+    cfg.set("general.setup_complete", True)
+    assert d.offer_setup() is False
+    assert len(shown) == 1, "a settled machine must not be asked again"
+
+
+def test_an_upgraded_install_is_never_offered_the_wizard(isolated_xdg, qapp, monkeypatch):
+    """A config written before the wizard existed belongs to someone already
+    dictating; a setup screen on upgrade is an insult, not a help."""
+    shown = []
+    monkeypatch.setattr("voice.daemon.SetupWizard",
+                        lambda cfg, parent=None: type("W", (), {
+                            "exec": lambda self: shown.append(1) or 0})())
+    from voice import paths
+
+    path = paths.config_file()
+    path.write_text('[general]\nlanguage = "en"\n')
+    d = Daemon(config=Config.load(path), notifier=QuietNotifier(), tray=object())
+    d.offer_setup()
+    assert shown == []
+
+
+def test_the_wizard_never_stops_the_daemon_starting(isolated_xdg, qapp, monkeypatch):
+    """Whatever it does, dictation has to come up. A setup screen that throws
+    must not be the reason the program does not run."""
+    def explode(cfg, parent=None):
+        raise RuntimeError("no display for a wizard")
+
+    monkeypatch.setattr("voice.daemon.SetupWizard", explode)
+    d = Daemon(config=Config.load(), notifier=QuietNotifier(), tray=object())
+    assert d.offer_setup() is False          # and must not raise
+
+
+#: Tests that reach `run()` but return before the wizard could ever open,
+#: because they hand over to a daemon that already owns the socket.
+_HANDS_OVER_BEFORE_STARTING = {
+    "test_run_is_noop_when_already_running",
+    "test_run_hands_over_when_the_socket_is_taken_after_the_initial_check",
+}
+
+
+def test_no_test_starts_the_daemon_into_an_unanswered_wizard():
+    """`run()` opens the first-run wizard on a machine that has never been set up.
+
+    It is a modal dialog, so in a test there is nobody to dismiss it and the run
+    hangs - not for 60 seconds until pytest-timeout fires, but indefinitely:
+    `exec()` spins its own Qt event loop, which the timeout cannot interrupt.
+    One such test took a full-suite run from 30 seconds to "still going at 400".
+
+    Any test that starts the daemon has to say which machine it is on.
+    """
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).read_text()
+    unguarded = []
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.FunctionDef) and node.name.startswith("test_")):
+            continue
+        if node.name in _HANDS_OVER_BEFORE_STARTING:
+            continue
+        body = ast.get_source_segment(source, node) or ""
+        if ".run()" not in body:
+            continue
+        if "setup_complete" not in body and "SetupWizard" not in body:
+            unguarded.append(f"{node.name}:{node.lineno}")
+    assert not unguarded, (
+        "these call Daemon.run() without saying whether the machine has been set "
+        f"up, so the first-run wizard will hang them: {unguarded}. Set "
+        '`general.setup_complete` on the config, or patch voice.daemon.SetupWizard.')

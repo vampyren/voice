@@ -1,6 +1,6 @@
 import pytest
 
-from voice import ipc
+from voice import ipc, paths
 from voice.cli import main
 
 
@@ -416,3 +416,9 @@ def test_status_does_not_invent_a_language_for_a_hand_picked_profile(isolated_xd
         assert "profile:  groq\n" in out and "(for" not in out
     finally:
         srv.stop()
+
+
+def test_setup_is_offered_in_the_help(isolated_xdg, capsys):
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    assert "setup" in capsys.readouterr().out

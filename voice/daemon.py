@@ -42,6 +42,7 @@ from voice.ui.overlay_model import FINISH as PILL_FILL_S
 from voice.ui.placement import (LEGACY_POSITIONS, POSITIONS, is_margin,
                                  normalise_position)
 from voice.ui.settings import SettingsDialog
+from voice.ui.wizard import SetupWizard
 from voice.ui.tray import Tray
 
 log = logging.getLogger(__name__)
@@ -1308,6 +1309,13 @@ class Daemon:
         self.listener.start()
         self.overlay.start()
         self.tray.show()
+        # Before the models are touched: its whole purpose is to be asked where
+        # they should go, and a warmup that has already started downloading has
+        # answered that question for the owner.
+        if self.offer_setup():
+            # It may have chosen a different model, and the transcriber was
+            # built before it ran.
+            self.apply_config()
         self._start_warmup()
         # Before the first hotkey, so the no-microphone guard has an answer to
         # read rather than the "nobody asked yet" it starts out with.
@@ -1321,6 +1329,22 @@ class Daemon:
         code = app.exec()
         self.shutdown()
         return code
+
+    def offer_setup(self) -> bool:
+        """Run the first-run wizard if this machine has never been set up.
+
+        True when it was answered, which is the caller's cue to rebuild from
+        what it wrote. Never a reason the daemon fails to start: dictation with
+        the shipped defaults works, and a setup screen that cannot open is
+        worth a line in the log and nothing more.
+        """
+        if not self.config.needs_setup():
+            return False
+        try:
+            return bool(SetupWizard(self.config).exec())
+        except Exception:
+            log.exception("the first-run wizard could not be shown")
+            return False
 
     def _hand_over(self) -> int:
         """Defer to the daemon that already owns the socket."""

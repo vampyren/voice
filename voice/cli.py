@@ -34,6 +34,7 @@ def _parser() -> argparse.ArgumentParser:
     lang.add_argument("code", help="a two-letter code, 'auto', or 'next' to cycle "
                                    "through general.languages")
     sub.add_parser("doctor", help="check this machine for everything voice needs")
+    sub.add_parser("setup", help="run the first-run setup questions again")
     return p
 
 
@@ -106,6 +107,31 @@ def _print_status(reply: dict) -> None:
         print(f"{label + ':':<{width}} {value}")
 
 
+def _run_setup() -> int:
+    """The first-run wizard, on demand.
+
+    Its own Qt application, and against the config file rather than a running
+    daemon's copy: `voice setup` has to work whether or not anything is running,
+    and a daemon that is picks the answers up with `voice reload`.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from voice.config import Config
+    from voice.ui.wizard import SetupWizard
+
+    # Kept alive for as long as the dialog is: dropping the reference while a
+    # window still exists takes the process down with it.
+    app = QApplication.instance() or QApplication([])
+    answered = bool(SetupWizard(Config.load()).exec())
+    assert app is not None
+    if answered and is_running():
+        try:
+            send({"cmd": "reload"})
+        except IPCError:
+            log.debug("the running daemon did not take the new settings", exc_info=True)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -113,6 +139,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "doctor":
         from voice.doctor import run_doctor
         return run_doctor()
+    if args.cmd == "setup":
+        return _run_setup()
     if args.cmd in (None, "daemon"):
         if is_running():
             try:

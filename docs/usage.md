@@ -207,6 +207,23 @@ the command line (`voice language sv`, `voice language next`), and `voice status
 which one is active. Every switch is saved to `config.toml` and applies to the next
 dictation.
 
+#### The first-run wizard
+
+A new install opens a short setup dialog the first time the daemon starts: where the
+speech models should be kept, which model each language uses, and a reminder that the
+desktop still owns the shortcut key. Nothing is written until **Finish**, and closing it
+leaves it to ask again next time.
+
+It never appears on an upgrade — `general.setup_complete` is absent from a config
+written before the wizard existed, and an install that has been dictating for months
+does not need a setup screen. Run it again whenever you like:
+
+```bash
+voice setup
+```
+
+A running daemon picks the answers up straight away.
+
 #### Model per language
 
 One model rarely wins in two languages, so `general.language_profiles` names the

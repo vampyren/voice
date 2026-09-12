@@ -21,6 +21,11 @@ from voice.ui.placement import (DEFAULT_MARGIN_X, DEFAULT_MARGIN_Y, DEFAULT_POSI
 DEFAULT_CONFIG = '''# voice configuration. Edited by the settings window; hand edits are fine too.
 
 [general]
+setup_complete = false     # the first-run wizard sets this. Absent from a config
+                           # written before the wizard existed, which is how an
+                           # upgrade avoids showing a setup screen to someone who
+                           # has been using voice for months. `voice setup` runs it
+                           # again whenever you want.
 language = "en"            # "en", "sv", or "auto"
 languages = ["en", "sv"]   # cycle order for the language toggle
 notifications = true
@@ -284,6 +289,14 @@ class Config:
             if chosen is not None:
                 profile["model_dir"] = str(chosen)
             return name, profile
+
+    def needs_setup(self) -> bool:
+        """Has the first-run wizard still to run on this machine?
+
+        False for a config that has no such key at all: that file predates the
+        wizard, and whoever wrote it has been dictating with it already.
+        """
+        return self.get("general.setup_complete") is False
 
     def model_dir(self) -> Path | None:
         """Where downloaded models are kept, or None for the Hugging Face cache.

@@ -211,6 +211,17 @@ def _portal() -> tuple[bool, str]:
     return (True, "RemoteDesktop portal v2+") if portal_available() else (False, "RemoteDesktop portal missing (xdg-desktop-portal-kde/gnome)")
 
 
+def _bundled_cuda_runtime() -> bool:
+    """Did this install ship the CUDA libraries, or is it the CPU-only build?
+
+    A card being present says nothing about whether it can be used: the CPU
+    build leaves the libraries out on purpose, so `get_cuda_device_count()`
+    counts the card and CTranslate2 then cannot load it.
+    """
+    from pathlib import Path
+    return Path("/usr/lib/voice/cuda").is_dir()
+
+
 def _cuda() -> tuple[bool, str]:
     try:
         import ctranslate2
@@ -219,6 +230,14 @@ def _cuda() -> tuple[bool, str]:
         return False, f"ctranslate2 cuda probe failed: {exc}"
     if n == 0:
         return False, "no CUDA device; local transcription will run on CPU (install with --extra gpu on the NVIDIA PC)"
+    if not _bundled_cuda_runtime():
+        # The card is there and this build cannot use it. Saying "1 CUDA
+        # device(s)" and nothing else reads as "your GPU is in use", which is
+        # what the CPU-only package told its first owner right up until the
+        # model failed to load.
+        return True, (f"{n} CUDA device(s), but this is the CPU-only build - no CUDA "
+                      f"runtime is bundled, so transcription runs on CPU int8. "
+                      f"Rebuild with `cd packaging && makepkg -si` to use the card.")
     return True, f"{n} CUDA device(s)"
 
 

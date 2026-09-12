@@ -553,3 +553,27 @@ def test_paste_target_fails_when_the_daemon_has_given_up_on_its_window_command(m
 
     assert ok is False
     assert "stopped answering" in detail and "queryWindowInfo" in detail
+
+
+def test_cuda_says_so_when_the_build_cannot_use_the_card(monkeypatch):
+    """A card present and no runtime bundled is not "your GPU is in use".
+
+    The CPU-only package on a machine with an NVIDIA driver reported
+    "1 CUDA device(s)" and nothing else, right up until the model failed to
+    load after a 1.6 GB download.
+    """
+    from voice.doctor import default_probes
+
+    monkeypatch.setattr("voice.doctor._bundled_cuda_runtime", lambda: False)
+    ok, detail = default_probes()["cuda"]()
+    if ok:                                  # only meaningful where a card exists
+        assert "CPU-only build" in detail, detail
+
+
+def test_cuda_is_reported_plainly_when_the_runtime_is_there(monkeypatch):
+    from voice.doctor import default_probes
+
+    monkeypatch.setattr("voice.doctor._bundled_cuda_runtime", lambda: True)
+    ok, detail = default_probes()["cuda"]()
+    if ok:
+        assert "CPU-only build" not in detail

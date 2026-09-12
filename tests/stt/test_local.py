@@ -163,3 +163,59 @@ def test_the_shipped_default_model_name_really_loads():
         except LocalEntryNotFoundError as exc:
             pytest.skip(f"{name} is not cached and the hub is unreachable: {exc}")
     assert model.model.is_multilingual is True
+
+
+# -- a card that is present but unusable -------------------------------------
+#: The CPU-only package on a machine with an NVIDIA driver: CTranslate2 counts
+#: the card, then cannot dlopen libcublas 12 because the build deliberately
+#: does not ship it. Counting devices cannot see that; only loading can. Before
+#: this, the owner's first dictation failed after a 1.6 GB model download.
+
+def test_a_gpu_that_cannot_actually_load_falls_back_to_cpu():
+    tried = []
+
+    def factory(name, device, compute, **kw):
+        tried.append((device, compute))
+        if device == "cuda":
+            raise RuntimeError("Library libcublas.so.12 is not found")
+        return object()
+
+    from voice.stt.local import LocalTranscriber
+
+    stt = LocalTranscriber({"model": "large-v3-turbo", "device": "cuda",
+                            "compute_type": "float16"},
+                           model_factory=factory, cuda_available=lambda: True)
+    stt.warmup()
+
+    assert tried == [("cuda", "float16"), ("cpu", "int8")], tried
+    assert "GPU could not be used" in stt.fallback_reason
+    assert stt.describe().endswith("(cpu/int8)")
+
+
+def test_a_gpu_that_works_is_not_second_guessed():
+    from voice.stt.local import LocalTranscriber
+
+    tried = []
+
+    def factory(name, device, compute, **kw):
+        tried.append(device)
+        return object()
+
+    stt = LocalTranscriber({"model": "large-v3-turbo", "device": "cuda",
+                            "compute_type": "float16"},
+                           model_factory=factory, cuda_available=lambda: True)
+    stt.warmup()
+
+    assert tried == ["cuda"], "a working GPU must not be retried on CPU"
+    assert stt.fallback_reason is None
+
+
+def test_a_cpu_profile_never_tries_the_gpu():
+    from voice.stt.local import LocalTranscriber
+
+    tried = []
+    stt = LocalTranscriber({"model": "small", "device": "cpu", "compute_type": "int8"},
+                           model_factory=lambda n, d, c, **kw: tried.append(d),
+                           cuda_available=lambda: True)
+    stt.warmup()
+    assert tried == ["cpu"]

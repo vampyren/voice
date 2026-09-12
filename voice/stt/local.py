@@ -53,6 +53,24 @@ class LocalTranscriber:
             self.fallback_reason = "CUDA not available; using CPU int8 (slower)"
             log.warning(self.fallback_reason)
             device, compute = "cpu", "int8"
+        if device == "cuda":
+            try:
+                return self._build(device, compute)
+            except Exception as exc:
+                # A card is present and the libraries it needs are not - which
+                # is exactly the CPU-only build on a machine with an NVIDIA
+                # driver: `get_cuda_device_count()` counts the card, then
+                # CTranslate2 cannot dlopen libcublas 12 because this package
+                # deliberately does not ship it. Counting devices can never see
+                # that; only loading can. Failing here would cost the owner a
+                # dictation and 1.6 GB of model download for nothing.
+                self.fallback_reason = (f"the GPU could not be used ({exc}); "
+                                        f"using CPU int8 (slower)")
+                log.warning(self.fallback_reason)
+                device, compute = "cpu", "int8"
+        return self._build(device, compute)
+
+    def _build(self, device: str, compute: str):
         self._device, self._compute = device, compute
         # The configured name goes through untouched: faster-whisper resolves its
         # own short names ("large-v3-turbo", "small"), and anything else is a

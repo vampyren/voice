@@ -37,6 +37,9 @@ IDLE_GRACE = 0.2
 #: State lifetimes (seconds). `done` auto-dismisses, `notice` returns to
 #: whatever was on screen before it, `error` hides itself.
 DONE_HOLD = 1.2
+#: A checkmark that carries words stays up longer - there is something to read,
+#: and 1.2 s was not enough time to read it and act on it.
+DONE_TEXT_HOLD = 2.4
 NOTICE_TTL = 2.0
 ERROR_HOLD = 2.0
 
@@ -196,6 +199,13 @@ class OverlayModel:
         self.reduced_motion = reduced_motion
         self.lang = lang
         self.prev_lang = lang
+        #: Whether the notice on screen is a language switch. `notice` was
+        #: built for the toggle and the badge reads `prev_lang` for any notice
+        #: at all, so once the busy answers started reusing the state, every
+        #: ignored keypress also flipped the chip and claimed a switch that had
+        #: not happened. Set by the switch itself, consumed by the next notice.
+        self.notice_swaps_language = False
+        self._lang_swapped = False
         self._clock = clock
         self._half = (bars + 1) // 2          # history slots: centre out to one end
         self._history = deque([0.0] * self._half, maxlen=self._half)
@@ -285,6 +295,7 @@ class OverlayModel:
         code = (code or "").strip() or self.lang
         if code != self.lang:
             self.prev_lang = self.lang
+            self._lang_swapped = True
         self.lang = code
 
     def set_state(self, state: str, text: str | None = None,
@@ -301,6 +312,18 @@ class OverlayModel:
             # replay the pop-in and hand `done` a fresh 1.2 s hold every time.
             # New text under the same state is news, and does re-enter.
             return
+        if state == "notice":
+            # Consumed on EVERY notice that is actually entered, not only the
+            # first: notices last two seconds and either kind can land on top of
+            # the other, so a flag read only on entry goes stale in both
+            # directions - a busy answer inheriting a real switch's animation,
+            # and a real switch arriving over a busy notice without one.
+            #
+            # After the check above, never before it: a notice that is refused
+            # as a repeat has not been entered, and eating the pending swap
+            # there both flips the chip for the repeat and leaves the language
+            # switch that follows with no animation at all.
+            self.notice_swaps_language, self._lang_swapped = self._lang_swapped, False
         self._enter(state, text, now, reset_counter=True)
 
     def _enter(self, state: str, text: str | None, now: float,
@@ -366,7 +389,8 @@ class OverlayModel:
             self._enter(state, text, now, reset_counter=False, resuming=True)
             self._state_since = now - age   # resume, do not restart, its hold
             return
-        hold = {"done": DONE_HOLD, "error": ERROR_HOLD}.get(self.state)
+        hold = {"done": DONE_TEXT_HOLD if self.text else DONE_HOLD,
+                "error": ERROR_HOLD}.get(self.state)
         if hold is not None and self.state_age >= hold:
             self.set_state("hidden", now=now)
 
@@ -527,8 +551,14 @@ class OverlayModel:
 
     @property
     def badge_swap(self) -> float:
-        """0..1 of the badge's out-and-back-in swap while a notice is showing."""
-        if self.state != "notice":
+        """0..1 of the badge's out-and-back-in swap while a notice is showing.
+
+        1.0 - settled, no animation - for a notice that is not a language
+        switch. The busy answers reuse this state, and a chip that flips out
+        and back for "Still working" is claiming something happened to the
+        language when nothing did.
+        """
+        if self.state != "notice" or not self.notice_swaps_language:
             return 1.0
         return _clamp01(self.state_age / SWAP)
 

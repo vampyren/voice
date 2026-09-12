@@ -1,0 +1,29 @@
+activities: 5a46c54a-b1a0-4683-8101-2c938e1d90ad
+caption: ~ : fish — Konsole
+clientMachine: 
+desktopFile: org.kde.konsole
+desktops: 9f865b19-3259-4a53-88fd-343b93ab296e
+excludeFromCapture: false
+fullscreen: false
+hasTransientParent: false
+height: 1332
+keepAbove: false
+keepBelow: false
+layer: 2
+localhost: true
+maximizeHorizontal: 0
+maximizeVertical: 0
+minimized: false
+noBorder: false
+pid: 2132
+resourceClass: org.kde.konsole
+resourceName: konsole
+role: 
+skipPager: false
+skipSwitcher: false
+skipTaskbar: false
+type: 0
+uuid: {63ef7dd0-63ba-4545-a41c-b0a4da18c9c2}
+width: 1416.9999999999995
+x: 3662.34819505476
+y: 41.26121104029839

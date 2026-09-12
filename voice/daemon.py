@@ -21,8 +21,9 @@ from voice.hotkey.keyspec import KeySpec, Tracker, parse_keyspec
 from voice.hotkey.portal_listener import STATE_BOUND, STATE_UNASSIGNED, PortalListener
 from voice.inject.clipboard import Clipboard
 from voice.inject.fallback import make_key_sender
-from voice.inject.injector import (Injector, insertion_status, pill_policy,
-                                   pill_settle_s, run_window_command)
+from voice.inject.injector import (BLIND_PASTE, Injector, insertion_status,
+                                   pill_policy, pill_settle_s, run_window_command)
+from voice.inject.window import effective_window_command, terminal_chord_is_unreachable
 from voice.ipc import (NEXT_LANGUAGE, PENDING_LANGUAGE, IPCError, Server, is_running,
                        send)
 from voice.pipeline import Dictation, Services, State, detail_method
@@ -162,6 +163,47 @@ CLIPBOARD_METHODS = ("clipboard", "clipboard-only", "clipboard-pill")
 #: What the pill says instead. Short: it is drawn inside the 132 px well.
 DONE_COPIED = "Copied · Ctrl+V"
 
+
+#: What the pill says when the paste could not be confirmed to have landed.
+#: Deliberately names no key. Where the focused window cannot be read, neither
+#: chord can be recommended - a terminal pastes with Ctrl+Shift+V and a browser
+#: with Ctrl+V, so naming either is wrong half the time, and the owner was duly
+#: told to press Ctrl+Shift+V while pasting into a browser. What is true in
+#: both cases is that the transcript is on the clipboard: say only that.
+DONE_UNVERIFIED = "Copied"
+
+#: What the pill says when the dictate key is pressed with nothing to toggle.
+#: The press used to vanish - no sound, no notification, no change on screen -
+#: so the owner pressed again, and the second press landed after the pipeline
+#: had gone idle and started a recording instead of stopping one. `notice`
+#: shows for NOTICE_TTL and then goes back to whatever was on screen, which is
+#: exactly the shape this needs: an answer, not a state.
+#: ERROR is deliberately absent: `_fail` enters and leaves it inside one call,
+#: having already raised a "Dictation failed" notification, and "Still working"
+#: on top of that contradicts what the owner was just told.
+BUSY_NOTICES = {State.TRANSCRIBING: "Still working",
+                State.INJECTING: "Still pasting"}
+
+
+def busy_messages(state: State, policy: str) -> list[dict]:
+    """What to tell the pill about a dictate press that could not be acted on.
+
+    Pure, like `overlay_messages`, so the wording can be read and tested
+    without a daemon. IDLE and RECORDING return nothing: they act on a press,
+    so they never reach here, and a notice on either would be a lie.
+
+    Nothing at all is said while INJECTING under the `hide` policy. The
+    injector has taken a focus-stealing pill off screen precisely so the paste
+    chord reaches the owner's window; a notice maps it again, the pill takes
+    the keyboard back, the chord lands in it, and `restore_clipboard` then puts
+    the old clipboard back over the transcript. Answering the press is worth a
+    good deal, but not the text it was asking about.
+    """
+    if state is State.INJECTING and policy == "hide":
+        return []
+    text = BUSY_NOTICES.get(state)
+    return [{"state": "notice", "text": text}] if text else []
+
 #: The detail on the INJECTING that re-inserts an entry from the history.
 #: There was no transcription and no pill, so there is no fill to finish and
 #: nothing for the paste to wait for.
@@ -194,7 +236,7 @@ def _single_shot(seconds: float, done: Callable[[], None]):
 
 
 def overlay_messages(state: State, detail: str, language: str,
-                     finish_fill: bool = False) -> list[dict]:
+                     finish_fill: bool = False, blind_hint: str = "") -> list[dict]:
     """The pill protocol for one pipeline transition, in order.
 
     Pure so the mapping can be read (and tested) without a daemon: the states
@@ -204,6 +246,10 @@ def overlay_messages(state: State, detail: str, language: str,
     pill off screen for its paste chord (see `pill_policy`); the fill is then
     told to run to the end of its track first, because unmapping the pill
     mid-sweep is what leaves the bar stopped in the middle.
+
+    `blind_hint` is what to say instead of a bare checkmark when the paste
+    could not be confirmed to have reached anything - see `BLIND_PASTE`. Empty
+    means say nothing extra, because there is nothing useful to suggest.
     """
     if state is State.RECORDING:
         # The badge first, so the pill never appears showing the old language.
@@ -226,14 +272,91 @@ def overlay_messages(state: State, detail: str, language: str,
         if detail and detail != AFTER_ERROR:
             # Insertion finished; the helper hides itself. What it says depends
             # on whether anything was actually inserted.
-            if detail_method(detail) in CLIPBOARD_METHODS:
+            method = detail_method(detail)
+            if method in CLIPBOARD_METHODS:
                 return [{"state": "done", "text": DONE_COPIED}]
+            if method == BLIND_PASTE and blind_hint:
+                # The chord went out and nothing can say where it landed. A
+                # bare checkmark here is the thing that made a dictation look
+                # lost: it reads as "inserted" whether or not anything was.
+                return [{"state": "done", "text": blind_hint}]
             return [{"state": "done"}]
     return []
 
 
+class FocusedWindow:
+    """Asks the desktop what has the keyboard, and stops asking if it will not say.
+
+    One timeout disables it for the rest of the session. The command runs
+    between the pill being unmapped and the chord being sent, so one that hangs
+    costs *every* dictation its full timeout - and one that is secretly
+    interactive would be worse still. KWin's `queryWindowInfo` is the live
+    example: it may be a window *picker* rather than a query, in which case it
+    would put a crosshair grab in front of every paste. Losing the terminal
+    chord is much the lesser harm, and the pill says so out loud rather than
+    pretending the paste landed.
+
+    A command that answers "nothing is focused" is not a failure and keeps
+    being asked; only a command that does not answer at all is given up on.
+    """
+
+    def __init__(self, command: Callable[[], str],
+                 run: Callable[..., str | None] = run_window_command):
+        self._command, self._run = command, run
+        #: The command that stopped answering, or None. Keyed to the string
+        #: rather than a bare flag: the give-up message tells the owner to set
+        #: a working `inject.active_window_command`, and a flag that outlived
+        #: the command it was about short-circuited the replacement too - every
+        #: paste stayed blind until a restart nothing told them to perform.
+        self._gave_up_on: str | None = None
+        #: The focused window as it was when this dictation began. Replayed at
+        #: paste time rather than re-read, because by then the pill has it.
+        self._captured: str | None = None
+
+    @property
+    def usable(self) -> bool:
+        """False while the configured command is one that stopped answering."""
+        return self._gave_up_on is None or self._gave_up_on != self._command()
+
+    def capture(self) -> None:
+        """Read the focused window now, for this dictation's paste to use.
+
+        Called the moment a dictation begins, before the pill is told to
+        appear. That is the only moment the desktop names the window being
+        dictated INTO: a pill with no layer-shell surface takes the keyboard
+        when it maps, so anything asked later names the pill. Asking here also
+        keeps the command's cost out of the paste, where it sat between focus
+        coming back and the chord going out.
+        """
+        cmd = self._command()
+        if not cmd or cmd == self._gave_up_on:
+            self._captured = None
+            return
+        self._captured = self._run(cmd, on_timeout=lambda: self._give_up(cmd))
+
+    def __call__(self) -> str | None:
+        """The window this dictation began in, or None if nobody would say."""
+        return self._captured
+
+    def _give_up(self, cmd: str) -> None:
+        self._gave_up_on = cmd
+        log.warning("%r did not answer in time and will not be asked again unless "
+                    "inject.active_window_command changes. Pastes are now sent "
+                    "without knowing the focused window, and the pill says so. If "
+                    "this is KWin's queryWindowInfo it is an interactive window "
+                    "picker rather than a query: set inject.active_window_command "
+                    "to something that answers on its own.", cmd)
+
+
 def window_class_getter(config: Config) -> Callable[[], str | None]:
-    return lambda: run_window_command(config.get("inject.active_window_command", "") or "")
+    """Ask the desktop which window has the keyboard, if it will say.
+
+    Read fresh on every dictation rather than captured once: the owner can set
+    `inject.active_window_command` in the settings window and the next paste
+    should use it, and `effective_window_command` is cheap - a dict lookup and
+    at most one `shutil.which`.
+    """
+    return FocusedWindow(lambda: effective_window_command(config.get, os.environ))
 
 
 #: How long the daemon waits for `{"state": "hidden"}` to reach the helper
@@ -314,6 +437,11 @@ class Daemon:
         self._hotkey_settings: tuple | None = None
         #: The "no key assigned" notification is worth sending once, not per reload.
         self._shortcut_hint_shown = False
+        #: The terminal-paste warning last given. Re-checked on every reload -
+        #: clearing `inject.terminal_classes` in the settings window puts the
+        #: owner straight into the silent-discard state - but only said again
+        #: when the answer has actually changed.
+        self._terminal_warning = ""
         #: The language the pill was last told about; see _send_overlay.
         self._overlay_language = str(config.get("general.language", "en") or "en")
         #: The [ui] settings the running helper was started with; see _make_overlay.
@@ -332,6 +460,25 @@ class Daemon:
         #: one has been asked for; None when nothing is owed. Written when the
         #: message goes out, read once by the injector before it hides the pill.
         self._fill_lands_at: float | None = None
+        #: True from the moment the injector takes the pill off screen for the
+        #: paste chord until the next state reaches the pill. While it is set,
+        #: nothing may put the pill back: doing so hands a focus-stealing
+        #: window the keyboard mid-paste, the chord lands in it, and
+        #: `restore_clipboard` then overwrites the transcript.
+        self._pill_hidden_for_paste = False
+        #: Built once and kept. It was built inside `_make_injector`, which
+        #: `apply_config` calls on every reload, so a command already known to
+        #: hang was re-armed by every language switch, profile switch and
+        #: settings save - and the next paste paid its full timeout again.
+        self._focused_window = window_class_getter(config)
+        #: Serialises everything that reaches the pill. `_send_overlay` used to
+        #: have one caller, serialised by `_set`; the busy notice added a second
+        #: on the hotkey listener thread, racing the worker. It guards the flag
+        #: above - the check and the send have to be one step, or the notice
+        #: slips in behind the hide and remaps a focus-stealing pill mid-paste -
+        #: and the `_overlay_language`/`_fill_lands_at` read-modify-writes below,
+        #: which two threads could otherwise interleave into a wrong badge.
+        self._overlay_lock = threading.Lock()
         #: One background refresh of each kind at a time; see _refresh_off_thread.
         self._refreshers: dict[str, threading.Thread] = {}
         #: Whether this desktop can put the pill where the config says; None
@@ -359,6 +506,7 @@ class Daemon:
         self.tray = self._tray or Tray(self._on_tray_action)
         self.overlay = self._make_overlay()
         self.dictation.on_state = self._on_dictation_state
+        self.dictation.on_busy = self._on_dictation_busy
         self.tray.set_profiles(list(self.config.get("stt.profiles", {}) or {}), self.config.get("stt.active"))
         self.tray.set_languages(self.config.languages(), self.config.get("general.language"))
         self.tray.set_profile_hint(profile_hint(self.config))
@@ -383,9 +531,68 @@ class Daemon:
         """
         self._pill_policy = pill_policy(self.config, pill_takes_focus(self.config))
         return Injector(self._clipboard, self._sender, self.config.get("inject", {}) or {},
-                        self.listener.modifiers_held, window_class_getter(self.config),
+                        self.listener.modifiers_held, self._focused_window,
                         pill_policy=self._pill_policy, hide_pill=self._hide_pill_for_paste,
                         fill_wait=self._pill_fill_wait, settle_s=pill_settle_s(self.config))
+
+    def _warn_if_terminals_can_never_be_pasted_into(self, notify: bool = True) -> None:
+        """Say once, at startup, that a terminal will swallow every paste.
+
+        The injector cannot find this out for itself. The compositor accepts
+        the chord whatever window has focus, so a paste into a terminal that
+        ignores Ctrl+V is indistinguishable, from here, from one that worked -
+        which is how a dictation came to look lost when it had been sitting on
+        the clipboard the whole time. One line at startup, and the same line
+        from `voice doctor`, is the only warning that can honestly be given.
+        """
+        settings = self.config.get("inject", {}) or {}
+        if str(settings.get("mode", "paste")).strip().lower() != "paste":
+            # Cleared, not just skipped: switching to clipboard mode and back
+            # otherwise left the old warning stored, so the identical warning
+            # was suppressed as "already said" when the condition came back.
+            self._terminal_warning = ""
+            return                     # not pasting at all: no chord to be wrong
+        if self._pill_policy == "clipboard":
+            # `inject.mode` is "paste", but the pill takes focus here and
+            # `inject.pill_focus = clipboard` has already decided not to send a
+            # chord at all. Warning about the chord being wrong for terminals
+            # would be a daily notification about something that never happens.
+            # Cleared for the same reason as the branch above: switching to
+            # this policy and back must not leave the warning suppressed.
+            self._terminal_warning = ""
+            return
+        # A command that has stopped answering is no command at all for this
+        # purpose: every paste is already going out without knowing the window.
+        resolved = (effective_window_command(self.config.get, os.environ)
+                    if self._focused_window.usable else "")
+        unreachable, why = terminal_chord_is_unreachable(
+            resolved,
+            str(settings.get("paste_chord", "ctrl+v")),
+            str(settings.get("terminal_chord", "ctrl+shift+v")),
+            settings.get("terminal_classes", []))
+        if not unreachable:
+            self._terminal_warning = ""
+            return
+        if why == self._terminal_warning:
+            return                     # already said, and nothing has changed
+        self._terminal_warning = why
+        log.warning("%s", why)
+        if not notify:
+            # A reload happens every time the settings window saves. The log
+            # line and `voice doctor` carry it from there; a notification on
+            # every save would be nagging rather than news.
+            return
+        # At startup it is worth a notification: the journal is not a channel
+        # the owner reads, and this is permanent, silent data loss - every
+        # terminal paste discarded. Same treatment as "No keyboard access",
+        # which sits directly above the call site. `general.notifications =
+        # false` still suppresses it, and `voice doctor` remains the channel
+        # that cannot be switched off.
+        self._notifier.notify("Dictation cannot paste into a terminal", why, "normal")
+
+    def _blind_hint(self) -> str:
+        """What to offer when a paste could not be confirmed to have landed."""
+        return DONE_UNVERIFIED
 
     def _pill_fill_wait(self) -> float:
         """Seconds still owed to the pill's fill before it may be unmapped.
@@ -403,7 +610,8 @@ class Daemon:
         it queues behind up to thirty level messages a second. A helper that
         does not answer leaves the old estimate in place.
         """
-        lands_at, self._fill_lands_at = self._fill_lands_at, None
+        with self._overlay_lock:
+            lands_at, self._fill_lands_at = self._fill_lands_at, None
         if lands_at is None:
             return 0.0
         told = self._what_the_pill_says()
@@ -441,7 +649,11 @@ class Daemon:
         """
         if self.overlay is None:
             return
-        self.overlay.send({"state": "hidden"})
+        with self._overlay_lock:
+            self._pill_hidden_for_paste = True
+            self.overlay.send({"state": "hidden"})
+        # Outside the lock: this waits on the helper, and a notice that is
+        # going to be refused anyway must not queue behind half a second of it.
         self.overlay.flush(OVERLAY_HIDE_FLUSH_S)
 
     def _make_overlay(self) -> OverlayClient:
@@ -471,13 +683,25 @@ class Daemon:
         about it. It is a picture of a pill, not a dictation.
         """
         self._end_pill_preview()               # a second nudge replaces the first
+        with self._overlay_lock:
+            if self._pill_hidden_for_paste:
+                # A dictation is between the pill being unmapped and its chord.
+                # The preview is a focus-stealing window like any other: mapping
+                # one here takes the keyboard, the chord lands in the preview,
+                # and `restore_clipboard` overwrites the transcript. The
+                # placement can be previewed a second later.
+                log.info("not previewing the pill: a paste is in flight")
+                return
         if self.overlay is not None:
             self.overlay.stop()
         language = str(self.config.get("general.language", "en") or "en")
         self.overlay = self._make_preview_overlay(position, margin_x, margin_y, language)
         self.overlay.start()
-        self.overlay.send({"language": language})
-        self.overlay.send({"state": "recording"})
+        # Through the guarded sender like every other route that can map the
+        # pill - see `test_only_the_guarded_sender_can_put_the_pill_back_on_screen`.
+        # The levels carry no state and cannot map anything, so they go direct.
+        self._send_overlay([{"language": language}, {"state": "recording"}],
+                           language, refuse_while_hidden=True)
         for level in PREVIEW_LEVELS:
             self.overlay.send({"level": level})
         self._preview = self._preview_timer_factory(PREVIEW_SECONDS, self._end_pill_preview)
@@ -492,7 +716,8 @@ class Daemon:
         """
         verbose = log.isEnabledFor(logging.DEBUG)
         allow_fallback = bool(self.config.get("ui.overlay_allow_fallback", False))
-        self._overlay_language = language
+        with self._overlay_lock:       # the only writer that is not _send_overlay
+            self._overlay_language = language
         return OverlayClient(True, launcher=lambda: default_launcher(
             position=position, margin_x=margin_x, margin_y=margin_y, lang=language,
             verbose=verbose, allow_fallback=allow_fallback))
@@ -544,6 +769,13 @@ class Daemon:
         The tray comes first and by signal, as before; the pill is decoration
         and its client swallows every failure, so neither can delay the other.
         """
+
+        # Before anything is told to appear: the pill takes the keyboard when it
+        # maps, so this is the last moment the desktop still names the window
+        # the owner is dictating into. A recall has no recording, but it starts
+        # from idle with nothing on screen, so the same moment serves.
+        if state is State.RECORDING or (state is State.INJECTING and detail == RECALL):
+            self._focused_window.capture()
         # A preview showing while a real recording starts would be taken for the
         # recording itself - and it is a helper at the wrong placement, on a
         # client the pipeline's messages are not meant for.
@@ -557,17 +789,63 @@ class Daemon:
         # case leaves it on screen, where the fill finishes into the checkmark
         # on its own and costs the paste nothing. See pill_policy().
         messages = overlay_messages(state, detail, language,
-                                    finish_fill=self._pill_policy == "hide")
+                                    finish_fill=self._pill_policy == "hide",
+                                    blind_hint=self._blind_hint())
         self._send_overlay(messages, language)
 
-    def _send_overlay(self, messages: list[dict], language: str) -> None:
+    def _on_dictation_busy(self, state: State) -> None:
+        """Answer a dictate press the pipeline was in no position to act on.
+
+        Called on the hotkey listener thread. The pill's client swallows its
+        own failures, and the pipeline nets anything this raises, so a missing
+        or wedged helper costs the press its answer and nothing else.
+
+        `_pill_hidden_for_paste` is read rather than the state that came with
+        the press, because they are not the same thing: `toggle()` samples the
+        state under its lock and reports it after releasing, so a press made
+        during TRANSCRIBING can arrive here once the injector has already
+        unmapped the pill for the chord. The pill's actual situation is the
+        only safe thing to test - answering the press is not worth the
+        transcript it was asking about.
+        """
+        if self.overlay is None:
+            return
+        language = str(self.config.get("general.language", "en") or "en")
+        self._send_overlay(busy_messages(state, self._pill_policy), language,
+                           refuse_while_hidden=True)
+
+    def _send_overlay(self, messages: list[dict], language: str,
+                      refuse_while_hidden: bool = False) -> None:
         """Send one transition's messages, badge first when it has changed.
 
         The pill draws the badge from the last language it was told about, and
         the language can change from anywhere - the toggle, the tray, the
         settings dialog - between two states. So every state message is
         preceded by the language whenever it has moved since the last one sent.
+
+        `refuse_while_hidden` marks the messages that are only an answer to the
+        owner, never a state: they are dropped outright while the injector has
+        the pill off screen for a paste chord. The test and the send happen
+        under one lock, because they were two steps and the gap between them
+        was enough - `_hide_pill_for_paste` blocks for up to half a second on
+        its flush - for a notice to arrive after the hide, remap a
+        focus-stealing pill, take the chord into it, and have
+        `restore_clipboard` overwrite the transcript 150 ms later.
+
+        Anything that is a state transition clears the flag on its way past:
+        it is about to repaint the pill, so nothing is hidden on the
+        insertion's behalf any more.
         """
+        with self._overlay_lock:
+            if refuse_while_hidden:
+                if self._pill_hidden_for_paste:
+                    return
+            else:
+                self._pill_hidden_for_paste = False
+            self._send_overlay_locked(messages, language)
+
+    def _send_overlay_locked(self, messages: list[dict], language: str) -> None:
+        """The body of `_send_overlay`. Caller holds `_overlay_lock`."""
         for message in messages:
             if "language" in message:
                 self._overlay_language = str(message["language"])
@@ -592,9 +870,14 @@ class Daemon:
         if self.overlay is None:
             return
         language = str(self.config.get("general.language", "en") or "en")
-        if language != self._overlay_language:
-            self.overlay.send({"language": language})
-            self._overlay_language = language
+        # Under the same lock as every other writer of `_overlay_language`:
+        # this runs on the Qt thread, from the tray and the settings dialog,
+        # and can otherwise interleave with a pipeline transition into a badge
+        # that disagrees with what the helper was last told.
+        with self._overlay_lock:
+            if language != self._overlay_language:
+                self.overlay.send({"language": language})
+                self._overlay_language = language
 
     def _hotkey_snapshot(self) -> tuple:
         """What the listener was built from. The portal binds its shortcuts once,
@@ -952,6 +1235,7 @@ class Daemon:
         # _on_hotkeys_ready; only the evdev listener knows its state by now.
         if self.hotkey_backend != "portal" and self.listener.devices_ok() is False:
             self._notifier.notify("No keyboard access", "Run the installer's udev step or add yourself to the input group.", "critical")
+        self._warn_if_terminals_can_never_be_pasted_into()
         log.info("%s %s ready", APP_NAME, __version__)
         code = app.exec()
         self.shutdown()
@@ -1037,6 +1321,12 @@ class Daemon:
             self._start_warmup()
         self.injector = self._make_injector()
         self.dictation.set_injector(self.injector)
+        # The settings window can put the owner straight into the silent-discard
+        # state - clearing inject.terminal_classes, or the window command - so
+        # this is re-evaluated on every reload and not only at startup. It says
+        # nothing unless the answer has changed, and never notifies here; see
+        # `_terminal_warning`.
+        self._warn_if_terminals_can_never_be_pasted_into(notify=False)
         self.tray.set_profiles(list(self.config.get("stt.profiles", {}) or {}), self.config.get("stt.active"))
         self.tray.set_languages(self.config.languages(), self.config.get("general.language"))
         self.tray.set_profile_hint(profile_hint(self.config))
@@ -1103,8 +1393,15 @@ class Daemon:
             return
         self.apply_config()             # sends the new badge (_sync_overlay_language)
         if self.overlay is not None:
-            self.overlay.send({"state": "notice",
-                               "text": f"{previous.upper()} \u2192 {code.upper()}"})
+            # Through `_send_overlay`, not straight at the helper: this runs on
+            # the Qt thread while the injector runs on the worker, so a toggle
+            # during a paste would otherwise map a focus-stealing pill, take
+            # the chord into it, and let `restore_clipboard` overwrite the
+            # transcript. A notice is an answer to the owner, never a state.
+            self._send_overlay([{"state": "notice",
+                                 "text": f"{previous.upper()} \u2192 {code.upper()}"}],
+                               str(self.config.get("general.language", "en") or "en"),
+                               refuse_while_hidden=True)
 
     def _apply_language_profile(self, code: str) -> None:
         """Point stt.active at the profile `code` maps to, in this same document.
@@ -1272,7 +1569,15 @@ class Daemon:
                     "hotkey_backend": self.hotkey_backend, **self._shortcut_status(),
                     "language": self.config.get("general.language"),
                     "overlay": self.overlay.status() if self.overlay else "off",
-                    "insertion": insertion_status(self.config, self._pill_policy)}
+                    "insertion": insertion_status(self.config, self._pill_policy),
+                    # Read here rather than by the caller: only this process is
+                    # certain to be inside the graphical session the answer
+                    # depends on. `voice doctor` may not be.
+                    "window_command": effective_window_command(self.config.get, os.environ),
+                    # Not the same question as "is one configured": a command
+                    # that stopped answering leaves every paste blind while the
+                    # configured string still looks perfectly healthy.
+                    "window_command_usable": self._focused_window.usable}
         if cmd == "profile":
             name = request.get("name", "")
             if name not in (self.config.get("stt.profiles", {}) or {}):

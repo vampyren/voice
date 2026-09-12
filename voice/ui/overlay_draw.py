@@ -129,8 +129,8 @@ def _counter_width(ctx: cairo.Context, model: OverlayModel, s: float) -> float:
 
 
 def _badge_codes(model: OverlayModel) -> tuple[str, ...]:
-    """Codes the chip can show right now - during a notice it shows both."""
-    if model.state == "notice":
+    """Codes the chip can show right now - both only during a language switch."""
+    if model.state == "notice" and model.notice_swaps_language:
         return (model.prev_lang.upper(), model.badge_text)
     return (model.badge_text,)
 
@@ -265,13 +265,28 @@ def _check_path(ctx, x: float, y: float, s: float, progress: float) -> None:
         ctx.line_to(p1[0] + (p2[0] - p1[0]) * t, p1[1] + (p2[1] - p1[1]) * t)
 
 
+def done_label(ctx, text: str, s: float) -> str:
+    """`text`, cut down to something the well can hold beside the checkmark.
+
+    The checkmark, the gap and the label are laid out as one group centred on
+    the well, so the group spills equally either side and a little over-width
+    is fine - "Copied · Ctrl+V" is 112 px of label against a 104 px allowance
+    and reads perfectly. What the spill may not do is cross the GAP between
+    the well and the elapsed timer, which gives the bound: group <= WELL_W +
+    2*GAP, i.e. label <= WELL_W + 2*GAP - CHECK_BOX - LABEL_GAP, which works
+    out at exactly WELL_W. Checked against real renders - 119 px reads, and the
+    156 px of "Copied · Ctrl+Shift+V" drew straight through the timer.
+    """
+    return _elide(ctx, text, WELL_W * s, LABEL_SIZE * s, LABEL_TRACK)
+
+
 def _done_well(ctx, model: OverlayModel, x: float, cy: float, s: float) -> None:
     """Checkmark popping in, then the label rising in beside it.
 
     The daemon may send its own wording with the state: a copy-only insertion
     ends in the same `done`, and "Inserted" is not true of it.
     """
-    label = model.text or "Inserted"
+    label = done_label(ctx, model.text or "Inserted", s)
     label_w = text_width(ctx, label, LABEL_SIZE * s, LABEL_TRACK)
     box = CHECK_BOX * s
     group_w = box + LABEL_GAP * s + label_w
@@ -328,7 +343,7 @@ def _error_well(ctx, model: OverlayModel, x: float, cy: float, s: float,
     _show_text(ctx, x, cy + _cap_height(ctx, size) / 2, text, size)
 
 
-def _elide(ctx, text: str, room: float, size: float) -> str:
+def _elide(ctx, text: str, room: float, size: float, tracking: float = 0.0) -> str:
     """`text`, cut to fit `room` with an ellipsis - measured once, forwards.
 
     One pass, stopping at the first character that overruns the well: advances
@@ -340,13 +355,18 @@ def _elide(ctx, text: str, room: float, size: float) -> str:
     """
     text = text[:200]                       # no point measuring a runaway message
     _face(ctx, size)
-    ellipsis = ctx.text_extents("…").x_advance
+    # `tracking` has to be counted here or the answer is measured differently
+    # from the way it is drawn: `_show_text` adds it per glyph, so a label
+    # elided without it comes back a few pixels wider than the room it was
+    # given. Harmless for the error well, which draws with no tracking; not
+    # harmless for the done label, which does.
+    ellipsis = ctx.text_extents("…").x_advance + tracking * size
     width = 0.0
     cut = 0                                 # the longest prefix that still fits
     for i, ch in enumerate(text):
         if width + ellipsis <= room:
             cut = i
-        width += ctx.text_extents(ch).x_advance
+        width += ctx.text_extents(ch).x_advance + tracking * size
         if width > room:
             return text[:cut] + "…"
     return text                             # the whole message fits as it is
@@ -373,10 +393,11 @@ def _badge(ctx, model: OverlayModel, x: float, cy: float, s: float, width: float
         return
     size = BADGE_SIZE * s
     height = size + 2 * BADGE_PAD_Y * s + 2 * s
-    leaving = model.state == "notice" and swap < 0.5
+    switching = model.state == "notice" and model.notice_swaps_language
+    leaving = switching and swap < 0.5
     text = model.prev_lang.upper() if leaving else model.badge_text
-    border = BADGE_BORDER if leaving or model.state != "notice" else BADGE_BORDER_BRIGHT
-    colour = DIM if leaving or model.state != "notice" else TEXT
+    border = BADGE_BORDER if leaving or not switching else BADGE_BORDER_BRIGHT
+    colour = DIM if leaving or not switching else TEXT
     top = cy - height / 2 + offset
     ctx.set_line_width(s)
     ctx.set_source_rgba(*border[:3], border[3] * alpha)

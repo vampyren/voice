@@ -1595,7 +1595,7 @@ class FakeProbe:
 
 def _focus_daemon(monkeypatch, *, overlay=True, allow_fallback=True, layer_shell=False,
                   command=("python3",), mode="paste", pill_focus=None, settle_ms=None,
-                  clock=None):
+                  clock=None, window_command=None):
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
         "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
     monkeypatch.setattr("voice.daemon.capture_sources", lambda: [])
@@ -1609,6 +1609,11 @@ def _focus_daemon(monkeypatch, *, overlay=True, allow_fallback=True, layer_shell
         cfg.set("inject.pill_focus", pill_focus)
     if settle_ms is not None:
         cfg.set("inject.pill_settle_ms", settle_ms)
+    if window_command is not None:
+        # A test that wants the whole insertion sequence, restore included,
+        # has to let the injector learn what window it is aiming at: an
+        # unknown one is deliberately never restored over.
+        cfg.set("inject.active_window_command", window_command)
     cfg.save()
     kwargs = {"clock": clock} if clock is not None else {}
     d = Daemon(cfg, listener=FakeListener(), sender=FakeSender(), tray=FakeTray(),
@@ -1734,7 +1739,10 @@ def test_the_pill_goes_off_screen_settles_and_only_then_is_the_chord_sent(
     from voice.daemon import PILL_FILL_S
     from voice.pipeline import State
 
-    d = _focus_daemon(monkeypatch, settle_ms=180)
+    # A known, non-terminal window, so the sequence under test includes the
+    # clipboard restore: an unverifiable paste deliberately keeps the
+    # transcript instead, which is covered in tests/inject/test_injector.py.
+    d = _focus_daemon(monkeypatch, settle_ms=180, window_command="echo firefox")
     log = []
 
     class RecordingOverlay:
@@ -1761,6 +1769,10 @@ def test_the_pill_goes_off_screen_settles_and_only_then_is_the_chord_sent(
     d.injector._sleep = lambda seconds: log.append(
         ("fill" if {"state": "hidden"} not in log else "settle", round(seconds, 3)))
     try:
+        # A real dictation reads the focused window when recording starts, long
+        # before this point; without it the paste is an unverifiable one and
+        # deliberately keeps the clipboard, which is a different sequence.
+        d._focused_window.capture()
         d._on_dictation_state(State.INJECTING)
         d.injector.inject("hello")
         d._on_dictation_state(State.IDLE, "5 chars via fake in 0.1s")
@@ -1856,9 +1868,11 @@ def test_the_layer_shell_path_never_asks_for_a_fill_or_waits_for_one(
     stays where it was: in the checkmark's own lead-in, costing nothing."""
     from voice.pipeline import State
 
-    d, log = _recording_pill_daemon(monkeypatch, layer_shell=True)
+    d, log = _recording_pill_daemon(monkeypatch, layer_shell=True,
+                                    window_command="echo firefox")
     try:
         assert d.injector._pill_policy == "none"
+        d._focused_window.capture()          # as a real recording would have
         d._on_dictation_state(State.INJECTING)
         d.injector.inject("hello")
         d._on_dictation_state(State.IDLE, "5 chars via fake in 0.1s")
@@ -2832,3 +2846,634 @@ def test_an_unusable_dictionary_costs_the_vocabulary_not_the_dictation(isolated_
         assert d._hotwords() is None or isinstance(d._hotwords(), str)
     finally:
         d.shutdown()
+
+
+# -- a press the pipeline had nothing to do with -----------------------------
+#: Pressing dictate while a dictation is still transcribing or pasting changed
+#: nothing and said nothing, so the owner pressed again - and that press landed
+#: after the pipeline had gone idle and started a recording instead.
+
+def test_a_press_during_the_work_is_answered_on_the_pill():
+    from voice.daemon import busy_messages
+    from voice.pipeline import State
+
+    assert busy_messages(State.TRANSCRIBING, "none") == [{"state": "notice", "text": "Still working"}]
+    assert busy_messages(State.INJECTING, "none") == [{"state": "notice", "text": "Still pasting"}]
+
+
+def test_nothing_is_put_on_screen_while_the_pill_is_hidden_for_the_chord():
+    from voice.daemon import busy_messages
+    from voice.pipeline import State
+
+    # Under the `hide` policy the injector has taken a focus-stealing pill off
+    # screen to send the paste chord. Mapping it again for a notice hands it
+    # the keyboard back, the chord lands in the pill instead of the window, and
+    # `restore_clipboard` then overwrites the transcript with the old contents
+    # 150 ms later - the exact data loss this branch exists to end.
+    assert busy_messages(State.INJECTING, "hide") == []
+    # Transcribing is safe: the pill is on screen throughout, so a notice only
+    # changes the text of a window that already has whatever focus it will get.
+    assert busy_messages(State.TRANSCRIBING, "hide") == [{"state": "notice", "text": "Still working"}]
+
+
+def test_states_that_can_act_on_a_press_say_nothing_extra():
+    from voice.daemon import busy_messages
+    from voice.pipeline import State
+
+    # These never reach `on_busy`; if they ever did, a notice would be a lie.
+    assert busy_messages(State.IDLE, "none") == []
+    assert busy_messages(State.RECORDING, "none") == []
+
+
+def test_the_busy_notice_is_short_enough_for_the_pill_well():
+    from voice.daemon import DONE_COPIED, busy_messages
+    from voice.pipeline import State
+
+    for state in (State.TRANSCRIBING, State.INJECTING):
+        text = busy_messages(state, "none")[0]["text"]
+        assert len(text) <= len(DONE_COPIED), \
+            f"{text!r} is wider than the pill's well already fits"
+
+
+def test_a_press_landing_on_the_error_state_is_not_told_work_is_going_on():
+    from voice.daemon import busy_messages
+    from voice.pipeline import State
+
+    # ERROR is entered and left inside a single `_fail` call, having already
+    # raised a "Dictation failed" notification. "Still working" on top of that
+    # would contradict the thing the owner was just told.
+    assert busy_messages(State.ERROR, "none") == []
+
+
+def test_no_notice_reaches_the_pill_while_it_is_hidden_for_a_paste(isolated_xdg, qapp, monkeypatch):
+    """The press is answered, but never by putting the pill back on screen.
+
+    `toggle()` samples the state under the lock and reports it after releasing,
+    so a press made during TRANSCRIBING can be delivered while the injector has
+    already taken the focus-stealing pill off screen for the chord. Mapping it
+    again hands it the keyboard, the chord lands in the pill, and
+    `restore_clipboard` overwrites the transcript 150 ms later.
+    """
+    from voice.pipeline import State
+
+    d = _focus_daemon(monkeypatch)
+    sent = []
+
+    class FakeOverlay:
+        def send(self, message): sent.append(message)
+        def flush(self, timeout=1.0): return True
+        def stop(self): pass
+        def status(self): return "running"
+
+    d.overlay = FakeOverlay()
+    try:
+        d._on_dictation_state(State.INJECTING)
+        d._hide_pill_for_paste()
+        assert sent[-1] == {"state": "hidden"}
+        before = len(sent)
+
+        # A press made a moment earlier, arriving now.
+        d._on_dictation_busy(State.TRANSCRIBING)
+
+        assert len(sent) == before, \
+            f"the pill was put back on screen mid-paste: {sent[before:]}"
+
+        # Once the insertion is over the pill is fair game again.
+        d._on_dictation_state(State.IDLE, "5 chars via fake in 0.1s")
+        d._on_dictation_state(State.TRANSCRIBING)
+        before = len(sent)
+        d._on_dictation_busy(State.TRANSCRIBING)
+        assert sent[before:] == [{"state": "notice", "text": "Still working"}]
+    finally:
+        d.shutdown()
+
+
+def test_a_notice_arriving_during_the_hide_flush_is_refused(isolated_xdg, qapp, monkeypatch):
+    """The dangerous half-second, driven deliberately.
+
+    `_hide_pill_for_paste` waits on the helper for up to OVERLAY_HIDE_FLUSH_S
+    after unmapping the pill. That wait is ample scheduling room for the hotkey
+    thread to deliver a press made moments earlier, and a notice delivered
+    there remaps a focus-stealing pill with the chord already on its way.
+    """
+    import threading as _threading
+
+    from voice.pipeline import State
+
+    d = _focus_daemon(monkeypatch)
+    sent, raced = [], []
+
+    class FakeOverlay:
+        def send(self, message): sent.append(message)
+
+        def flush(self, timeout=1.0):
+            if not raced:
+                raced.append(True)
+                press = _threading.Thread(
+                    target=lambda: d._on_dictation_busy(State.TRANSCRIBING))
+                press.start()
+                press.join(5)
+                assert not press.is_alive(), "the notice blocked on the pill lock"
+            return True
+
+        def stop(self): pass
+        def status(self): return "running"
+
+    d.overlay = FakeOverlay()
+    try:
+        d._on_dictation_state(State.INJECTING)
+        before = len(sent)
+
+        d._hide_pill_for_paste()
+
+        assert raced, "the interleaving under test was never reached"
+        assert sent[before:] == [{"state": "hidden"}], \
+            f"something reached the pill while it was hidden for the chord: {sent[before:]}"
+    finally:
+        d.shutdown()
+
+
+def test_an_unverifiable_paste_tells_the_owner_how_to_paste_it_themselves():
+    from voice.daemon import overlay_messages
+    from voice.pipeline import State
+
+    msgs = overlay_messages(State.IDLE, "7 chars via paste-blind in 0.4s", "en",
+                            blind_hint="Copied")
+    assert msgs == [{"state": "done", "text": "Copied"}]
+
+
+def test_a_verified_paste_keeps_its_plain_checkmark():
+    from voice.daemon import overlay_messages
+    from voice.pipeline import State
+
+    msgs = overlay_messages(State.IDLE, "7 chars via portal in 0.4s", "en",
+                            blind_hint="Copied")
+    assert msgs == [{"state": "done"}]
+
+
+def test_an_unverifiable_paste_with_nothing_useful_to_suggest_stays_quiet():
+    from voice.daemon import overlay_messages
+    from voice.pipeline import State
+
+    msgs = overlay_messages(State.IDLE, "7 chars via paste-blind in 0.4s", "en")
+    assert msgs == [{"state": "done"}]
+
+
+
+
+def test_the_pill_lock_is_the_same_object_for_the_life_of_the_daemon(isolated_xdg, qapp, monkeypatch):
+    """A lock re-created per transition guards nothing.
+
+    Two threads then hold two different objects and both walk into
+    `_send_overlay_locked` together - which is the race the notice path was
+    given a lock to prevent in the first place.
+    """
+    from voice.pipeline import State
+
+    d = _focus_daemon(monkeypatch)
+
+    class FakeOverlay:
+        def send(self, message): pass
+        def flush(self, timeout=1.0): return True
+        def stop(self): pass
+        def status(self): return "running"
+
+    d.overlay = FakeOverlay()
+    try:
+        first = d._overlay_lock
+        for state in (State.RECORDING, State.TRANSCRIBING, State.INJECTING,
+                      State.IDLE, State.ERROR):
+            d._on_dictation_state(state, "")
+            assert d._overlay_lock is first, \
+                f"the pill lock was replaced while handling {state.value}"
+        d._on_dictation_busy(State.TRANSCRIBING)
+        assert d._overlay_lock is first
+    finally:
+        d.shutdown()
+
+
+# -- a window command that will not answer must not cost every paste ---------
+#: The command runs between the pill being unmapped and the chord being sent.
+#: One that hangs costs every dictation its full timeout; one that is secretly
+#: interactive - KWin's `queryWindowInfo` may be a window *picker* rather than
+#: a query - would put a crosshair grab in front of every paste. Losing the
+#: terminal chord is the lesser harm, and the pill says so out loud.
+
+def test_a_window_command_that_times_out_is_not_asked_again(caplog):
+    from voice.daemon import FocusedWindow
+
+    calls = []
+
+    def never_answers(cmd, on_timeout=None):
+        calls.append(cmd)
+        if on_timeout is not None:
+            on_timeout()
+        return None
+
+    window = FocusedWindow(lambda: "some-hanging-command", run=never_answers)
+    with caplog.at_level("WARNING", logger="voice.daemon"):
+        window.capture(); assert window() is None
+        window.capture(); assert window() is None
+        window.capture(); assert window() is None
+
+    assert calls == ["some-hanging-command"], \
+        f"a command that timed out was asked {len(calls)} times"
+    assert "some-hanging-command" in caplog.text
+
+
+def test_a_window_command_that_answers_keeps_being_asked():
+    from voice.daemon import FocusedWindow
+
+    calls = []
+
+    def answers(cmd, on_timeout=None):
+        calls.append(cmd)
+        return "org.kde.konsole"
+
+    window = FocusedWindow(lambda: "a-good-command", run=answers)
+    window.capture(); assert window() == "org.kde.konsole"
+    window.capture(); assert window() == "org.kde.konsole"
+    assert len(calls) == 2
+
+
+def test_an_empty_answer_is_not_treated_as_a_failure():
+    from voice.daemon import FocusedWindow
+
+    calls = []
+
+    def nothing_focused(cmd, on_timeout=None):
+        calls.append(cmd)
+        return None
+
+    window = FocusedWindow(lambda: "a-good-command", run=nothing_focused)
+    window.capture(); assert window() is None
+    window.capture(); assert window() is None
+    assert len(calls) == 2, "no window focused is not the same as no answer coming"
+
+
+def test_no_command_configured_runs_nothing():
+    from voice.daemon import FocusedWindow
+
+    window = FocusedWindow(lambda: "", run=lambda cmd, on_timeout=None: "never")
+    window.capture()
+    assert window() is None
+
+
+def test_a_window_command_given_up_on_stays_given_up_across_a_reload(isolated_xdg, qapp, monkeypatch):
+    """`apply_config` rebuilt the asker, and with it its memory.
+
+    Every language switch, profile switch and settings save therefore re-armed
+    a command already known to hang, and the next paste paid its full timeout
+    again - including whatever the command does while hanging.
+    """
+    d = _focus_daemon(monkeypatch, window_command="a-hanging-command")
+    try:
+        d._focused_window._give_up("a-hanging-command")
+        assert d._focused_window.usable is False
+        before = d._focused_window
+
+        d.apply_config()
+
+        assert d._focused_window is before, "the asker was rebuilt by a reload"
+        assert d._focused_window.usable is False
+        assert d.injector._window_class is before
+    finally:
+        d.shutdown()
+
+
+def test_status_says_when_every_paste_has_gone_blind(isolated_xdg, qapp, monkeypatch):
+    """A configured command that stopped answering still looks healthy.
+
+    `voice doctor` reads this: without it, a machine where every paste is
+    silently downgraded reports "focused window read with: <cmd>" and passes.
+    """
+    d = _focus_daemon(monkeypatch, window_command="a-hanging-command")
+    try:
+        assert d.handle({"cmd": "status"})["window_command_usable"] is True
+        d._focused_window._give_up("a-hanging-command")
+        assert d.handle({"cmd": "status"})["window_command_usable"] is False
+    finally:
+        d.shutdown()
+
+
+def test_the_terminal_warning_is_re_checked_on_reload_but_not_repeated(isolated_xdg, qapp, monkeypatch, caplog):
+    """Clearing inject.terminal_classes in the settings window is enough.
+
+    From then on nothing is recognised as a terminal and every terminal paste
+    is discarded - and before this the owner heard nothing until the next
+    daemon restart.
+    """
+    d = _focus_daemon(monkeypatch)
+    try:
+        d.config.set("inject.terminal_classes", ["konsole"])
+        d.config.set("inject.active_window_command", "echo konsole")
+        d.config.save()
+        d._terminal_warning = ""
+        with caplog.at_level("WARNING", logger="voice.daemon"):
+            d.apply_config()
+        assert "terminal_classes is empty" not in caplog.text
+
+        d.config.set("inject.terminal_classes", [])
+        d.config.save()
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="voice.daemon"):
+            d.apply_config()
+        assert "terminal_classes is empty" in caplog.text, \
+            "a reload into the silent-discard state said nothing"
+
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="voice.daemon"):
+            d.apply_config()
+        assert "terminal_classes is empty" not in caplog.text, \
+            "the same warning was repeated on a reload that changed nothing"
+    finally:
+        d.shutdown()
+
+
+def test_the_language_notice_also_refuses_to_remap_a_pill_hidden_for_a_paste(isolated_xdg, qapp, monkeypatch):
+    """Every route to the pill has to respect the hide, not just the busy one.
+
+    The language toggle runs on the Qt thread while the injector runs on the
+    worker, so a tap of it during the paste window mapped a focus-stealing
+    pill, the chord landed in it, and `restore_clipboard` took the transcript.
+    """
+    from voice.pipeline import State
+
+    d = _focus_daemon(monkeypatch)
+    sent = []
+
+    class FakeOverlay:
+        def send(self, message): sent.append(message)
+        def flush(self, timeout=1.0): return True
+        def stop(self): pass
+        def status(self): return "running"
+
+    d.overlay = FakeOverlay()
+    try:
+        d._on_dictation_state(State.INJECTING)
+        d._hide_pill_for_paste()
+        before = len(sent)
+
+        d._set_language("sv")
+
+        assert not [m for m in sent[before:] if m.get("state") == "notice"], \
+            f"the language toggle remapped the pill mid-paste: {sent[before:]}"
+    finally:
+        d.shutdown()
+
+
+def test_a_new_window_command_re_arms_one_that_had_been_given_up_on():
+    """The give-up message tells the owner to set a working command.
+
+    Keyed to nothing, the flag then short-circuited that command too: every
+    paste stayed blind and doctor kept naming the old command, until a restart
+    nothing told the owner to perform.
+    """
+    from voice.daemon import FocusedWindow
+
+    configured = ["a-hanging-command"]
+    calls = []
+
+    def run(cmd, on_timeout=None):
+        calls.append(cmd)
+        if cmd == "a-hanging-command":
+            if on_timeout is not None:
+                on_timeout()
+            return None
+        return "org.kde.konsole"
+
+    window = FocusedWindow(lambda: configured[0], run=run)
+    window.capture(); assert window() is None
+    window.capture(); assert window() is None and window.usable is False
+    assert calls == ["a-hanging-command"], "the hang was re-armed"
+
+    configured[0] = "a-working-command"           # the owner takes the advice
+
+    window.capture(); assert window() == "org.kde.konsole"
+    assert window.usable is True
+    assert calls == ["a-hanging-command", "a-working-command"]
+
+
+def test_the_terminal_warning_returns_after_a_trip_through_clipboard_mode(isolated_xdg, qapp, monkeypatch, caplog):
+    """Switching away from pasting and back must not suppress the warning.
+
+    The early return left the old text stored, so the identical warning was
+    then discarded as "already said" while the silent-discard state was live.
+    """
+    d = _focus_daemon(monkeypatch)
+    try:
+        with caplog.at_level("WARNING", logger="voice.daemon"):
+            d._warn_if_terminals_can_never_be_pasted_into(notify=False)
+        assert "silently discard" in caplog.text
+
+        d.config.set("inject.mode", "clipboard")
+        d.config.save()
+        d._warn_if_terminals_can_never_be_pasted_into(notify=False)
+
+        d.config.set("inject.mode", "paste")
+        d.config.save()
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="voice.daemon"):
+            d._warn_if_terminals_can_never_be_pasted_into(notify=False)
+        assert "silently discard" in caplog.text, \
+            "the warning stayed suppressed after a trip through clipboard mode"
+    finally:
+        d.shutdown()
+
+
+def test_the_pill_placement_preview_refuses_to_map_during_a_paste(isolated_xdg, qapp, monkeypatch):
+    """The preview is a focus-stealing window like any other.
+
+    Mapped between the pill being unmapped and its chord being sent, it takes
+    the keyboard, the chord lands in the preview, and `restore_clipboard`
+    overwrites the transcript 150 ms later.
+    """
+    from voice.pipeline import State
+
+    d = _focus_daemon(monkeypatch)
+    stopped = []
+
+    class FakeOverlay:
+        def send(self, message): pass
+        def flush(self, timeout=1.0): return True
+        def stop(self): stopped.append(True)
+        def status(self): return "running"
+
+    d.overlay = FakeOverlay()
+    try:
+        d._on_dictation_state(State.INJECTING)
+        d._hide_pill_for_paste()
+
+        d._preview_pill("top-center", 0, 0)
+
+        assert stopped == [], "the live pill was torn down mid-paste"
+        assert d._preview is None, "a preview pill was mapped mid-paste"
+
+        # The control: with no paste in flight the same call does map one, so
+        # the assertions above are about the guard and not about the fakes.
+        d._on_dictation_state(State.IDLE, "5 chars via fake in 0.1s")
+        d._preview_pill("top-center", 0, 0)
+        assert d._preview is not None and stopped, \
+            "the preview never maps at all; the test above proves nothing"
+        d._end_pill_preview()
+    finally:
+        d.shutdown()
+
+
+def test_the_terminal_warning_returns_after_a_trip_through_the_clipboard_pill_policy(
+        isolated_xdg, qapp, monkeypatch, caplog):
+    d = _focus_daemon(monkeypatch)
+    try:
+        with caplog.at_level("WARNING", logger="voice.daemon"):
+            d._warn_if_terminals_can_never_be_pasted_into(notify=False)
+        assert "silently discard" in caplog.text
+
+        was, d._pill_policy = d._pill_policy, "clipboard"
+        d._warn_if_terminals_can_never_be_pasted_into(notify=False)
+        d._pill_policy = was
+
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="voice.daemon"):
+            d._warn_if_terminals_can_never_be_pasted_into(notify=False)
+        assert "silently discard" in caplog.text, \
+            "the warning stayed suppressed after a trip through the clipboard policy"
+    finally:
+        d.shutdown()
+
+
+# -- the recurring defect, converted into an invariant ------------------------
+#: Mapping the pill while a paste is in flight hands a focus-stealing window
+#: the keyboard, the chord lands in it, and `restore_clipboard` overwrites the
+#: transcript. Across one review cycle this was found four times at three
+#: different call sites - the busy notice, the same notice as a race, the
+#: language notice, and the placement preview - each fixed by remembering to
+#: consult the guard. Remembering is the wrong mechanism, so this asserts it
+#: instead: only the guarded sender may put the pill back on screen.
+
+PILL_CHOKEPOINT = "_send_overlay_locked"
+#: The one state that cannot map the pill, so it needs no guard to send.
+SAFE_STATES = {"hidden"}
+
+
+def _pill_mapping_sends():
+    """(function name, state) for every `self.overlay.send` that can map the pill."""
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "voice" / "daemon.py"
+    tree = ast.parse(source.read_text())
+    found = []
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Call):
+                continue
+            call = node.func
+            if not (isinstance(call, ast.Attribute) and call.attr == "send"
+                    and isinstance(call.value, ast.Attribute)
+                    and call.value.attr == "overlay"):
+                continue
+            for arg in node.args:
+                if not isinstance(arg, ast.Dict):
+                    # Not a literal: it came from somewhere else and cannot be
+                    # judged here, so it has to be the chokepoint's own send.
+                    found.append((func.name, "<not a literal>"))
+                    continue
+                for key, value in zip(arg.keys, arg.values):
+                    if getattr(key, "value", None) != "state":
+                        continue
+                    state = getattr(value, "value", "<computed>")
+                    if state not in SAFE_STATES:
+                        found.append((func.name, state))
+    return found
+
+
+def test_only_the_guarded_sender_can_put_the_pill_back_on_screen():
+    offenders = [(fn, state) for fn, state in _pill_mapping_sends()
+                 if fn != PILL_CHOKEPOINT]
+    assert offenders == [], (
+        "these send the pill a state that maps it, without going through "
+        f"{PILL_CHOKEPOINT} and its mid-paste guard: {offenders}. Route them "
+        "through _send_overlay(..., refuse_while_hidden=True) instead - a pill "
+        "mapped during a paste takes the chord and the transcript is lost.")
+
+
+def test_the_invariant_above_is_actually_looking_at_something():
+    """A scan that finds nothing would pass for the wrong reason."""
+    assert _pill_mapping_sends(), "the AST scan matched no pill sends at all"
+
+
+# -- ask before the pill is on screen ----------------------------------------
+#: The owner's idea, and a better one than asking at paste time: when the
+#: dictate key is pressed the pill has not appeared yet, so the desktop still
+#: names the window being dictated into. Asking later means asking while a
+#: focus-stealing pill holds the keyboard, which is why the answer had to be
+#: hidden-then-asked, timed against a settle, and distrusted in some modes.
+
+def test_the_focused_window_is_captured_and_replayed():
+    from voice.daemon import FocusedWindow
+
+    live = ["konsole"]
+    window = FocusedWindow(lambda: "a-command", run=lambda cmd, on_timeout=None: live[0])
+
+    assert window() is None, "nothing asked for yet, so nothing to report"
+    window.capture()
+    live[0] = "the-pill"                      # the pill has taken focus since
+    assert window() == "konsole"
+    assert window() == "konsole", "the answer is replayed, not re-asked"
+
+
+def test_a_capture_that_finds_nothing_reports_nothing():
+    from voice.daemon import FocusedWindow
+
+    window = FocusedWindow(lambda: "a-command", run=lambda cmd, on_timeout=None: None)
+    window.capture()
+    assert window() is None
+
+
+def test_the_window_is_captured_before_the_pill_is_told_to_appear(isolated_xdg, qapp, monkeypatch):
+    """Order matters: the pill takes the keyboard when it maps."""
+    from voice.pipeline import State
+
+    d = _focus_daemon(monkeypatch, window_command="echo konsole")
+    order = []
+    real_capture = d._focused_window.capture
+
+    def capture():
+        order.append("asked")
+        real_capture()
+
+    d._focused_window.capture = capture
+
+    class FakeOverlay:
+        def send(self, message): order.append(("pill", message.get("state")))
+        def flush(self, timeout=1.0): return True
+        def stop(self): pass
+        def status(self): return "running"
+
+    d.overlay = FakeOverlay()
+    try:
+        d._on_dictation_state(State.RECORDING)
+        assert order and order[0] == "asked", \
+            f"the pill was told to appear before the window was read: {order}"
+        assert d._focused_window() == "konsole"
+    finally:
+        d.shutdown()
+
+
+def test_an_unverifiable_paste_names_no_key_it_cannot_know_is_right():
+    """The owner pasting into a browser was told to press Ctrl+Shift+V.
+
+    Where the focused window cannot be read, neither chord can be recommended -
+    a terminal wants Ctrl+Shift+V and a browser wants Ctrl+V, and naming either
+    is wrong half the time. What IS true either way is that the transcript is
+    on the clipboard, so that is all the pill claims.
+    """
+    from voice.daemon import DONE_UNVERIFIED, overlay_messages
+    from voice.pipeline import State
+
+    assert "Shift" not in DONE_UNVERIFIED and "Ctrl" not in DONE_UNVERIFIED
+    msgs = overlay_messages(State.IDLE, "7 chars via paste-blind in 0.4s", "en",
+                            blind_hint=DONE_UNVERIFIED)
+    assert msgs == [{"state": "done", "text": "Copied"}]

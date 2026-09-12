@@ -12,6 +12,7 @@ from typing import Callable
 from voice import APP_ID, __version__
 from voice.hotkey.portal_listener import NO_TRIGGER, STATE_BOUND, STATE_UNASSIGNED
 from voice.inject.injector import insertion_status, pill_policy
+from voice.inject.window import effective_window_command, terminal_chord_is_unreachable
 from voice.ui.overlay_client import pill_takes_focus, probe_helper
 from voice.ui.placement import NO_LAYER_SHELL_NOTE
 
@@ -279,6 +280,104 @@ def _clipboard() -> tuple[bool, str]:
     return False, f"install wl-clipboard (missing: {', '.join(missing)})"
 
 
+def _inject_settings() -> dict:
+    """The `[inject]` table, or an empty one if the config cannot be read."""
+    from voice.config import Config
+    try:
+        return Config.load().get("inject", {}) or {}
+    except Exception:
+        return {}
+
+
+def _daemon_window_command() -> tuple[str, bool] | None:
+    """What the running daemon resolved and whether it still works, or None.
+
+    Two separate facts. The daemon lives in the graphical session and doctor
+    may not, so only the daemon can say what `effective_window_command` came
+    out as where it matters - and only the daemon knows whether that command
+    has since stopped answering, which leaves every paste blind while the
+    configured string still looks perfectly healthy.
+    """
+    try:
+        from voice.ipc import is_running, send
+        if not is_running():
+            return None
+        reply = send({"cmd": "status"})
+    except Exception:
+        return None
+    if not reply.get("ok") or "window_command" not in reply:
+        return None                       # a daemon older than this field
+    return str(reply["window_command"] or ""), bool(reply.get("window_command_usable", True))
+
+
+def _pill_policy_now() -> str:
+    """The pill policy the daemon would use here, or "none" if unknowable.
+
+    Its own function so `_paste_target` has one seam per fact it depends on,
+    and so a config that cannot be read degrades to "say nothing special"
+    rather than to a wrong diagnosis.
+    """
+    from voice.config import Config
+    try:
+        cfg = Config.load()
+        return pill_policy(cfg, pill_takes_focus(cfg))
+    except Exception:
+        return "none"
+
+
+def _paste_target() -> tuple[bool, str]:
+    """Can the text actually reach the window the owner is looking at?
+
+    The one failure the injector can never detect for itself: a terminal
+    pastes with Ctrl+Shift+V and does nothing at all with Ctrl+V, the
+    compositor accepts either chord whatever has focus, and so a dictation
+    into a terminal that received nothing looks exactly like one that worked.
+    """
+    settings = _inject_settings()
+    mode = str(settings.get("mode", "paste")).strip().lower()
+    if mode != "paste":
+        return True, f"inject.mode = {mode}; the text is left on the clipboard on purpose"
+    if _pill_policy_now() == "clipboard":
+        # Pasting is configured, but the pill takes focus here and
+        # inject.pill_focus = clipboard has already ruled the chord out. No
+        # chord is sent, so no chord can be the wrong one.
+        return True, ("inject.pill_focus = clipboard; no chord is sent here and "
+                      "the text is left on the clipboard on purpose")
+    # The running daemon's answer first. Doctor may well be running somewhere
+    # the daemon is not - over SSH, from a TTY, from a unit with no graphical
+    # environment - and diagnosing from *this* shell's XDG_CURRENT_DESKTOP
+    # reports a Plasma box as unable to answer. Falling back to our own
+    # environment is still worth doing; saying which one we read is what makes
+    # a wrong answer recognisable as one.
+    live = _daemon_window_command()
+    if live is not None:
+        command, usable = live
+        if command and not usable:
+            return False, (f"{command} stopped answering, so it is no longer asked and "
+                           f"every dictation is now pasted without knowing the focused "
+                           f"window. If this is KWin's queryWindowInfo it is an "
+                           f"interactive window picker, not a query - set "
+                           f"inject.active_window_command to something that answers on "
+                           f"its own.")
+        whose = "the running daemon"
+    else:
+        command, whose = None, ""
+    if command is None:
+        # `effective_window_command` reads a whole-config key; here we already
+        # have just the `[inject]` table, so hand it the one value it asks for.
+        configured = settings.get("active_window_command", "")
+        command = effective_window_command(lambda key, default=None: configured, os.environ)
+        whose = f"XDG_CURRENT_DESKTOP={os.environ.get('XDG_CURRENT_DESKTOP') or '(unset)'}"
+    unreachable, why = terminal_chord_is_unreachable(
+        command, str(settings.get("paste_chord", "ctrl+v")),
+        str(settings.get("terminal_chord", "ctrl+shift+v")),
+        settings.get("terminal_classes", []))
+    if unreachable:
+        return False, f"{why} [read from {whose}]"
+    return True, (f"focused window read with: {command} [via {whose}]" if command
+                  else f"one chord for every window [read from {whose}]")
+
+
 def _senders() -> tuple[bool, str]:
     found = [b for b in ("wtype", "ydotool") if shutil.which(b)]
     return True, ", ".join(found) or "none (portal is the primary path)"
@@ -301,6 +400,7 @@ def default_probes() -> dict[str, Callable[[], tuple[bool, str]]]:
         "overlay": _overlay,
         "pill placement": _pill_placement,
         "notify-send": lambda: _which("notify-send"),
+        "paste target": _paste_target,
         "fallback senders": _senders,
     }
 

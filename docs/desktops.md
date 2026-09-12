@@ -14,8 +14,10 @@ shortcut, it decides.
 
 - **GNOME** — **Settings → Keyboard → Keyboard Shortcuts**, find `voice`, set the key.
   GNOME stores it from the very first run, so `hotkeys.portal_*` is never applied there.
-- **KDE Plasma** — the settings window's **Change in the desktop** button opens the right
-  dialog, or **System Settings → Shortcuts**.
+- **KDE Plasma** — press **Change…** beside *dictate* in the settings window and follow
+  the prompt, or open **System Settings → Shortcuts** yourself. The settings window's
+  **Advanced** section has an **Open your desktop's keyboard settings** button that takes
+  you straight there.
 
 `voice status` and `voice doctor`'s **portal shortcuts** line show what the desktop
 actually holds. `registered, no key assigned` means the shortcut exists with no key

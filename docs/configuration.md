@@ -207,7 +207,7 @@ To set the key, or change one:
   own dialog on the first bind is the other place to set it. The settings window's **Open
   shortcut settings** button opens this panel for you (`gnome-control-center keyboard`).
 - **KDE Plasma** — implements version 2 of the portal interface, which has a reconfigure
-  dialog: **Open shortcut settings** (and "Capture key") asks KDE to open it, and KDE
+  dialog: **Open your desktop's keyboard settings** (under **Advanced**) asks KDE to open it, and KDE
   System Settings → Shortcuts lists the binding as well. Because that version *can* answer
   ListShortcuts usefully, `hotkeys.portal_*` is honoured there on a genuine first run.
 
@@ -238,7 +238,7 @@ trigger does not answer.
 
 </details>
 
-**Hotkeys.** On the evdev backend, use the settings window's "Capture key" button — press
+**Hotkeys.** On the evdev backend, use the settings window's **Change…** button — press
 the physical key and it fills in the exact evdev name it received. Combinations are typed
 by hand, e.g. `KEY_LEFTMETA+KEY_SPACE`. If a Keychron spare key (the circle/triangle/square
 keys) sends nothing, remap it in Keychron Launcher to F13 and bind `KEY_F13` here.

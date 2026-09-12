@@ -52,14 +52,18 @@ Keeps the code in your checkout so edits are live on the next daemon start. Need
 | | Where |
 |---|---|
 | **GNOME** | Settings → Keyboard → Keyboard Shortcuts → `voice` |
-| **KDE Plasma** | Settings window → **Change in the desktop** |
+| **KDE Plasma** | Settings window → **Change…** next to *dictate* |
 
-**2. On KDE, install `kdotool`** (`paru -S kdotool`). It lets voice see which window you
-are in, so it uses the right paste shortcut — terminals need Ctrl+Shift+V, everything
-else needs Ctrl+V.
+**2. On KDE, let voice see which window you are in** — optional, but it is what makes
+pasting into a terminal work. Terminals need Ctrl+Shift+V and everything else needs
+Ctrl+V, and voice can only choose correctly if it can ask. Either install `kdotool` (it
+is in the AUR), or use KWin's own D-Bus interface, which needs nothing installed —
+[both routes, with the check to run first](docs/desktops.md).
 
 GNOME will not tell any app which window has focus, so voice cannot do this there. It
-leaves your words on the clipboard and the pill says **Copied** — nothing is ever lost.
+still pastes — it just cannot pick between the two shortcuts, or confirm the paste
+landed. So it sends Ctrl+V, keeps your words on the clipboard as well, and the pill says
+**Copied** rather than a checkmark it cannot stand behind. Nothing is ever lost.
 
 📖 **[Desktop differences explained →](docs/desktops.md)**
 

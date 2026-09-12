@@ -6,8 +6,10 @@ Everything needed to get `voice` running, and to remove it again.
 
 ## Requirements
 
-CachyOS or another Arch-based distro, KDE Plasma on Wayland. GNOME works for development;
-window-class detection for the terminal paste chord is KDE-only.
+CachyOS or another Arch-based distro on Wayland. **KDE Plasma and GNOME are both
+supported**, and they differ in ways that matter — see [Desktop setup](desktops.md).
+The short version: KDE can tell voice which window has focus (so it picks the right
+paste shortcut automatically), and GNOME cannot.
 
 **You do not install any of the tables below by hand.** `makepkg -si` installs the
 dependencies and the package carries the bundled set. They are listed so you know what
@@ -59,6 +61,7 @@ Not installed by default; pacman lists them as optional dependencies.
 | `ydotool` | the other fallback injection backend |
 | `ttf-jetbrains-mono` | the font for the pill's timer (any monospace font does) |
 | `dconf` | lets `voice doctor` read back the shortcut GNOME stored |
+| `kdotool` *(AUR)* | **KDE only, and worth having.** Lets voice see which window has focus, so it sends Ctrl+Shift+V to a terminal and Ctrl+V everywhere else. Without it, voice cannot tell, leaves the text on the clipboard and says so — see [Desktop setup](desktops.md). |
 | `uv` | only for the git-clone development route, not for the package |
 
 ### Downloaded on first use, not shipped

@@ -7,12 +7,13 @@
 `voice doctor` runs a checklist and prints `✔`/`✘` per item; failures marked
 `(optional)` don't affect the exit code:
 
+- **python** *(optional)* — the interpreter and `voice` version this is running as.
 - **config** — `config.toml` parses and passes validation.
 - **keyboard access** — at least one input device is readable without root. Re-run
   `./install.sh` or install the package — both install the udev rule — or add yourself to
   the `input` group and log out/in. A device already open before the rule existed may
   need re-plugging.
-- **hotkey backend** — informational: which listener the daemon would use here and why
+- **hotkey backend** *(optional)* — informational: which listener the daemon would use here and why
   (`evdev`, or `portal (no local seat)`). Never fails the run; see
   [Configuration](configuration.md#configuration).
 - **portal shortcuts** *(optional)* — on the portal backend, the trigger the desktop
@@ -21,7 +22,7 @@
   it — fix that in your desktop's keyboard settings, not in `config.toml`. With no daemon
   running it falls back to GNOME's stored copy. See
   [The desktop owns the trigger](configuration.md#the-desktop-owns-the-trigger).
-- **overlay** — informational: whether the recording pill can run here, which
+- **overlay** *(optional)* — informational: whether the recording pill can run here, which
   interpreter starts its helper, and whether `gtk4-layer-shell` was found. Never fails
   the run; see [Recording pill](usage.md#recording-pill).
 - **pw-record** — PipeWire's recording tool is on PATH.
@@ -29,7 +30,7 @@
 - **portal** — the `RemoteDesktop` portal is reachable (`xdg-desktop-portal-kde` on KDE,
   `xdg-desktop-portal-gnome` on GNOME). If the permission dialog needs revoking or
   doesn't reappear, check KDE System Settings → Applications → Remote Desktop.
-- **cuda** — an NVIDIA GPU is visible to `ctranslate2`. The package ships the CUDA 12
+- **cuda** *(optional)* — an NVIDIA GPU is visible to `ctranslate2`. The package ships the CUDA 12
   runtime, so on a machine with a card this should be green with no extra install; if it
   is not, the driver (`nvidia-utils`) is the thing to check. Without a GPU — or in a
   `VOICE_GPU=0` build — the local backend runs on CPU int8 automatically, slower but
@@ -40,12 +41,18 @@
   non-terminal shortcut and a terminal will discard it. The message names the cause and
   the fix. It also fails if a configured `inject.active_window_command` has stopped
   answering.
+- **language profiles** *(optional)* — which transcription profile each language in
+  `general.languages` maps to, so a language switch that would silently keep the wrong
+  model is visible.
+- **pill placement** *(optional)* — whether `ui.overlay_position` can be honoured on this
+  desktop at all. KDE and wlroots compositors honour it; GNOME places the pill itself, so
+  the setting does nothing there.
 - **microphones** *(optional)* — at least one PipeWire source is visible.
 - **model cache** *(optional)* — whether the active local model has already downloaded.
 - **notify-send**, **fallback senders** *(optional)* — desktop notifications, and
   `wtype`/`ydotool` as a paste fallback if the portal chord path is ever unavailable.
 
-Two more common issues doctor doesn't cover directly:
+Some common problems doctor doesn't cover directly:
 
 - **Paste doesn't work in Konsole (or another terminal).** Terminals bind Ctrl+V to
   something else, so voice has to know it is aiming at one. That needs two things: the

@@ -409,10 +409,25 @@ def test_every_file_the_package_installs_exists_in_the_repository():
     """`install -Dm644 packaging/typo.desktop` fails at package time, on the
     owner's machine, minutes into a multi-gigabyte build."""
     text = PKGBUILD.read_text()
-    sources = re.findall(r'^\s*install -Dm[0-7]{3} (\S+) ', text, re.M)
+    sources: list[str] = []
+    for line in text.splitlines():
+        found = re.match(r"\s*install -Dm[0-7]{3} (.*)$", line)
+        if not found:
+            continue
+        args = found.group(1).split()
+        if args[:1] == ["-t"]:
+            sources.extend(args[2:])         # install -Dm644 -t DIR src...
+        elif args:
+            sources.append(args[0])          # install -Dm644 src dst
     assert len(sources) >= 5, sources
     for rel in sources:
-        assert (ROOT / rel).exists(), f"PKGBUILD installs a missing file: {rel}"
+        rel = rel.strip('"')
+        if "$" in rel:                       # a destination, not a source
+            continue
+        hits = sorted(ROOT.glob(rel)) if any(c in rel for c in "*?[") else [ROOT / rel]
+        assert hits, f"PKGBUILD installs a pattern that matches nothing: {rel}"
+        for hit in hits:
+            assert hit.exists(), f"PKGBUILD installs a missing file: {rel}"
 
 
 def test_the_license_text_the_package_ships_is_not_empty():
@@ -464,7 +479,8 @@ def test_the_package_functions_produce_the_documented_layout(tmp_path):
         f"etc/xdg/autostart/{APP_ID}.desktop",
         "usr/lib/udev/rules.d/70-voice-input.rules",
         "usr/share/doc/voice/README.md",
-        "usr/share/doc/voice/packaging.md",
+        "usr/share/doc/voice/packaging/README.md",
+        "usr/share/doc/voice/docs/install.md",
         "usr/share/licenses/voice/LICENSE",
         "usr/lib/voice/app/voice/__init__.py",
         "usr/lib/voice/deps/numpy/__init__.py",
@@ -475,6 +491,23 @@ def test_the_package_functions_produce_the_documented_layout(tmp_path):
     # Nothing outside the four trees a package is allowed to own.
     tops = {p.name for p in pkg.iterdir()}
     assert tops <= {"usr", "etc"}, tops
+
+
+def test_the_package_ships_every_page_the_readme_links_to(tmp_path):
+    """The README is a landing page whose links are relative.
+
+    The package shipped README.md alone, so on an installed machine every one
+    of them pointed at nothing - and `docs/install.md` tells the owner to delete
+    the clone afterwards, leaving no configuration or troubleshooting reference
+    at all.
+    """
+    pkg = _stage(tmp_path) / "usr/share/doc/voice"
+    readme = (ROOT / "README.md").read_text()
+    linked = {t for t, _ in re.findall(r"\]\(([^)#\s]+)(?:#([^)\s]*))?\)", readme)
+              if not t.startswith(("http://", "https://", "mailto:"))}
+    assert linked, "no relative links were read out of the README at all"
+    missing = sorted(rel for rel in linked if not (pkg / rel).exists())
+    assert not missing, f"the README links these and the package does not ship them: {missing}"
 
 
 def test_the_packaged_files_are_not_group_writable(tmp_path):

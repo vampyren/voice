@@ -82,8 +82,8 @@ So the package installs the locked, tested set under `/usr/lib/voice` and runs
 it there. Everything the *desktop* owns - PipeWire, wl-clipboard, libnotify,
 the portal, PyGObject/GTK 4/pycairo/gtk4-layer-shell for the recording pill -
 comes from pacman as a normal dependency. The full list, with what each one is
-for, is the **Requirements** section of the top-level `README.md`; it is not
-repeated here.
+for, is the **Requirements** section of [`docs/install.md`](../docs/install.md);
+it is not repeated here.
 
 ## The interpreter, and what it costs when Arch moves
 

@@ -116,6 +116,10 @@ optdepends=(
   'ttf-jetbrains-mono: the pill timer font (any monospace font does)'
   'dconf: let `voice doctor` read the shortcut GNOME stored'
 )
+# Deliberately NOT an optdepend: kdotool is AUR-only, and nothing this package
+# declares may come from the AUR (see test_no_dependency_comes_from_the_aur -
+# a python312 dependency once broke the first install on a clean machine).
+# docs/desktops.md explains what it buys on KDE and the no-install alternative.
 backup=("etc/xdg/autostart/$_appid.desktop")
 # 0.1.0-1 was a split build whose second half carried the CUDA wheels. Those
 # files live here now, so an old voice-cuda has to go. Drop these two lines once
@@ -209,8 +213,14 @@ package() {
   install -Dm644 packaging/70-voice-input.rules \
                  "$pkgdir/usr/lib/udev/rules.d/70-voice-input.rules"
 
+  # The doc tree mirrors the repository, because the README is a landing page
+  # whose links are relative: `docs/install.md`, `packaging/README.md`. Shipping
+  # README.md alone - which is what this did - leaves a packaged machine with a
+  # front page of dead links and no configuration or troubleshooting reference
+  # at all, and the install page tells people to delete the clone afterwards.
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
-  install -Dm644 packaging/README.md "$pkgdir/usr/share/doc/$pkgname/packaging.md"
+  install -Dm644 packaging/README.md "$pkgdir/usr/share/doc/$pkgname/packaging/README.md"
+  install -Dm644 -t "$pkgdir/usr/share/doc/$pkgname/docs" docs/*.md
   # No LICENSE file upstream yet; ship the statement that stands in its place.
   install -dm755 "$pkgdir/usr/share/licenses/$pkgname"
   sed -n '/^## License/,$p' README.md > "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

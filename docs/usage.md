@@ -57,8 +57,9 @@ is installed and the default monospace font otherwise.
 
 **What it says when a dictation ends:**
 
-- a bare **checkmark** — the text was inserted, and voice could confirm which window it
-  was aiming at. It holds for 1.2 s.
+- a bare **checkmark** — nothing was left uncertain: either voice knew which window it
+  was aiming at, or you have set one shortcut for every window (`paste_chord` and
+  `terminal_chord` the same), so there was no choice to get wrong. It holds for 1.2 s.
 - **Copied** — the text is on the clipboard and voice could *not* confirm the paste
   landed, because nothing on this desktop will name the focused window. Your words are
   never lost; paste them with whatever your app uses. It holds for 2.4 s, because there

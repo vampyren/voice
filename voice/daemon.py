@@ -24,7 +24,9 @@ from voice.inject.fallback import make_key_sender
 from voice.inject.injector import (BLIND_PASTE, WINDOW_COMMAND_TIMEOUT_S, Injector,
                                    insertion_status, pill_policy, pill_settle_s,
                                    run_window_command)
-from voice.inject.window import effective_window_command, terminal_chord_is_unreachable
+from voice.inject.kwin import KWinWindowReader
+from voice.inject.window import (effective_window_command, is_plasma,
+                                 terminal_chord_is_unreachable)
 from voice.ipc import (NEXT_LANGUAGE, PENDING_LANGUAGE, IPCError, Server, is_running,
                        send)
 from voice.pipeline import Dictation, Services, State, detail_method
@@ -305,8 +307,14 @@ class FocusedWindow:
     """
 
     def __init__(self, command: Callable[[], str],
-                 run: Callable[..., str | None] = run_window_command):
-        self._command, self._run = command, run
+                 run: Callable[..., str | None] = run_window_command,
+                 reader: Callable[[], str | None] | None = None):
+        #: Two kinds of source, in this order: a command the owner configured
+        #: (theirs always wins), then an in-process reader where the desktop
+        #: has one - Plasma does, through a KWin script. A reader needs nothing
+        #: installed and runs no subprocess, so it has none of the failure
+        #: modes `_gave_up_on` exists for.
+        self._command, self._run, self._reader = command, run, reader
         #: The command that stopped answering, or None. Keyed to the string
         #: rather than a bare flag: the give-up message tells the owner to set
         #: a working `inject.active_window_command`, and a flag that outlived
@@ -316,12 +324,15 @@ class FocusedWindow:
         #: The focused window as it was when this dictation began. Replayed at
         #: paste time rather than re-read, because by then the pill has it.
         self._captured: str | None = None
-        self._reader: threading.Thread | None = None
+        self._thread: threading.Thread | None = None
 
     @property
     def usable(self) -> bool:
-        """False while the configured command is one that stopped answering."""
-        return self._gave_up_on is None or self._gave_up_on != self._command()
+        """Is there a source that will answer? Reported by `status` and doctor."""
+        cmd = self._command()
+        if not cmd:
+            return self._reader is not None
+        return self._gave_up_on is None or self._gave_up_on != cmd
 
     def live(self) -> str | None:
         """Read the focused window right now.
@@ -332,9 +343,11 @@ class FocusedWindow:
         `capture` exists for.
         """
         cmd = self._command()
-        if not cmd or cmd == self._gave_up_on:
-            return None
-        return self._run(cmd, on_timeout=lambda: self._give_up(cmd))
+        if cmd:
+            if cmd == self._gave_up_on:
+                return None
+            return self._run(cmd, on_timeout=lambda: self._give_up(cmd))
+        return self._reader() if self._reader is not None else None
 
     def capture(self) -> None:
         """Start reading the focused window for this dictation's paste to use.
@@ -350,16 +363,16 @@ class FocusedWindow:
         by that much and, worse, held up the release of a push-to-talk key, so
         a short tap recorded until the command came back.
         """
-        self._captured, cmd = None, self._command()
-        if not cmd or cmd == self._gave_up_on:
-            self._reader = None
+        self._captured = None
+        if not self.usable:
+            self._thread = None
             return
-        self._reader = threading.Thread(target=self._read, args=(cmd,),
-                                        name="focused-window", daemon=True)
-        self._reader.start()
+        self._thread = threading.Thread(target=self._read, name="focused-window",
+                                        daemon=True)
+        self._thread.start()
 
-    def _read(self, cmd: str) -> None:
-        self._captured = self._run(cmd, on_timeout=lambda: self._give_up(cmd))
+    def _read(self) -> None:
+        self._captured = self.live()
 
     def __call__(self) -> str | None:
         """The window this dictation began in, or None if nobody would say.
@@ -367,9 +380,9 @@ class FocusedWindow:
         Waits for the reader if it is somehow still going; by paste time it has
         had the whole recording and transcription to finish in.
         """
-        reader, self._reader = self._reader, None
-        if reader is not None:
-            reader.join(WINDOW_COMMAND_TIMEOUT_S + 0.2)
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join(WINDOW_COMMAND_TIMEOUT_S + 0.2)
         return self._captured
 
     def _give_up(self, cmd: str) -> None:
@@ -390,7 +403,12 @@ def window_class_getter(config: Config) -> Callable[[], str | None]:
     should use it, and `effective_window_command` is cheap - a dict lookup and
     at most one `shutil.which`.
     """
-    return FocusedWindow(lambda: effective_window_command(config.get, os.environ))
+    # Plasma answers in-process, so it gets a reader rather than a command: no
+    # subprocess between focus coming back and the chord going out, and nothing
+    # to install. A command the owner configured still wins over both.
+    reader = KWinWindowReader() if is_plasma(os.environ) else None
+    return FocusedWindow(lambda: effective_window_command(config.get, os.environ),
+                         reader=reader)
 
 
 #: How long the daemon waits for `{"state": "hidden"}` to reach the helper
@@ -601,6 +619,8 @@ class Daemon:
             self._terminal_warning = ""
             return
         configured = effective_window_command(self.config.get, os.environ)
+        if is_plasma(os.environ) and not configured:
+            return                     # KWin is asked directly; nothing to warn about
         if configured and not self._focused_window.usable:
             # A different fault entirely from "this desktop will not say": the
             # command exists and names the window perfectly well, it simply

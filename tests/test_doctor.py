@@ -449,11 +449,10 @@ def test_paste_target_warns_when_a_terminal_could_never_receive_the_text(monkeyp
 
 def test_paste_target_is_content_once_the_window_can_be_asked(monkeypatch):
     ok, detail = _paste_target(monkeypatch, desktop="KDE",
-                               which=lambda b: "/usr/bin/kdotool" if b == "kdotool" else None,
                                cfg={"mode": "paste", "paste_chord": "ctrl+v",
                                     "terminal_chord": "ctrl+shift+v",
                                     "terminal_classes": ["konsole"]})
-    assert ok is True and "kdotool" in detail
+    assert ok is True and "KWin" in detail, detail
 
 
 def test_paste_target_is_content_when_one_chord_is_used_everywhere(monkeypatch):

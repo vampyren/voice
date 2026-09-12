@@ -10,7 +10,8 @@ import pathlib
 import pytest
 
 from voice.inject.window import (NO_WINDOW_ANSWER, default_window_command,
-                                 effective_window_command, terminal_chord_is_unreachable)
+                                 effective_window_command, is_plasma,
+                                 terminal_chord_is_unreachable)
 
 
 def env(**over):
@@ -46,9 +47,15 @@ def test_nothing_offers_the_kwin_picker_as_a_command():
         "queryWindowInfo is a window picker; it cannot be a window command"
 
 
-def test_kdotool_is_used_when_it_is_there():
-    cmd = default_window_command(env(XDG_CURRENT_DESKTOP="KDE"), has("kdotool"))
-    assert "kdotool" in cmd and "getactivewindow" in cmd
+def test_plasma_needs_no_command_at_all():
+    """KWin is asked in-process, over D-Bus, by `voice.inject.kwin`.
+
+    Nothing to install, and no subprocess in the paste path. `is_plasma` is
+    what the daemon consults to build that reader; this function's empty answer
+    is what tells it there is no command to run instead.
+    """
+    assert default_window_command(env(XDG_CURRENT_DESKTOP="KDE"), has("kdotool")) == ""
+    assert default_window_command(env(XDG_CURRENT_DESKTOP="plasma"), has()) == ""
 
 
 def test_kde_with_nothing_admits_it_cannot_ask():
@@ -57,8 +64,8 @@ def test_kde_with_nothing_admits_it_cannot_ask():
 
 def test_plasma_is_recognised_however_the_desktop_spells_itself():
     for spelling in ("KDE", "kde", "plasma", "X-Cinnamon:KDE", "KDE:wayland"):
-        cmd = default_window_command(env(XDG_CURRENT_DESKTOP=spelling), has("kdotool"))
-        assert "kdotool" in cmd, f"{spelling!r} was not recognised as Plasma"
+        assert is_plasma(env(XDG_CURRENT_DESKTOP=spelling)), \
+            f"{spelling!r} was not recognised as Plasma"
 
 
 def test_hyprland_is_asked_with_hyprctl():
@@ -74,15 +81,12 @@ def test_sway_is_asked_only_when_it_can_be_parsed():
 def test_gnome_has_no_answer_and_does_not_invent_one():
     # GNOME exposes no focused-window API to an ordinary client, and guessing
     # here would be worse than admitting it: a wrong class picks a wrong chord.
-    assert default_window_command(env(), has("qdbus6", "kdotool", "hyprctl",
-                                            "swaymsg", "jq")) == ""
+    assert default_window_command(env(), has("qdbus6", "hyprctl", "swaymsg", "jq")) == ""
 
 
 def test_the_desktop_is_asked_before_the_session_type():
     # A Plasma X11 session answers just as well as a Wayland one.
-    cmd = default_window_command(env(XDG_CURRENT_DESKTOP="KDE", XDG_SESSION_TYPE="x11"),
-                                 has("kdotool"))
-    assert "kdotool" in cmd
+    assert is_plasma(env(XDG_CURRENT_DESKTOP="KDE", XDG_SESSION_TYPE="x11"))
 
 
 # -- telling the owner why their terminal never receives anything ------------
@@ -141,14 +145,14 @@ def test_the_owners_own_command_beats_the_built_in_one():
 
 def test_the_built_in_command_fills_in_when_the_owner_said_nothing():
     cfg = {"inject.active_window_command": ""}
-    cmd = effective_window_command(cfg.get, env(XDG_CURRENT_DESKTOP="KDE"), has("kdotool"))
-    assert "kdotool" in cmd
+    cmd = effective_window_command(cfg.get, env(SWAYSOCK="/run/sway"), has("swaymsg", "jq"))
+    assert "swaymsg" in cmd
 
 
 def test_whitespace_is_not_a_configured_command():
     cfg = {"inject.active_window_command": "   "}
-    cmd = effective_window_command(cfg.get, env(XDG_CURRENT_DESKTOP="KDE"), has("kdotool"))
-    assert "kdotool" in cmd
+    cmd = effective_window_command(cfg.get, env(SWAYSOCK="/run/sway"), has("swaymsg", "jq"))
+    assert "swaymsg" in cmd
 
 
 def test_nothing_configured_and_nothing_built_in_is_still_empty():
@@ -192,3 +196,12 @@ def test_the_sway_command_reads_an_xwayland_client():
 def test_the_sway_command_says_nothing_rather_than_the_word_null():
     assert _run_sway_command(SWAY_TREE_NOTHING_FOCUSED) == "", \
         'an unnamed focused node must read as unknown, not as a window called "null"'
+
+
+def test_plasma_is_recognised_for_the_in_process_route():
+    from voice.inject.window import is_plasma
+
+    for spelling in ("KDE", "kde", "plasma", "KDE:wayland", "X-Cinnamon:KDE"):
+        assert is_plasma(env(XDG_CURRENT_DESKTOP=spelling)), spelling
+    assert not is_plasma(env())                     # GNOME
+    assert not is_plasma(env(XDG_CURRENT_DESKTOP=""))

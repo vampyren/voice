@@ -36,10 +36,6 @@ NO_WINDOW_ANSWER = "this desktop will not say which window has the keyboard"
 #: command would be a pipeline the timeout kills only the shell - `qdbus`
 #: survives holding the grab until somebody clicks. One capture of its output
 #: cannot tell an instant answer from a click, which is how it nearly shipped.
-#: The fallback for a Plasma that predates qdbus6, or where the owner already
-#: has kdotool. Never required, only used if it happens to be there.
-_KDOTOOL = "kdotool getactivewindow getwindowclassname"
-
 #: Hyprland prints a record; the class line is the second field of it.
 _HYPRLAND = "hyprctl activewindow | awk '/^[[:space:]]*class:/{print $2; exit}'"
 
@@ -53,6 +49,17 @@ _HYPRLAND = "hyprctl activewindow | awk '/^[[:space:]]*class:/{print $2; exit}'"
 _SWAY = ("swaymsg -t get_tree | jq -r "
          "'.. | select(.focused? == true) | .app_id // .window_properties.class // empty' "
          "| head -n1")
+
+
+def is_plasma(env: Mapping[str, str]) -> bool:
+    """Is this a KWin session? Then it can be asked in-process.
+
+    Plasma is the one desktop that answers without a command at all - KWin runs
+    a script for us and calls back over D-Bus, so there is no subprocess in the
+    paste path and nothing to install. See `voice.inject.kwin`.
+    """
+    desktop = (env.get("XDG_CURRENT_DESKTOP", "") or "").lower()
+    return "kde" in desktop or "plasma" in desktop
 
 
 def default_window_command(env: Mapping[str, str],
@@ -69,13 +76,11 @@ def default_window_command(env: Mapping[str, str],
     """
     which = which or shutil.which
     desktop = (env.get("XDG_CURRENT_DESKTOP", "") or "").lower()
-    if "kde" in desktop or "plasma" in desktop:
-        # `KWIN_QUERY` is deliberately not used here - see its comment. Until
-        # it is shown to answer without a click, the honest answer on a Plasma
-        # box with no kdotool is "cannot say", which costs the terminal chord
-        # and nothing else: the transcript stays on the clipboard and the pill
-        # says which key to press. A wrong guess here would cost a session.
-        return _KDOTOOL if which("kdotool") else ""
+    if is_plasma(env):
+        # No command at all: KWin is asked in-process instead, over D-Bus, by
+        # `voice.inject.kwin`. That needs nothing installed, runs no subprocess
+        # in the paste path, and is what `is_plasma` above is consulted for.
+        return ""
     if env.get("HYPRLAND_INSTANCE_SIGNATURE"):
         return _HYPRLAND if which("hyprctl") else ""
     if env.get("SWAYSOCK"):

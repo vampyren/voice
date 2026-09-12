@@ -101,16 +101,12 @@ yours to delete.
 | **GNOME** | Settings → Keyboard → Keyboard Shortcuts → `voice` |
 | **KDE Plasma** | Settings window → **Change…** next to *dictate* |
 
-**2. On KDE, install `kdotool`** (it is in the AUR) — optional, but it is what makes
-pasting into a terminal work. Terminals need Ctrl+Shift+V and everything else needs
-Ctrl+V, and voice can only choose correctly if something will tell it which window you
-are in. `kdotool` is the only thing on Plasma that
-[answers without asking you to click](docs/desktops.md).
+**2. On KDE — nothing to do.** voice asks KWin directly which window has the keyboard,
+so it sends Ctrl+Shift+V to terminals and Ctrl+V everywhere else, by itself. No extra
+package. [How that works](docs/desktops.md)
 
-GNOME will not tell any app which window has focus, so voice cannot do this there. It
-still pastes — it just cannot pick between the two shortcuts, or confirm the paste
-landed. So it sends Ctrl+V, keeps your words on the clipboard as well, and the pill says
-**Copied** rather than a checkmark it cannot stand behind. Nothing is ever lost.
+On GNOME there is no equivalent — GNOME will not tell any app which window has focus —
+so there voice keeps your words on the clipboard and the pill says **Copied**.
 
 📖 **[Desktop differences explained →](docs/desktops.md)**
 

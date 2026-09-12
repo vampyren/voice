@@ -12,7 +12,8 @@ from typing import Callable
 from voice import APP_ID, __version__
 from voice.hotkey.portal_listener import NO_TRIGGER, STATE_BOUND, STATE_UNASSIGNED
 from voice.inject.injector import insertion_status, pill_policy
-from voice.inject.window import effective_window_command, terminal_chord_is_unreachable
+from voice.inject.window import (effective_window_command, is_plasma,
+                                 terminal_chord_is_unreachable)
 from voice.ui.overlay_client import pill_takes_focus, probe_helper
 from voice.ui.placement import NO_LAYER_SHELL_NOTE
 
@@ -343,6 +344,10 @@ def _paste_target() -> tuple[bool, str]:
         # chord is sent, so no chord can be the wrong one.
         return True, ("inject.pill_focus = clipboard; no chord is sent here and "
                       "the text is left on the clipboard on purpose")
+    if is_plasma(os.environ) and not settings.get("active_window_command", ""):
+        # KWin is asked directly - a script it runs for us, answering over
+        # D-Bus. There is no command to name and nothing to install.
+        return True, "focused window read from KWin directly (no command needed)"
     # The running daemon's answer first. Doctor may well be running somewhere
     # the daemon is not - over SSH, from a TTY, from a unit with no graphical
     # environment - and diagnosing from *this* shell's XDG_CURRENT_DESKTOP

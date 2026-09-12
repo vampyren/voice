@@ -29,30 +29,29 @@ This decides which paste shortcut it sends. A terminal pastes with **Ctrl+Shift+
 silently discards **Ctrl+V**; everything else is the other way round. To choose, voice
 has to ask the desktop what has the keyboard.
 
-**KDE Plasma — it can ask, with `kdotool`.** Install it and voice picks the right
-shortcut per window automatically, with no configuration:
+**KDE Plasma — it can ask, and nothing needs installing.** KWin will not answer a plain
+D-Bus question, but it *will* run a script for you, in-process, with its full scripting
+API. voice writes a five-line script, asks KWin to run it, and the script calls back
+over D-Bus with the answer:
 
-```
-paru -S kdotool          # or yay; it is in the AUR
-voice doctor             # the "paste target" line should go green
-```
-
-It is not a dependency of the package, because nothing `voice` declares may come from
-the AUR — an AUR dependency once broke the first install on a clean machine. So it is
-yours to install, or not.
-
-### Why not KWin's own D-Bus interface?
-
-It looks like the obvious answer — `qdbus` ships with Plasma, so it would need nothing
-installed, and it reports `resourceClass`, exactly the form `inject.terminal_classes`
-uses:
-
-```
-qdbus6 org.kde.KWin /KWin org.kde.KWin.queryWindowInfo
+```js
+var w = workspace.activeWindow;
+callDBus(<voice's bus name>, "/", ..., w ? String(w.resourceClass) : "");
 ```
 
-**It is an interactive window picker.** KWin waits for you to click a window; your
-cursor becomes a crosshair. Measured on Plasma 6:
+`resourceClass` is exactly the form `inject.terminal_classes` is written in — Konsole
+reports `org.kde.konsole`. The whole exchange is D-Bus from the daemon's own connection:
+no `qdbus`, no shell, no subprocess between focus returning and the chord going out.
+
+This is the same technique `kdotool` uses, which is why `kdotool` is no longer needed or
+suggested — voice does it itself. `voice doctor` reports **focused window read from KWin
+directly (no command needed)**.
+
+### Why not `org.kde.KWin.queryWindowInfo`?
+
+It looks like the obvious answer — it reports `resourceClass`, and `qdbus` ships with
+Plasma. **It is an interactive window picker.** KWin waits for you to click a window;
+your cursor becomes a crosshair. Measured on Plasma 6:
 
 ```
 $ time timeout 5 qdbus6 org.kde.KWin /KWin org.kde.KWin.queryWindowInfo
@@ -61,9 +60,8 @@ $ # and again, this time clicking the terminal
 resourceClass: org.kde.konsole    Executed in 3.26 secs     ← the click
 ```
 
-Run before every paste it would put a grab in front of you every time, and the timeout
-would not even clean it up — it kills the shell, while `qdbus` keeps waiting. So voice
-does not use it, and neither should you.
+Run before every paste it would put a grab in front of you every time. voice does not use
+it, and neither should you.
 
 **GNOME — it cannot ask, and this is not fixable.** GNOME exposes no focused-window API
 to ordinary applications: `org.gnome.Shell.Introspect.GetWindows` returns `AccessDenied`

@@ -103,11 +103,59 @@ def test_the_docs_do_not_invent_buttons_the_settings_window_does_not_have():
     real = {settings.CHANGE, settings.SHORTCUT_SETTINGS_BUTTON, settings.ADVANCED}
     invented = ("Open shortcut settings", "Capture key", "Change in the desktop")
     for page in PAGES:
-        text = page.read_text()
+        # Collapsed, because these pages are hard-wrapped: "**Open shortcut\nsettings**"
+        # is the same instruction to a reader and invisible to a line-by-line
+        # search. One sat in configuration.md through every run of this test.
+        text = re.sub(r"\s+", " ", page.read_text())
         for label in invented:
             assert label not in text, (
                 f"{page.relative_to(ROOT)} names a button that does not exist: "
                 f"{label!r}. The real ones are {sorted(real)}.")
+
+
+def _shipped_local_models() -> list[str]:
+    """Every model a shipped profile would download, in config order."""
+    import tomlkit
+
+    from voice.config import DEFAULT_CONFIG
+
+    profiles = tomlkit.parse(DEFAULT_CONFIG)["stt"]["profiles"]
+    return [str(p["model"]) for p in profiles.values() if p.get("backend") == "local"]
+
+
+def test_every_model_the_default_config_downloads_is_named_with_its_size():
+    """A second language means a second multi-gigabyte download.
+
+    The install page is where the owner finds out what lands on the disk, and
+    the front page links there for exactly that. It said 1.6 GB for months
+    after the default became a model twice that size, because nothing checked.
+    """
+    page = (ROOT / "docs" / "install.md").read_text()
+    rows = re.findall(r"^\| `([^`]+)` \|[^|]*\|\s*~([\d.]+) GB\s*\|$", page, re.M)
+    sized = {name: size for name, size in rows}
+    missing = [m for m in _shipped_local_models() if m not in sized]
+    assert not missing, (
+        f"docs/install.md's download table says nothing about {missing}, which "
+        f"the shipped config.toml will fetch. It lists {sorted(sized)}.")
+
+
+def test_the_uninstall_instructions_clear_every_model_the_config_downloads():
+    """`rm -rf ...models--Systran--faster-whisper-*` looks thorough and leaves
+    3 GB of KB-Whisper behind - on a page whose promise is "here is exactly
+    what remains and how to clear it"."""
+    from voice.doctor import _hub_directory
+
+    pages = {ROOT / "docs" / "install.md": None,
+             ROOT / "packaging" / "voice.install": None}
+    for page in pages:
+        text = page.read_text()
+        for model in _shipped_local_models():
+            directory = _hub_directory(model).name          # models--Owner--repo
+            owner = directory.split("--")[1]
+            assert owner in text, (
+                f"{page.relative_to(ROOT)} tells the owner how to delete the "
+                f"downloaded models but never mentions {directory}, so {model} "
+                f"would be left on the disk.")
 
 
 def test_no_test_shells_out_without_a_bound():

@@ -321,16 +321,56 @@ def test_languages_falls_back_for_a_config_written_before_the_toggle(isolated_xd
     assert [e for e in cfg.errors() if "languages" in e] == []
 
 
-def test_language_profiles_are_empty_until_the_user_uncomments_them(isolated_xdg):
-    """The shipped table is a commented example: an upgrade must change nothing."""
+def test_the_shipped_config_pairs_each_language_with_the_best_model_for_it(isolated_xdg):
+    """Swedish is in the shipped cycle, so the model that is best at Swedish
+    ships with it. Both are the large one: one model rarely wins in two
+    languages, and picking the pair by hand was two steps nobody found.
+    """
     cfg = Config.load()
-    assert cfg.get("general.language_profiles") == {}
+    assert cfg.language_profiles() == {"en": "local", "sv": "local-swedish"}
+    assert cfg.get("stt.profiles.local.model") == "large-v3"
+    assert cfg.get("stt.profiles.local-swedish.model") == "KBLab/kb-whisper-large"
+    assert cfg.get("stt.profiles.local-swedish.backend") == "local"
+    assert cfg.errors() == []
+
+
+def test_the_shipped_swedish_profile_is_the_same_one_the_settings_window_adds(isolated_xdg):
+    """Two copies of the same profile, in config.py and in settings.py. They are
+    what the owner ends up running, so they may not drift apart."""
+    from voice.ui.settings import PROFILE_TEMPLATES
+
+    shipped = Config.load().get("stt.profiles.local-swedish")
+    assert shipped == PROFILE_TEMPLATES["local-swedish"]
+
+
+def test_unset_removes_one_key_and_leaves_the_comments_around_it(isolated_xdg):
+    """Clearing a pairing must not cost the comment that explains the table.
+
+    Writing the whole table back is how the settings window used to do it, and
+    that drops every comment inside it - the hint that says what the table is
+    for, gone the first time anyone pressed Save.
+    """
+    cfg = Config.load()
+    cfg.unset("general.language_profiles.sv")
+    cfg.unset("general.language_profiles.nope")      # already gone: nothing happens
+    cfg.unset("general.nothing.here.at.all")         # nor for a path that never existed
+    cfg.save()
+    text = cfg.path.read_text()
+    assert 'sv = "local-swedish"' not in text
+    assert 'en = "local"' in text
+    assert "One model rarely wins" in text
+    assert Config.load().language_profiles() == {"en": "local"}
+
+
+def test_a_config_written_before_the_table_existed_still_maps_nothing(isolated_xdg):
+    """An upgrade never rewrites config.toml. A file from before this pairing
+    keeps behaving exactly as it did, rather than quietly reaching for a model
+    that has never been downloaded on that machine."""
+    path = paths.config_file()
+    path.write_text('[general]\nlanguage = "en"\n')
+    cfg = Config.load(path)
     assert cfg.language_profiles() == {}
     assert cfg.profile_for_language("sv") is None
-    assert cfg.errors() == []
-    text = cfg.path.read_text()
-    assert '# en = "local"' in text
-    assert '# sv = "local-swedish"' in text
 
 
 def test_language_profiles_map_languages_to_profiles(isolated_xdg):

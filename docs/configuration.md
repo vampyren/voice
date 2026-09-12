@@ -17,9 +17,10 @@ languages = ["en", "sv"]   # cycle order for the language toggle
 notifications = true
 
 [general.language_profiles]
-# Profile to switch to when a language is selected; add the local-swedish profile first.
-# en = "local"
-# sv = "local-swedish"
+# Which transcription profile each language switches to. One model rarely wins
+# in two languages. Delete a line to leave the profile alone for that language.
+en = "local"
+sv = "local-swedish"
 
 [hotkeys]
 backend = "auto"           # "auto" | "evdev" (kernel devices) | "portal" (desktop shortcuts)
@@ -60,11 +61,11 @@ timeout_seconds = 300      # give up on a transcription still running after this
 
 [stt.profiles.local]
 backend = "local"
-model = "large-v3"         # the best Whisper there is. "large-v3-turbo" decodes
-                           # ~3x faster and is a little worse, mostly on
-                           # non-English; "medium" or "small" are lighter again.
-                           # For Swedish, "KBLab/kb-whisper-large" beats all of
-                           # them - see docs/usage.md on language profiles.
+model = "large-v3"         # English, and the best Whisper there is.
+                           # "large-v3-turbo" decodes ~3x faster and is a little
+                           # worse, mostly on non-English; "medium" or "small"
+                           # are lighter again. Swedish has its own profile
+                           # below - see docs/usage.md on language profiles.
 device = "cuda"            # falls back to cpu/int8 with a warning
 compute_type = "float16"
 beam_size = 5
@@ -72,6 +73,18 @@ prompt = ""                # steers the style of what is written, e.g. "Notes on
                            # meeting." Names and jargon belong in [dictionary]
                            # hotwords instead: a prose prompt here pulls ordinary
                            # sentences towards its own wording.
+
+[stt.profiles.local-swedish]
+# Swedish. KB-Whisper is trained by the National Library of Sweden on Swedish
+# speech and beats Whisper large-v3 on it by a wide margin. Downloaded the first
+# time you dictate in Swedish, not before - about 3 GB, like the English one.
+# KBLab also publishes -medium, -small and -base if this is too slow for you.
+backend = "local"
+model = "KBLab/kb-whisper-large"
+device = "cuda"
+compute_type = "float16"
+beam_size = 5
+prompt = ""
 
 [stt.profiles.openai]
 backend = "openai_compatible"
@@ -209,10 +222,11 @@ To set the key, or change one:
   under its own name, and set the key there. It takes effect immediately; nothing needs
   restarting, and `voice status` follows the change as the desktop makes it. The desktop's
   own dialog on the first bind is the other place to set it. The settings window's **Open
-  shortcut settings** button opens this panel for you (`gnome-control-center keyboard`).
+  your desktop's keyboard settings** button, under **Advanced**, opens this panel for you
+  (`gnome-control-center keyboard`).
 - **KDE Plasma** — implements version 2 of the portal interface, which has a reconfigure
-  dialog: **Open your desktop's keyboard settings** (under **Advanced**) asks KDE to open it, and KDE
-  System Settings → Shortcuts lists the binding as well. Because that version *can* answer
+  dialog: **Open your desktop's keyboard settings** (under **Advanced**) asks KDE to open
+  it, and KDE System Settings → Shortcuts lists the binding as well. Because that version *can* answer
   ListShortcuts usefully, `hotkeys.portal_*` is honoured there on a genuine first run.
 
 `voice doctor`'s **portal shortcuts** line shows the effective trigger per shortcut id, or
@@ -259,8 +273,9 @@ Beside each field is the key the desktop **actually** holds for that shortcut, r
 every time the window opens: the trigger itself, `no key assigned` for a shortcut the
 desktop registered without one, `not registered` for one `voice` never asked it to bind
 (an empty `portal_*` value), or `waiting for the desktop` before the portal has answered.
-That is the line to read — the field above it is only ever a request. **Open shortcut
-settings** takes you to where the key really lives: KDE's reconfigure dialog on portal
+That is the line to read — the field above it is only ever a request. **Open your
+desktop's keyboard settings**, under **Advanced**, takes you to where the key really
+lives: KDE's reconfigure dialog on portal
 version 2, otherwise `gnome-control-center keyboard` or `systemsettings kcm_keys`,
 whichever is installed, and failing both it prints the path to click yourself.
 
@@ -268,11 +283,10 @@ whichever is installed, and failing both it prints the path to click yourself.
 profile by pasting an API key: either `api_key = "sk-..."` inline, or set the
 environment variable named by `api_key_env` (`OPENAI_API_KEY`, `GROQ_API_KEY`,
 `OPENROUTER_API_KEY`) and keep the config file free of secrets. Switch with
-`voice profile openai` or from the tray/settings. For Swedish, use the `local-swedish`
-template in the settings window's profile picker (or set a profile's `model` to
-`KBLab/kb-whisper-large` by hand) and `general.language = "sv"`. Map the two together with
-`general.language_profiles` (see [Model per language](usage.md#model-per-language)) and the
-language switch carries the model with it.
+`voice profile openai` or from the tray/settings. Swedish is already set up: the shipped config
+defines `local-swedish` (`KBLab/kb-whisper-large`) and `general.language_profiles` pairs
+`sv` with it, so the language switch carries the model with it — see
+[Model per language](usage.md#model-per-language).
 
 **Paste behaviour.** Text is copied to the clipboard then pasted with Ctrl+V through the
 desktop portal (`org.freedesktop.portal.RemoteDesktop`); KDE asks permission once and

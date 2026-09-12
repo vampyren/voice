@@ -289,15 +289,55 @@ def _hub_repository(model: str) -> str:
     return _MODELS.get(model, model)
 
 
-def _model_cache() -> tuple[bool, str]:
+def _hub_directory(model: str) -> Path:
+    """Where Hugging Face keeps `model` on this machine, downloaded or not."""
+    home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+    return home / "hub" / f"models--{_hub_repository(model).replace('/', '--')}"
+
+
+def _models_in_use() -> list[str]:
+    """Every local model a dictation could reach, active profile first.
+
+    Not the active profile alone: a language profile map means the model that
+    runs depends on which language is selected, and the second one is only
+    fetched the first time that language is used. Reporting only what is active
+    answered "yes, downloaded" while the other 3 GB was still missing - and this
+    check is the one place the owner asks that question.
+    """
     from voice.config import Config
     cfg = Config.load()
-    _, profile = cfg.stt_profile()
-    if profile.get("backend") != "local":
-        return True, "active profile is cloud; nothing to cache"
-    name = _hub_repository(str(profile["model"])).replace("/", "--")
-    hub = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub" / f"models--{name}"
-    return (True, str(hub)) if hub.exists() else (False, f"{profile['model']} not downloaded yet (first dictation downloads it)")
+    profiles = cfg.get("stt.profiles", {}) or {}
+    active, _ = cfg.stt_profile()
+    names = [active, *cfg.language_profiles().values()]
+    models: list[str] = []
+    for name in names:
+        profile = profiles.get(name)
+        # A map naming a profile that is gone is already a config error, and a
+        # cloud profile has nothing to download.
+        if not isinstance(profile, dict) or profile.get("backend") != "local":
+            continue
+        model = str(profile.get("model", "")).strip()
+        if model and model not in models:
+            models.append(model)
+    return models
+
+
+def _model_cache() -> tuple[bool, str]:
+    models = _models_in_use()
+    if not models:
+        return True, "nothing runs locally; no model to cache"
+    found, missing = [], []
+    for model in models:
+        hub = _hub_directory(model)
+        (found if hub.exists() else missing).append(
+            str(hub) if hub.exists() else f"{model} not downloaded yet")
+    if missing:
+        # Named in the spelling the config uses, not the repository's: that is
+        # what the owner would have to go and change.
+        when = ("the first dictation in that language downloads it" if len(models) > 1
+                else "the first dictation downloads it")
+        return False, ", ".join([*missing, *found]) + f" ({when})"
+    return True, ", ".join(found)
 
 
 def _language_profiles() -> tuple[bool, str]:

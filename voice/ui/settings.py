@@ -2006,13 +2006,19 @@ class SettingsDialog(QDialog):
     def _save_language_profiles(self) -> None:
         """Write the map, then apply it when the language was picked here.
 
-        The table is only written when it says something, or when the file
-        already had a map: an owner who ignores the feature keeps the commented
-        example the default config ships.
+        Key by key, and only the keys that actually moved: replacing the whole
+        table costs every comment inside it, including the line that explains
+        what the table is for. An owner who changes nothing here keeps the file
+        they had, byte for byte.
         """
         mapping = self._chosen_language_profiles()
-        if mapping or (self._cfg.get("general.language_profiles") or {}):
-            self._cfg.set("general.language_profiles", mapping)
+        current = self._cfg.get("general.language_profiles") or {}
+        for code in current:
+            if code not in mapping:
+                self._cfg.unset(f"general.language_profiles.{code}")
+        for code, name in mapping.items():
+            if current.get(code) != name:
+                self._cfg.set(f"general.language_profiles.{code}", name)
         if not self._language_changed or self._active_changed:
             # Nothing to follow (the language came from the file or elsewhere),
             # or "Use this profile" was pressed and that choice wins.

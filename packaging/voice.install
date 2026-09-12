@@ -34,8 +34,11 @@ voice is installed. Three things to do, once:
   3. The first dictation opens the desktop's RemoteDesktop permission dialog -
      accept it. The restore token is cached, so it asks once.
 
-The local backend downloads its model on first use (about 1.6 GB, cached under
-~/.cache/huggingface).
+Speech models are not in the package. Each one is downloaded the first time you
+dictate in the language that uses it, and cached under ~/.cache/huggingface:
+about 3 GB for English (large-v3) and about 3 GB for Swedish (KB-Whisper, which
+is trained on Swedish and much better at it). Dictating only in English never
+fetches the Swedish one.
 MSG
 
     # Which build is this? Ask the filesystem, not the packager.
@@ -96,9 +99,12 @@ Your settings and history:
 An autostart override, only if you made one by hand:
   rm -f ~/.config/autostart/io.github.vampyren.voice.desktop
 
-The downloaded speech models - roughly 1.6 GB, and SHARED with any other tool
-that uses Hugging Face. Deleting it will make those re-download:
+The downloaded speech models - roughly 3 GB for each language you dictated in,
+and SHARED with any other tool that uses Hugging Face. Deleting them will make
+those re-download:
   rm -rf ~/.cache/huggingface/hub/models--Systran--faster-whisper-*
+  rm -rf ~/.cache/huggingface/hub/models--mobiuslabsgmbh--faster-whisper-*
+  rm -rf ~/.cache/huggingface/hub/models--KBLab--kb-whisper-*
   # only if nothing else on this machine uses Hugging Face:
   # rm -rf ~/.cache/huggingface
 

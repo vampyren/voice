@@ -2377,7 +2377,7 @@ def test_a_language_that_maps_to_the_active_profile_changes_nothing(isolated_xdg
 def test_a_missing_mapped_profile_notifies_and_keeps_the_current_one(isolated_xdg, qapp, monkeypatch):
     """The map can name a profile the owner has since deleted; the language still
     switches, the model does not, and they are told why exactly once."""
-    cfg = _with_language_profiles({"sv": "local-swedish"})     # never defined here
+    cfg = _with_language_profiles({"sv": "local-norwegian"})   # never defined here
     notifier = QuietNotifier()
     d, built = _profile_daemon(cfg, monkeypatch, notifier=notifier)
 
@@ -2391,7 +2391,7 @@ def test_a_missing_mapped_profile_notifies_and_keeps_the_current_one(isolated_xd
     assert len(notifier.sent) == 1
     title, body, urgency = notifier.sent[0]
     assert title == "Language profile missing"
-    assert "'local-swedish'" in body and "sv" in body
+    assert "'local-norwegian'" in body and "sv" in body
     d.shutdown()
 
 

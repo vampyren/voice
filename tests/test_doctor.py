@@ -187,8 +187,20 @@ def test_language_profiles_probe_lists_the_map(isolated_xdg):
     assert default_probes()["language profiles"]() == (True, "en → local, sv → openai")
 
 
-def test_language_profiles_probe_says_when_nothing_is_mapped(isolated_xdg):
+def test_language_profiles_probe_reports_the_shipped_pairing(isolated_xdg):
     from voice.doctor import default_probes
+    assert default_probes()["language profiles"]() == (
+        True, "en → local, sv → local-swedish")
+
+
+def test_language_profiles_probe_says_when_nothing_is_mapped(isolated_xdg):
+    """Emptying the table is how you say "one model for everything"."""
+    from voice.config import Config
+    from voice.doctor import default_probes
+
+    cfg = Config.load()
+    cfg.set("general.language_profiles", {})
+    cfg.save()
     assert default_probes()["language profiles"]() == (
         True, "none: general.language_profiles is empty")
 
@@ -199,9 +211,9 @@ def test_language_profiles_probe_marks_a_profile_that_is_gone(isolated_xdg):
     from voice.doctor import default_probes
 
     cfg = Config.load()
-    cfg.set("general.language_profiles", {"sv": "local-swedish"})
+    cfg.set("general.language_profiles", {"sv": "local-norwegian"})
     cfg.save()
-    assert default_probes()["language profiles"]() == (True, "sv → local-swedish (not defined)")
+    assert default_probes()["language profiles"]() == (True, "sv → local-norwegian (not defined)")
     assert "language profiles" not in __import__("voice.doctor", fromlist=["REQUIRED"]).REQUIRED
 
 
@@ -367,6 +379,9 @@ def _local_profile(model: str):
     cfg = Config.load()
     cfg.set("stt.profiles.local.model", model)
     cfg.set("stt.active", "local")
+    # One model, on purpose: the shipped config maps Swedish to a second one,
+    # and these cases are about how a single model is looked up.
+    cfg.set("general.language_profiles", {})
     cfg.save()
     return cfg
 
@@ -418,6 +433,59 @@ def test_the_model_cache_probe_still_reports_one_that_is_not_there(
     ok, detail = default_probes()["model cache"]()
     assert ok is False
     assert "medium not downloaded yet" in detail
+
+
+def test_the_model_cache_probe_covers_every_model_a_language_can_select(
+        isolated_xdg, monkeypatch, tmp_path):
+    """The Swedish model is only fetched the first time Swedish is used.
+
+    A probe that looks at the active profile alone cannot say whether that has
+    happened yet - so the one place the owner goes to ask "is everything
+    downloaded" answered for English and stayed quiet about the other 3 GB.
+    """
+    from voice.config import Config
+    from voice.doctor import default_probes
+
+    cfg = Config.load()
+    cfg.set("stt.profiles.local.model", "medium")
+    cfg.set("stt.profiles.local-swedish", {"backend": "local", "model": "KBLab/kb-whisper-large"})
+    cfg.set("general.language_profiles", {"en": "local", "sv": "local-swedish"})
+    cfg.set("stt.active", "local")
+    cfg.save()
+    hub = tmp_path / "hf"
+    (hub / "hub" / "models--Systran--faster-whisper-medium").mkdir(parents=True)
+    monkeypatch.setenv("HF_HOME", str(hub))
+
+    ok, detail = default_probes()["model cache"]()
+    assert ok is False, detail
+    assert "KBLab/kb-whisper-large not downloaded yet" in detail
+    assert "models--Systran--faster-whisper-medium" in detail
+
+    (hub / "hub" / "models--KBLab--kb-whisper-large").mkdir(parents=True)
+    ok, detail = default_probes()["model cache"]()
+    assert ok is True, detail
+    assert "models--KBLab--kb-whisper-large" in detail
+
+
+def test_the_model_cache_probe_names_a_cloud_profile_without_looking_for_a_model(
+        isolated_xdg, monkeypatch, tmp_path):
+    """A map may send one language to a cloud profile; there is nothing to
+    download for it, and it must not be reported as missing."""
+    from voice.config import Config
+    from voice.doctor import default_probes
+
+    cfg = Config.load()
+    cfg.set("stt.profiles.local.model", "medium")
+    cfg.set("general.language_profiles", {"en": "local", "sv": "openai"})
+    cfg.set("stt.active", "local")
+    cfg.save()
+    hub = tmp_path / "hf"
+    (hub / "hub" / "models--Systran--faster-whisper-medium").mkdir(parents=True)
+    monkeypatch.setenv("HF_HOME", str(hub))
+
+    ok, detail = default_probes()["model cache"]()
+    assert ok is True, detail
+    assert "gpt-transcribe" not in detail
 
 
 # -- where the paste actually goes -------------------------------------------

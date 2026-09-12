@@ -222,15 +222,21 @@ en = "local"
 sv = "local-swedish"
 ```
 
-Both entries are commented out in a shipped config, so nothing changes until you opt in.
-Add the `local-swedish` profile first — settings window, Transcription tab, **Add from
-template** — then uncomment the mapping, or fill in the **Profile per language** table on
-the General tab, which writes it for you.
+**Both lines ship set up.** `local` is `large-v3` and `local-swedish` is
+`KBLab/kb-whisper-large` — trained by the National Library of Sweden on Swedish speech,
+and much better at it than any general Whisper. Each model is downloaded the first time
+you dictate in the language that uses it, about 3 GB each; dictating only in English
+never fetches the Swedish one.
 
-On the CachyOS box that pairs `local` = `large-v3-turbo` (English) with `local-swedish` =
-`KBLab/kb-whisper-large` (Swedish), both `device = "cuda"`. KB-Whisper also publishes
-`KBLab/kb-whisper-small`, `-base` and `-medium` if the large model is too slow on your
-machine.
+To change a pairing, use the **Profile per language** table on the General tab of the
+settings window — **(keep current)** in a row means "leave my model alone for this
+language" and unpairs it. To add another profile, Transcription tab → **Add from
+template**. KB-Whisper also publishes `KBLab/kb-whisper-medium`, `-small` and `-base` if
+the large one is too slow on your machine.
+
+**Upgrading?** A config file that already exists is never rewritten, so an install from
+before this pairing keeps the single model it had. Add the two lines by hand, or open the
+settings window and set the table there.
 
 Every path switches the pair together — the toggle hotkey, the tray, `voice language sv`,
 and Save in the settings window — in a single write, so the model is loaded once. A

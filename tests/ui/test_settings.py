@@ -1,4 +1,5 @@
 import pytest
+from PySide6.QtCore import Qt
 
 from voice.audio.capture import Source
 from voice.config import Config
@@ -11,6 +12,13 @@ from voice.ui.settings import (ACTION_LABELS, ACTIONS, CHANGE, CHANGE_BUSY, CHAN
                                SETTINGS_APP_MISSING, SETTINGS_APP_OPENED,
                                SHORTCUT_SETTINGS_PATH, UNKNOWN_TRIGGER, WHO_MANAGES,
                                SettingsDialog)
+
+
+def select_profile(dlg, name):
+    """Pick a profile by name. Row numbers move whenever one is shipped."""
+    found = dlg.profile_list.findItems(name, Qt.MatchFlag.MatchExactly)
+    assert found, f"no profile called {name!r}"
+    dlg.profile_list.setCurrentItem(found[0])
 
 
 def make(qapp):
@@ -27,7 +35,8 @@ def test_loads_values_from_config(qapp):
     assert dlg.mode_combo.currentData() == "hold"
     assert dlg.language_combo.currentData() == "en"
     assert dlg.device_combo.itemText(1) == "OBSBOT Tiny 3 (default)"
-    assert [dlg.profile_list.item(i).text() for i in range(dlg.profile_list.count())] == ["local", "openai", "groq", "openrouter"]
+    assert [dlg.profile_list.item(i).text() for i in range(dlg.profile_list.count())] == [
+        "local", "local-swedish", "openai", "groq", "openrouter"]
 
 
 def test_edit_and_save_writes_config_and_emits(qapp):
@@ -37,7 +46,7 @@ def test_edit_and_save_writes_config_and_emits(qapp):
     dlg.hotkey_edit.setText("KEY_RIGHTCTRL")
     dlg.mode_combo.setCurrentIndex(dlg.mode_combo.findData("toggle"))
     dlg.device_combo.setCurrentIndex(1)
-    dlg.profile_list.setCurrentRow(1)                       # openai
+    select_profile(dlg, "openai")
     dlg.profile_form["api_key"].setText("sk-abc")
     dlg.profile_form["model"].setText("gpt-4o-mini-transcribe")
     dlg.save_button.click()
@@ -107,7 +116,7 @@ def test_close_discards_edits_and_never_touches_the_callers_config(qapp):
 
 def test_profile_edits_do_not_leak_into_the_callers_config_before_save(qapp):
     cfg, dlg, _ = make(qapp)
-    dlg.profile_list.setCurrentRow(1)                     # openai
+    select_profile(dlg, "openai")
     dlg.profile_form["model"].setText("gpt-4o-mini-transcribe")
     dlg.add_profile_combo.setCurrentText("mistral")
     dlg.add_profile_button.click()
@@ -125,7 +134,7 @@ def test_reload_from_disk_repopulates_the_widgets(qapp):
     dlg.reload_from_disk()                                # what reopening does
     assert dlg.hotkey_edit.text() == "KEY_F13"
     assert [dlg.profile_list.item(i).text() for i in range(dlg.profile_list.count())] == \
-        ["local", "openai", "groq", "openrouter"]
+        ["local", "local-swedish", "openai", "groq", "openrouter"]
 
 
 def test_save_writes_to_disk_and_the_caller_config_sees_it_after_reload(qapp):
@@ -159,7 +168,7 @@ def test_use_this_profile_wins_over_the_on_disk_value(qapp):
     external.set("stt.active", "groq")
     external.save()
 
-    dlg.profile_list.setCurrentRow(1)                     # openai
+    select_profile(dlg, "openai")
     dlg.activate_button.click()
     dlg.save_button.click()
     assert Config.load().get("stt.active") == "openai"
@@ -437,8 +446,8 @@ def test_the_general_tab_lists_one_profile_row_per_language(qapp):
     assert [table.item(r, 0).text() for r in range(table.rowCount())] == ["English", "Swedish"]
     combo = dlg.language_profile_combos["sv"]
     assert [combo.itemText(i) for i in range(combo.count())] == [
-        "(keep current)", "local", "openai", "groq", "openrouter"]
-    assert combo.currentData() == ""            # a shipped config maps nothing
+        "(keep current)", "local", "local-swedish", "openai", "groq", "openrouter"]
+    assert combo.currentData() == "local-swedish"     # the shipped pairing
 
 
 def test_the_table_shows_a_map_that_is_already_configured(qapp):
@@ -454,17 +463,31 @@ def test_saving_writes_the_map_and_omits_the_kept_rows(qapp):
     combo.setCurrentIndex(combo.findData("openai"))
     dlg.save_button.click()
     again = Config.load()
-    assert again.get("general.language_profiles") == {"sv": "openai"}
+    assert again.get("general.language_profiles") == {"en": "local", "sv": "openai"}
     assert again.errors() == []
 
+    combo = make(qapp)[1].language_profile_combos["en"]
+    assert combo.findData("") == 0, '"(keep current)" is still offered'
 
-def test_saving_an_empty_map_keeps_the_commented_example(qapp):
-    """Nobody who ignores this feature should lose the hint that explains it."""
+
+def test_clearing_a_row_unpairs_that_language(qapp):
+    """"(keep current)" is how you say "leave my model alone for Swedish" -
+    the way out of the shipped pairing, without hand-editing the file."""
     cfg, dlg, _ = make(qapp)
+    for code in ("en", "sv"):
+        combo = dlg.language_profile_combos[code]
+        combo.setCurrentIndex(combo.findData(""))
     dlg.save_button.click()
     again = Config.load()
     assert again.get("general.language_profiles") == {}
-    assert '# sv = "local-swedish"' in again.path.read_text()
+    assert again.errors() == []
+
+
+def test_saving_keeps_the_comment_that_explains_the_table(qapp):
+    """Nobody should lose the hint that explains what the table is for."""
+    cfg, dlg, _ = make(qapp)
+    dlg.save_button.click()
+    assert "One model rarely wins" in Config.load().path.read_text()
 
 
 def test_picking_a_language_here_activates_its_mapped_profile(qapp):
@@ -491,7 +514,7 @@ def test_a_language_nobody_touched_here_does_not_move_the_profile(qapp):
 def test_use_this_profile_wins_over_the_map(qapp):
     _with_map({"sv": "openai"})
     cfg, dlg, _ = make(qapp)
-    dlg.profile_list.setCurrentRow(2)                  # groq
+    select_profile(dlg, "groq")
     dlg.activate_button.click()
     dlg.language_combo.setCurrentIndex(dlg.language_combo.findData("sv"))
     dlg.save_button.click()
@@ -501,20 +524,20 @@ def test_use_this_profile_wins_over_the_map(qapp):
 
 
 def test_a_profile_added_from_a_template_can_be_mapped_at_once(qapp):
-    """The README's two steps are one visit: add local-swedish, then map sv to it."""
+    """Adding a profile and pairing a language with it is one visit here."""
     cfg, dlg, _ = make(qapp)
     combo = dlg.language_profile_combos["sv"]
     combo.setCurrentIndex(combo.findData("openai"))          # a choice already made here
-    dlg.add_profile_combo.setCurrentText("local-swedish")
+    dlg.add_profile_combo.setCurrentText("mistral")
     dlg.add_profile_button.click()
 
     combo = dlg.language_profile_combos["sv"]                # rebuilt with the new profile
-    assert combo.findData("local-swedish") > 0
+    assert combo.findData("mistral") > 0
     assert combo.currentData() == "openai"                   # the choice survived the rebuild
-    combo.setCurrentIndex(combo.findData("local-swedish"))
+    combo.setCurrentIndex(combo.findData("mistral"))
     dlg.save_button.click()
     again = Config.load()
-    assert again.get("general.language_profiles") == {"sv": "local-swedish"}
+    assert again.get("general.language_profiles") == {"en": "local", "sv": "mistral"}
     assert again.errors() == []
 
 
@@ -526,7 +549,7 @@ def test_rebuilding_the_table_leaves_no_stray_combo_behind(qapp):
     cfg, dlg, _ = make(qapp)
     table = dlg.language_profile_table
     assert len(table.viewport().findChildren(QComboBox)) == table.rowCount() == 2
-    dlg.add_profile_combo.setCurrentText("local-swedish")
+    dlg.add_profile_combo.setCurrentText("mistral")
     dlg.add_profile_button.click()
     assert len(table.viewport().findChildren(QComboBox)) == table.rowCount() == 2
     dlg.reload_from_disk()
@@ -633,7 +656,7 @@ def test_a_hidden_mapping_whose_profile_is_gone_does_not_block_saving(qapp):
     config error - and unreachable from the dialog, so it would block every save."""
     seed = Config.load()
     seed.set("general.languages", ["en"])
-    seed.set("general.language_profiles", {"sv": "local-swedish"})   # never defined
+    seed.set("general.language_profiles", {"sv": "local-norwegian"})  # never defined
     seed.save()
 
     cfg, dlg, _ = make(qapp)

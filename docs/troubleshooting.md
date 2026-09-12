@@ -48,7 +48,9 @@
   desktop at all. KDE and wlroots compositors honour it; GNOME places the pill itself, so
   the setting does nothing there.
 - **microphones** *(optional)* — at least one PipeWire source is visible.
-- **model cache** *(optional)* — whether the active local model has already downloaded.
+- **model cache** *(optional)* — whether every local model a language can select has
+  already downloaded, and where each one sits. A cross here is normal before the first
+  dictation in that language: it is what still has to be fetched, not a fault.
 - **notify-send**, **fallback senders** *(optional)* — desktop notifications, and
   `wtype`/`ydotool` as a paste fallback if the portal chord path is ever unavailable.
 

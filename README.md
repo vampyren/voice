@@ -94,7 +94,8 @@ even used.
 **In your home**, created as you use it, never by the installer:
 
 `~/.config/voice/` (settings) · `~/.local/state/voice/` (history) ·
-`~/.cache/huggingface/` (the speech model, downloaded on first dictation)
+`~/.cache/huggingface/` (the speech models — about 3 GB per language, each fetched
+the first time you dictate in it)
 
 `pacman -R voice` removes everything in the table. Your home files stay — those are
 yours to delete.

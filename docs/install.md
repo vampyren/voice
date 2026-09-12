@@ -89,13 +89,19 @@ Not installed by default; pacman lists them as optional dependencies.
 
 ### Downloaded on first use, not shipped
 
-The speech models are fetched the first time you dictate and cached under
-`~/.cache/huggingface` — shared with any other Hugging Face tool on the machine.
+Speech models are **not** in the package. Each one is fetched the first time you
+dictate in the language that uses it, and cached under `~/.cache/huggingface` —
+shared with any other Hugging Face tool on the machine.
 
 | model | for | download |
 | --- | --- | --- |
-| `large-v3-turbo` | English (the default) | ~1.6 GB |
-| `KBLab/kb-whisper-large` | Swedish, set up separately | ~3.1 GB |
+| `large-v3` | English, and anything not Swedish | ~3.1 GB |
+| `KBLab/kb-whisper-large` | Swedish | ~3.1 GB |
+
+Both ship in the default config, paired to a language. Dictating only in English
+never fetches the Swedish one. If that is more disk than you want, `large-v3-turbo`
+(~1.6 GB) decodes about 3× faster and is a little worse — see
+[language profiles](usage.md#model-per-language).
 
 ### Separate software, only for optional features
 
@@ -242,7 +248,7 @@ because none of it belongs to the package:
 |---|---|---|
 | Settings | `~/.config/voice` | `config.toml` — your key, language, profiles |
 | History | `~/.local/state/voice` | past dictations, and the portal permission token |
-| Speech models | `~/.cache/huggingface` | ~1.6 GB, **shared with any other Hugging Face tool** |
+| Speech models | `~/.cache/huggingface` | ~3.1 GB per language you used, **shared with any other Hugging Face tool** |
 | Autostart override | `~/.config/autostart/io.github.vampyren.voice.desktop` | only if you made one by hand |
 
 ```bash
@@ -251,6 +257,8 @@ rm -f  ~/.config/autostart/io.github.vampyren.voice.desktop
 
 # just voice's models, leaving anything else that uses Hugging Face alone:
 rm -rf ~/.cache/huggingface/hub/models--Systran--faster-whisper-*
+rm -rf ~/.cache/huggingface/hub/models--mobiuslabsgmbh--faster-whisper-*
+rm -rf ~/.cache/huggingface/hub/models--KBLab--kb-whisper-*
 ```
 
 **A daemon that was already running keeps going** until you log out. Stop it now with:
@@ -300,7 +308,7 @@ once the package is built).
 ## External components
 
 - faster-whisper — https://github.com/SYSTRAN/faster-whisper
-- Whisper large-v3-turbo — https://huggingface.co/Systran/faster-whisper-large-v3-turbo
+- Whisper large-v3 — https://huggingface.co/Systran/faster-whisper-large-v3
 - KB-Whisper (Swedish) — https://huggingface.co/KBLab/kb-whisper-large
 - Silero VAD — https://github.com/snakers4/silero-vad
 - python-evdev — https://github.com/gvalkov/python-evdev

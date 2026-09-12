@@ -199,11 +199,45 @@ Packaged install:
 sudo pacman -R voice
 ```
 
-Git clone:
+Git clone — this one **asks** whether to delete your settings as well:
 
 ```
-./install.sh --uninstall
+./install.sh --uninstall                     # asks, and keeps them if you say no
+./install.sh --uninstall --purge             # delete settings and history too
+./install.sh --uninstall --keep-settings     # never ask, always keep
 ```
+
+With no terminal to ask on (a script, CI) your files are kept, because that is the
+answer you can undo.
+
+### What is left behind, and how to clear it
+
+Removing the package removes every file it owned. Nothing under your home is touched,
+because none of it belongs to the package:
+
+| What | Where | |
+|---|---|---|
+| Settings | `~/.config/voice` | `config.toml` — your key, language, profiles |
+| History | `~/.local/state/voice` | past dictations, and the portal permission token |
+| Speech models | `~/.cache/huggingface` | ~1.6 GB, **shared with any other Hugging Face tool** |
+| Autostart override | `~/.config/autostart/io.github.vampyren.voice.desktop` | only if you made one by hand |
+
+```bash
+rm -rf ~/.config/voice ~/.local/state/voice
+rm -f  ~/.config/autostart/io.github.vampyren.voice.desktop
+
+# just voice's models, leaving anything else that uses Hugging Face alone:
+rm -rf ~/.cache/huggingface/hub/models--Systran--faster-whisper-*
+```
+
+**A daemon that was already running keeps going** until you log out. Stop it now with:
+
+```bash
+pkill -f 'voice daemon'
+```
+
+`pacman -R` prints this same list when it removes the package, so you do not have to
+come back here for it.
 
 ### What the udev rule actually does
 

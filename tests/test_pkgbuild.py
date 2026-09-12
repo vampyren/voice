@@ -270,11 +270,41 @@ def test_no_dependency_comes_from_the_aur():
                 f"be a dependency.")
 
 
-def test_the_package_depends_on_arch_s_own_python():
+def test_the_package_depends_on_arch_s_own_python_pinned_to_its_abi():
     """There is no pinned-interpreter alternative that avoids the AUR: none of
-    python311, python312 or python313 is in the official repositories."""
+    python311, python312 or python313 is in the official repositories.
+
+    So the dependency is Arch's `python` - pinned to the minor version the
+    bundled wheels were built for. Unpinned it was a silent breakage waiting
+    for the next Arch python bump: the native modules stop importing, voice
+    will not start, and pacman says nothing because `python` is still
+    satisfied. Pinned, the upgrade stops and names voice as the reason.
+    """
     for env in (None, {"VOICE_GPU": "0"}):
-        assert "python" in shell_array("depends", env)
+        entries = [d for d in shell_array("depends", env)
+                   if re.split(r"[<>=]", d, 1)[0].strip() == "python"]
+        assert entries, "the package must depend on Arch's own python"
+        joined = " ".join(entries)
+        assert ">=" in joined and "<" in joined, (
+            f"python has to be pinned to the minor version the bundled wheels "
+            f"were built for, or an Arch upgrade breaks voice silently: {entries}")
+
+
+def test_the_install_message_never_claims_a_cuda_runtime_it_may_not_have():
+    """The scriptlet ships in both builds, and said CUDA was bundled in both.
+
+    The release download is the CPU build, so every installer was told their
+    GPU would be used. What differs between the builds has to be decided from
+    what actually landed on disk.
+    """
+    text = (ROOT / "packaging" / "voice.install").read_text()
+    guard = text.find("[ -d /usr/lib/voice/cuda ]")
+    assert guard != -1, "nothing checks whether the CUDA runtime is actually installed"
+    claim = text.find("bundles the CUDA 12 runtime")
+    otherwise = text.find("else", guard)
+    assert guard < claim < otherwise, (
+        "the CUDA claim has to sit inside the branch that checked for it")
+    assert "CPU-only build" in text, "the other branch has to say what this build is"
 
 
 def test_the_project_supports_the_interpreter_arch_will_run_it_on():
@@ -535,3 +565,20 @@ def test_the_app_directory_holds_only_this_project(tmp_path):
     project and nothing else, or the helper picks up bundled wheels."""
     pkg = _stage(tmp_path)
     assert {p.name for p in (pkg / "usr/lib/voice/app").iterdir()} == {"voice"}
+
+
+def test_the_readme_download_url_matches_the_package_it_would_build():
+    """The README's one-command install names an exact release asset.
+
+    A pkgrel bump that leaves the URL behind gives everyone the previous build -
+    which is how the CPU release came to tell people their GPU was in use.
+    """
+    readme = (ROOT / "README.md").read_text()
+    urls = re.findall(r"releases/download/[^/]+/(voice-[\d.]+-\d+-\w+\.pkg\.tar\.zst)", readme)
+    assert urls, "the README no longer links a release asset to install from"
+    var = shell_vars()
+    pkgver, pkgrel = var["pkgver"].strip('"'), var["pkgrel"].strip('"')
+    expected = f"voice-{pkgver}-{pkgrel}-x86_64.pkg.tar.zst"
+    for name in urls:
+        assert name == expected, (
+            f"the README installs {name!r} but this PKGBUILD builds {expected!r}")

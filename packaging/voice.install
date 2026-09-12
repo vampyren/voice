@@ -3,12 +3,21 @@
 # The udev rule tags input event devices with `uaccess` so the logged-in seat
 # user can read keyboard events for push-to-talk. udev does not pick a new rule
 # up on its own, hence the reload here and after removal.
+#
+# Nothing here may claim something the build did not do: this file ships in both
+# the GPU and the CPU-only package, so anything that differs between them is
+# decided at runtime from what actually landed on disk.
 
 _reload_udev() {
     if command -v udevadm >/dev/null 2>&1; then
         udevadm control --reload-rules >/dev/null 2>&1 || true
         udevadm trigger --subsystem-match=input >/dev/null 2>&1 || true
     fi
+}
+
+_python_minor() {
+    /usr/bin/python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null \
+        || echo "its build version"
 }
 
 post_install() {
@@ -25,18 +34,39 @@ voice is installed. Three things to do, once:
   3. The first dictation opens the desktop's RemoteDesktop permission dialog -
      accept it. The restore token is cached, so it asks once.
 
-The local backend downloads its model on first use (large-v3-turbo is about
-1.6 GB, cached under ~/.cache/huggingface). The CUDA 12 runtime is part of this
-package, so transcription uses your NVIDIA GPU as soon as the driver is there -
-`voice doctor`'s cuda line says whether it found one. With no usable GPU it
-falls back to CPU int8 by itself; nothing extra to install either way.
+The local backend downloads its model on first use (about 1.6 GB, cached under
+~/.cache/huggingface).
+MSG
 
-One thing to know about updates: this package bundles Python extension modules
-built against Arch's current `python` (3.14). When Arch moves to 3.15 they stop
-importing and voice will not start, with an ImportError from a native module.
-Nothing warns you beforehand - pacman still considers `python` satisfied. The
-fix is to rebuild: `cd packaging && makepkg -si`. That is the normal trade for
-a package that ships its own wheels instead of depending on AUR packages.
+    # Which build is this? Ask the filesystem, not the packager.
+    if [ -d /usr/lib/voice/cuda ]; then
+        cat <<'MSG'
+
+This build bundles the CUDA 12 runtime, so transcription uses your NVIDIA GPU as
+soon as the driver is there - `voice doctor`'s cuda line says whether it found
+one. With no usable GPU it falls back to CPU int8 by itself.
+MSG
+    else
+        cat <<'MSG'
+
+This is the CPU-only build: no CUDA runtime is bundled, and transcription runs
+on CPU int8. That is a few times faster than real time on an ordinary machine,
+and `voice doctor`'s cuda line will say there is no CUDA device - which is
+expected here, and does not fail the run. For GPU transcription, rebuild with
+`cd packaging && makepkg -si` (adds roughly 3 GB).
+MSG
+    fi
+
+    printf '\n'
+    printf '%s\n' \
+"One thing to know about updates: this package bundles Python extension modules" \
+"built for python $(_python_minor), and depends on exactly that minor version." \
+"When Arch moves on, pacman stops and names voice as what is in the way, rather" \
+"than letting it break silently with an ImportError nothing warned you about." \
+"Rebuilding clears it and the python upgrade goes through:" \
+"  cd packaging && makepkg -si"
+
+    cat <<'MSG'
 
 Autostart comes from /etc/xdg/autostart/io.github.vampyren.voice.desktop. To
 stop it for your user without touching the package:
@@ -56,14 +86,23 @@ post_upgrade() {
 post_remove() {
     _reload_udev
     cat <<'MSG'
-voice is removed. Your own files are deliberately left behind - delete them by
-hand if you want a clean slate:
+voice is removed. Every file the package owned is gone. These are yours, so
+they were left alone - here is exactly what remains and how to clear it.
 
-  rm -rf ~/.config/voice          # config.toml
-  rm -rf ~/.local/state/voice     # history, portal restore token
-  rm -rf ~/.cache/huggingface     # downloaded models (shared with other tools!)
+Your settings and history:
+  rm -rf ~/.config/voice          # config.toml - your key, language, profiles
+  rm -rf ~/.local/state/voice     # dictation history, the portal permission token
 
-A running daemon from before the removal keeps going until you log out or run
-`kill` on it; the socket is /run/user/$UID/voice.sock.
+An autostart override, only if you made one by hand:
+  rm -f ~/.config/autostart/io.github.vampyren.voice.desktop
+
+The downloaded speech models - roughly 1.6 GB, and SHARED with any other tool
+that uses Hugging Face. Deleting it will make those re-download:
+  rm -rf ~/.cache/huggingface/hub/models--Systran--faster-whisper-*
+  # only if nothing else on this machine uses Hugging Face:
+  # rm -rf ~/.cache/huggingface
+
+A daemon that was already running keeps going until you log out. To stop it now:
+  pkill -f 'voice daemon'
 MSG
 }

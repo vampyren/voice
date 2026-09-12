@@ -13,15 +13,17 @@ LEGACY_APPS="$HOME/.local/share/applications/$APP.desktop"
 LEGACY_AUTOSTART="$HOME/.config/autostart/$APP.desktop"
 RULE_SRC="$ROOT/packaging/70-voice-input.rules"
 RULE_DST="/etc/udev/rules.d/70-voice-input.rules"
-MODE=install; UDEV=1; EXTRA=auto
+MODE=install; UDEV=1; EXTRA=auto; PURGE=ask
 
 for arg in "$@"; do
   case "$arg" in
     --uninstall) MODE=uninstall ;;
+    --purge) PURGE=1 ;;
+    --keep-settings) PURGE=0 ;;
     --no-udev) UDEV=0 ;;
     --gpu) EXTRA=gpu ;;
     --cpu) EXTRA=cpu ;;
-    -h|--help) echo "usage: install.sh [--uninstall] [--no-udev] [--gpu|--cpu]"; exit 0 ;;
+    -h|--help) echo "usage: install.sh [--uninstall [--purge|--keep-settings]] [--no-udev] [--gpu|--cpu]"; exit 0 ;;
     *) echo "unknown option $arg" >&2; exit 2 ;;
   esac
 done
@@ -32,7 +34,32 @@ sudo_run() { if [ "${DRY_RUN:-0}" = 1 ]; then echo "+ sudo $*"; else echo "+ sud
 if [ "$MODE" = uninstall ]; then
   run rm -f "$BIN" "$APPS" "$AUTOSTART" "$LEGACY_APPS" "$LEGACY_AUTOSTART"
   [ -e "$RULE_DST" ] || [ "${DRY_RUN:-0}" = 1 ] && sudo_run rm -f "$RULE_DST" || true
-  echo "left in place (delete if you want a clean slate): $HOME/.config/$APP $HOME/.local/state/$APP $HOME/.cache/huggingface"
+  # Your settings are yours: never removed without being asked. With no
+  # terminal to ask on - a script, CI - they are kept, which is the safe answer.
+  if [ "$PURGE" = ask ]; then
+    if [ -t 0 ] && [ "${DRY_RUN:-0}" != 1 ]; then
+      echo
+      echo "Delete your settings and dictation history as well?"
+      echo "  $HOME/.config/$APP        settings (config.toml)"
+      echo "  $HOME/.local/state/$APP   dictation history, portal permission token"
+      printf "[y/N] "
+      read -r _reply || _reply=""
+      case "$_reply" in [yY]*) PURGE=1 ;; *) PURGE=0 ;; esac
+    else
+      PURGE=0
+    fi
+  fi
+
+  if [ "$PURGE" = 1 ]; then
+    run rm -rf "$HOME/.config/$APP" "$HOME/.local/state/$APP"
+    echo "settings and history deleted"
+  else
+    echo "kept (delete by hand for a clean slate): $HOME/.config/$APP $HOME/.local/state/$APP"
+  fi
+  echo "kept regardless: $HOME/.cache/huggingface - the downloaded models, shared with"
+  echo "  any other tool that uses Hugging Face. Remove just ours with:"
+  echo "  rm -rf $HOME/.cache/huggingface/hub/models--Systran--faster-whisper-*"
+  echo "a daemon started before this keeps running; stop it with: pkill -f 'voice daemon'"
   exit 0
 fi
 

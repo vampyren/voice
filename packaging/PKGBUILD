@@ -33,8 +33,8 @@
 # See packaging/README.md for the full reasoning.
 
 pkgname=voice
-pkgver=0.1.0
-pkgrel=2
+pkgver=0.1.1
+pkgrel=1
 pkgdesc="Wayland-native voice typing: hold a key, speak, release, text appears"
 arch=('x86_64')
 url="https://github.com/vampyren/voice"
@@ -88,12 +88,23 @@ sha256sums=('SKIP')
 #: because the extension modules under deps/ are built for exactly its ABI.
 _prefix=/usr/lib/voice
 _py=/usr/bin/python3
+#: The interpreter minor version this package's native modules are built for,
+#: and the first one they will not import under. These pin the dependency: the
+#: wheels under deps/ are compiled for exactly this ABI, so an Arch python bump
+#: leaves voice unable to start with an ImportError from a native module, and
+#: pacman would otherwise consider `python` satisfied and say nothing. Pinned,
+#: the upgrade stops and says voice is in the way - which is the true answer,
+#: and the fix is one `makepkg -si`.
+_pyver=$("$_py" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+_pynext=$("$_py" -c 'import sys; print("%d.%d" % (sys.version_info[0], sys.version_info[1] + 1))')
 #: Must equal voice.APP_ID: the desktop portal resolves our app id (needed by
 #: the GlobalShortcuts hotkey backend) through an entry with exactly this name.
 _appid=io.github.vampyren.voice
 
 depends=(
-  'python'             # Arch's own interpreter; see the header for the cost
+  # Arch's own interpreter, pinned to the minor version these wheels were built
+  # for - see _pyver above for why a bare 'python' silently breaks the install.
+  "python>=$_pyver" "python<$_pynext"
   'pipewire'           # pw-dump: the microphone list
   'pipewire-audio'     # pw-record: the capture itself (NOT in `pipewire`)
   'wl-clipboard'       # wl-copy / wl-paste: how text reaches the focused window

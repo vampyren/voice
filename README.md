@@ -21,9 +21,14 @@ still runs about 3× faster than you speak. [Why](docs/install.md#do-i-need-a-gp
 ### Arch / CachyOS — one command, nothing to build
 
 ```bash
-sudo pacman -U https://github.com/vampyren/voice/releases/download/v0.1.1/voice-0.1.1-1-x86_64.pkg.tar.zst
+curl -LO https://github.com/vampyren/voice/releases/download/v0.1.1/voice-0.1.1-1-x86_64.pkg.tar.zst
+sudo pacman -U ./voice-0.1.1-1-x86_64.pkg.tar.zst
 voice doctor
 ```
+
+Downloaded first, then installed: the package is not signed yet, and `pacman -U` against
+a URL insists on a detached `.sig` beside it. A local file is checked under
+`LocalFileSigLevel`, which does not.
 
 That is the whole install — the app, its locked dependencies, the desktop entry, the
 autostart entry and the udev rule. Remove it with `pacman -R voice`.

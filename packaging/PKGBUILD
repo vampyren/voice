@@ -67,9 +67,12 @@ if (( ! _gpu )); then
   pkgdesc="$pkgdesc (CPU-only build)"
 fi
 
-#: The branch this package is cut from. Change it (or switch to the GitHub
-#: line) when the work lands somewhere else.
-_branch=phase1-dictation-core
+#: The branch this package is cut from. It must be the branch that releases are
+#: cut from, or `makepkg -si` quietly builds something else: this said
+#: `phase1-dictation-core` for nine commits after that work merged, so anyone
+#: following the README's install instructions got a build without any of them.
+#: `test_the_package_is_built_from_the_release_branch` now says so out loud.
+_branch=main
 source=("$pkgname::git+file://${startdir}/..#branch=$_branch")
 #source=("$pkgname::git+https://github.com/vampyren/voice.git#branch=$_branch")
 sha256sums=('SKIP')

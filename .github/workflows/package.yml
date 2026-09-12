@@ -1,0 +1,72 @@
+name: package
+
+# Builds the installable Arch package so nobody has to clone and build it.
+#
+# `workflow_dispatch` first, deliberately: this cannot be tested on the
+# maintainer's machine (it is Ubuntu, and makepkg needs Arch), so the build is
+# proven by running it before a tag is ever cut. Pushing a `v*` tag then builds
+# the same way and attaches the result to that tag's release.
+#
+# CPU-only (`VOICE_GPU=0`). The GPU build carries roughly 3 GB of CUDA runtime
+# on top, which would not fit GitHub's 2 GB per-asset limit; anyone who wants it
+# builds locally with plain `makepkg -si`, which is what the README says.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  arch:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+
+    steps:
+      - name: Install the build tools
+        run: pacman -Syu --noconfirm --needed git uv github-cli
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # the PKGBUILD clones this checkout by branch
+
+      - name: Give the build a branch to clone
+        # The PKGBUILD's source is `git+file://${startdir}/..#branch=main`, and
+        # actions/checkout leaves a detached HEAD. Point a real `main` at
+        # whatever was checked out, so a tag builds that tag's code.
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git branch -f main HEAD
+          git log --oneline -1 main
+
+      - name: Build
+        run: |
+          useradd -m builder
+          chown -R builder "$GITHUB_WORKSPACE"
+          cd packaging
+          sudo -u builder --preserve-env=VOICE_GPU \
+            env VOICE_GPU=0 makepkg -f --noconfirm --nodeps
+          ls -lh ./*.pkg.tar.zst
+
+      - name: Check the package contains what it should
+        run: |
+          cd packaging
+          pkg=$(ls ./*.pkg.tar.zst)
+          bsdtar -tf "$pkg" | grep -q 'usr/bin/voice'
+          bsdtar -tf "$pkg" | grep -q 'usr/share/doc/voice/docs/install.md'
+          echo "ok: $pkg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voice-cpu-package
+          path: packaging/*.pkg.tar.zst
+          if-no-files-found: error
+
+      - name: Attach it to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" packaging/*.pkg.tar.zst --clobber

@@ -107,7 +107,7 @@ def shell_vars(env: dict | None = None) -> dict:
     script = (
         'startdir=/tmp/voice-build/packaging; source "$1" >/dev/null;'
         'declare -p pkgname pkgver pkgrel arch license source makedepends options'
-        ' depends optdepends install _prefix _appid _py _gpu;'
+        ' depends optdepends install _prefix _appid _py _gpu _branch;'
         'echo "FUNCS: $(declare -F | sed "s/^declare -f //" | tr "\\n" " ")"'
     )
     done = subprocess.run(["bash", "-c", script, "_", str(PKGBUILD)],
@@ -403,6 +403,19 @@ def test_the_scriptlet_says_what_pacman_leaves_behind():
     text = SCRIPTLET.read_text()
     for leftover in (".config/voice", ".local/state/voice", ".cache/huggingface"):
         assert leftover in text
+
+
+def test_the_package_is_built_from_the_release_branch():
+    """`makepkg -si` clones a branch of this repository, by name.
+
+    It named a feature branch for nine commits after that branch merged, so the
+    documented install produced a build missing every one of them - silently,
+    because the package built and installed perfectly.
+    """
+    branch = shell_vars()["_branch"].strip('"')
+    assert branch == "main", (
+        f"the package is built from {branch!r}. Releases are cut from main, so "
+        f"anyone running `makepkg -si` is getting whatever that branch last had.")
 
 
 def test_every_file_the_package_installs_exists_in_the_repository():

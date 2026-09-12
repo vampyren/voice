@@ -2447,3 +2447,73 @@ def test_the_help_explains_what_keep_current_means(qapp):
     text = HELP["profile_per_language"].lower()
     assert "keep current" in text
     assert "every" in text or "both" in text, "it never says what all-kept means"
+
+
+# -- the nine found before the push -------------------------------------------
+
+def test_reopening_forgets_a_profile_choice_that_was_never_saved(qapp):
+    """Finding 1, and the worst of them.
+
+    "Use this profile" then Close without Save left the window believing its own
+    unsaved choice on reopen. The list marked the wrong row "in use", and Remove
+    - which refuses the profile in use - was therefore enabled on the profile
+    that really was. Removing it left stt.active naming nothing, which blocks
+    every later save, from a window with no template to put it back.
+    """
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "local-swedish")
+    dlg.activate_button.click()
+    dlg.close()
+
+    dlg.reload_from_disk()
+    assert dlg._active_profile_name() == "local", "it believed its own unsaved choice"
+    rows = {dlg.profile_list.item(i).data(Qt.ItemDataRole.UserRole):
+            dlg.profile_list.item(i).text() for i in range(dlg.profile_list.count())}
+    assert "in use" in rows["local"] and "in use" not in rows["local-swedish"]
+
+    select_profile(dlg, "local")
+    assert not dlg.remove_profile_button.isEnabled(), "the profile in use is removable"
+    dlg.remove_profile_button.click()
+    assert "local" in _profile_names(dlg)
+    assert Config.load().errors() == []
+
+
+def test_escape_remembers_the_window_size_like_close_does(qapp):
+    """Finding 6. Escape is the usual way out of a dialog and never reached
+    closeEvent, so the size - and the keyboard-capture cleanup - were skipped."""
+    cfg, dlg, _ = make(qapp)
+    dlg.resize(900, 700)
+    dlg.reject()
+    again = Config.load()
+    assert (again.get("ui.settings_width"), again.get("ui.settings_height")) == (900, 700)
+
+
+def test_a_cloud_profile_is_not_offered_the_whisper_catalogue(qapp):
+    """Finding 7. The Model row of an online service wants the name that
+    service uses; nine local Whisper models are noise there."""
+    from voice.ui.settings import HELP
+
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "openai")
+    tip = dlg.profile_help_buttons["model"].toolTip()
+    # Not "large-v3": the cloud text legitimately names whisper-large-v3-turbo,
+    # which is what that service calls its own model.
+    assert "Recommended" not in tip, tip
+    assert "Hugging Face" not in tip
+    assert "gpt-transcribe" in tip
+
+    select_profile(dlg, "local")
+    local_tip = dlg.profile_help_buttons["model"].toolTip()
+    assert "Recommended" in local_tip and "Hugging Face" in local_tip
+
+
+def test_the_list_and_the_caption_agree_about_an_unsaved_pairing(qapp):
+    """Finding 8. One read the file, the other read the table."""
+    cfg, dlg, _ = make(qapp)
+    combo = dlg.language_profile_combos["sv"]
+    combo.setCurrentIndex(combo.findData(""))          # "(keep current)"
+    dlg._load_profile_list()
+    rows = {dlg.profile_list.item(i).data(Qt.ItemDataRole.UserRole):
+            dlg.profile_list.item(i).text() for i in range(dlg.profile_list.count())}
+    assert "Swedish" not in rows["local-swedish"], rows["local-swedish"]
+    assert "Swedish" not in dlg.profile_mode_label.text()

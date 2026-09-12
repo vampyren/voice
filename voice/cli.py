@@ -34,7 +34,8 @@ def _parser() -> argparse.ArgumentParser:
     lang.add_argument("code", help="a two-letter code, 'auto', or 'next' to cycle "
                                    "through general.languages")
     sub.add_parser("doctor", help="check this machine for everything voice needs")
-    sub.add_parser("setup", help="run the first-run setup questions again")
+    sub.add_parser("setup", help="run the first-run setup questions again "
+                                 "(exit 1 if closed without answering)")
     return p
 
 
@@ -124,7 +125,11 @@ def _run_setup() -> int:
     app = QApplication.instance() or QApplication([])
     answered = bool(SetupWizard(Config.load()).exec())
     assert app is not None
-    if answered and is_running():
+    if not answered:
+        # 1, like `doctor` on a failed check: a script - or anyone reading $? -
+        # has to be able to tell "set up" from "closed without answering".
+        return 1
+    if is_running():
         try:
             send({"cmd": "reload"})
         except IPCError:

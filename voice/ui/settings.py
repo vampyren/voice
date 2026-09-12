@@ -346,6 +346,13 @@ HELP = {
     "max_seconds": ("A recording stops itself after this many seconds, so a key left held "
                     "down by accident cannot record all afternoon."),
     "model": _MODEL_HELP,
+    "cloud_model": (
+        "Which model the service should use, spelled the way that service spells "
+        "it - \"gpt-transcribe\", \"whisper-large-v3-turbo\". \"Add from template\" "
+        "fills in a working one for each service voice knows.\n\n"
+        "Their model lists live in their own documentation, and change without "
+        "warning: a name that stops working is the first thing to check when a "
+        "cloud profile starts failing."),
     "device": (
         "Where the model runs.\n\n"
         "\"cuda\" uses an NVIDIA graphics card, which is many times faster. \"cpu\" "
@@ -1018,6 +1025,9 @@ class SettingsDialog(QDialog):
         #: "Use this profile" pressed here, before Save. The list has to mark
         #: the profile the owner just chose, not the one still on disk.
         self._chosen_active: str | None = None
+        #: Rebuilding the pairing table fires every combo's signal; that is not
+        #: somebody changing a pairing.
+        self._loading_language_profiles = False
         self._active_changed = False       # True once "Use this profile" was pressed
         self._language_changed = False     # True once the user picked a language here
         self._inject_mode_changed = False  # True once the user picked a text insertion mode here
@@ -1147,6 +1157,12 @@ class SettingsDialog(QDialog):
         """Re-read the file and repopulate every widget, discarding unsaved edits."""
         self._cfg = Config.load(self._cfg.path)
         self._current_profile = None       # so repopulating cannot commit stale form values
+        # And neither may the profile "Use this profile" chose but never saved.
+        # Left set, the list marked the wrong row "in use" and - because Remove
+        # refuses whatever is in use - offered to delete the profile that really
+        # was, leaving stt.active naming nothing and every later save blocked.
+        self._chosen_active = None
+        self._loading_language_profiles = False
         self._active_changed = False
         self._language_changed = False
         self._inject_mode_changed = False
@@ -1642,6 +1658,7 @@ class SettingsDialog(QDialog):
         mapping = self._cfg.language_profiles() if mapping is None else mapping
         profiles = list(self._cfg.get("stt.profiles", {}) or {})
         codes = self._cfg.languages()
+        self._loading_language_profiles = True
         table = self.language_profile_table
         # Take the old combos out by hand: replacing a cell widget only schedules
         # the previous one for deletion, and until that runs it stays parented to
@@ -1666,6 +1683,11 @@ class SettingsDialog(QDialog):
             # A map naming a profile that no longer exists falls back to
             # "(keep current)" rather than offering something unbuildable.
             combo.setCurrentIndex(max(0, combo.findData(mapping.get(code.lower(), ""))))
+            # Changing a pairing changes what the Transcription tab's list says
+            # each profile is for, and what the line under this table says about
+            # which way round the machine is set up. Both follow at once, or
+            # they disagree until the next save.
+            combo.currentIndexChanged.connect(self._on_pairing_picked)
             table.setCellWidget(row, 1, combo)
             self.language_profile_combos[code] = combo
         # Exactly as tall as its rows: a fixed height leaves either dead space
@@ -1678,6 +1700,7 @@ class SettingsDialog(QDialog):
                        table.cellWidget(r, 1).sizeHint().height() if table.cellWidget(r, 1) else 0)
                    for r in range(table.rowCount()))
         table.setFixedHeight(table.horizontalHeader().height() + rows + 2 * table.frameWidth())
+        self._loading_language_profiles = False
 
     def _on_language_picked(self, index: int) -> None:
         self._language_changed = True
@@ -1754,13 +1777,33 @@ class SettingsDialog(QDialog):
         chosen = self._current_profile
         self.profile_list.clear()
         used_by: dict[str, list[str]] = {}
-        for code, name in self._cfg.language_profiles().items():
+        # What the table says, not what the file says: the caption under it
+        # reads the same source, and the two disagreed over an unsaved change.
+        for code, name in self._pairings_now().items():
             used_by.setdefault(name, []).append(language_name(code))
         active = self._active_profile_name()
         for name in sorted(self._cfg.get("stt.profiles", {}) or {}):
             self._add_profile_row(name, used_by.get(name, []), name == active)
         row = self._profile_row(chosen) if chosen else -1
         self.profile_list.setCurrentRow(row if row >= 0 else 0)
+
+    def _on_pairing_picked(self) -> None:
+        if self._loading_language_profiles:
+            return              # populating the combos is not a user edit
+        self._load_profile_list()
+        self._update_profile_mode()
+
+    def _pairings_now(self) -> dict[str, str]:
+        """The language pairing as this window currently shows it.
+
+        The table during a session, the file before it is built - the profile
+        list is loaded once from `reload_from_disk` before the General tab's
+        combos exist.
+        """
+        if not self.language_profile_combos:
+            return self._cfg.language_profiles()
+        return {code: name for code, name in self._chosen_language_profiles().items()
+                if name}
 
     def _active_profile_name(self) -> str:
         """Which profile actually transcribes, counting an unsaved choice here."""
@@ -1791,8 +1834,7 @@ class SettingsDialog(QDialog):
         the language chooses the model; without one, you choose it yourself and
         the language never touches it.
         """
-        paired = [code for code, name in self._chosen_language_profiles().items()
-                  if name]
+        paired = [code for code, name in self._pairings_now().items() if name]
         if paired:
             names = ", ".join(language_name(code) for code in sorted(paired))
             text = (f"Switching to {names} also switches the model. "
@@ -1856,7 +1898,10 @@ class SettingsDialog(QDialog):
             # Every row, not the ones that happened to seem obvious: "what the
             # hell is search width, and 5 is what?" was asked about a row that
             # had no "?" precisely because it looked self-explanatory.
-            row = self._with_help(edit, field, HELP[field])
+            # A cloud profile's Model row wants the name that service uses, so
+            # the nine local Whisper models behind the shared "?" are wrong there.
+            key = ("cloud_model" if field == "model" and kind != "local" else field)
+            row = self._with_help(edit, key, HELP[key])
             self.profile_help_buttons[field] = row.findChild(QToolButton)
             self._form_layout.addRow(_FIELD_LABELS.get(field, field), row)
         self._refresh_profile_buttons()
@@ -1914,7 +1959,7 @@ class SettingsDialog(QDialog):
         self._cfg.set("stt.active", name)
         self._active_changed = True
         self.active_label.setText(f"Active profile: {name}")
-        claimed = [code for code, mapped in self._chosen_language_profiles().items()
+        claimed = [code for code, mapped in self._pairings_now().items()
                    if mapped == name]
         if len(claimed) == 1:
             index = self.language_combo.findData(claimed[0])
@@ -2247,9 +2292,20 @@ class SettingsDialog(QDialog):
 
     def closeEvent(self, event) -> None:
         """Never leave this window reading the keyboard after it is gone."""
+        self._leaving()
+        super().closeEvent(event)
+
+    def done(self, result: int) -> None:
+        """Escape and reject() never reach closeEvent, and this is the way out
+        most people take: the size was forgotten, and the keyboard capture -
+        which closeEvent's own docstring says must always stop - was left
+        running."""
+        self._leaving()
+        super().done(result)
+
+    def _leaving(self) -> None:
         self._stop_change("")
         self._remember_size()
-        super().closeEvent(event)
 
     def _remember_size(self) -> None:
         """Reopen at the size it was left at.

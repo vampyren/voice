@@ -82,7 +82,10 @@ class SetupWizard(QDialog):
 
         self.pages = QStackedWidget()
         self.model_dir_edit = QLineEdit()
+        #: Keyed by profile, not by language: two languages sharing a profile
+        #: got two rows writing the same key, and the second silently won.
         self.model_combos: dict[str, QComboBox] = {}
+        self.model_row_labels: dict[str, str] = {}
         for page in PAGES:
             self.pages.addWidget(self._build(page))
 
@@ -141,22 +144,47 @@ class SetupWizard(QDialog):
         return row
 
     def _model_rows(self) -> QFormLayout:
-        """One row per language that actually has a profile behind it."""
+        """One row per local profile a dictation could actually reach.
+
+        Per profile rather than per language, because that is what a row
+        writes: two languages paired with one profile are one question, and
+        asking it twice meant one of the two answers was thrown away.
+        """
         form = QFormLayout()
         form.setHorizontalSpacing(ROW_SPACING)
         form.setVerticalSpacing(ROW_SPACING)
+        for name, languages in self._local_profiles_in_use().items():
+            profile = (self._cfg.get(f"stt.profiles.{name}") or {})
+            combo = self._model_combo(str(profile.get("model", "")))
+            label = ", ".join(languages) if languages else name
+            self.model_combos[name] = combo
+            self.model_row_labels[name] = label
+            form.addRow(label, combo)
+        return form
+
+    def _local_profiles_in_use(self) -> dict[str, list[str]]:
+        """Each local profile that transcribes here, and the languages it serves.
+
+        Falls back to the active profile when nothing is paired: an upgraded
+        config has no `general.language_profiles` at all, and that is precisely
+        the install `voice setup` is documented for - it was being shown a
+        blank page under the words "the recommended pair is already selected".
+        """
         profiles = self._cfg.get("stt.profiles", {}) or {}
+
+        def is_local(name: str | None) -> bool:
+            profile = profiles.get(name) if name else None
+            return isinstance(profile, dict) and profile.get("backend") == "local"
+
+        found: dict[str, list[str]] = {}
         for code in self._cfg.languages():
             name = self._cfg.profile_for_language(code)
-            profile = profiles.get(name) if name else None
-            # A language with nothing to point at gets no row: writing a model
-            # into a profile table that does not exist would only invent one.
-            if not isinstance(profile, dict) or profile.get("backend") != "local":
-                continue
-            combo = self._model_combo(str(profile.get("model", "")))
-            self.model_combos[code] = combo
-            form.addRow(language_name(code), combo)
-        return form
+            if is_local(name):
+                found.setdefault(name, []).append(language_name(code))
+        if found:
+            return found
+        active = self._cfg.get("stt.active")
+        return {active: []} if is_local(active) else {}
 
     def _model_combo(self, current: str) -> QComboBox:
         combo = QComboBox()
@@ -174,9 +202,26 @@ class SetupWizard(QDialog):
         combo.setCurrentText(current)
         return combo
 
+    #: The same page, on an install where no language is paired with a profile -
+    #: every upgraded config. Promising "the recommended pair" over a single row
+    #: is the page describing a machine other than the one it is running on.
+    UNPAIRED_QUALITY = Page(
+        "quality", "Which model to use",
+        "Bigger models are more accurate and slower. Hover a name to see what each "
+        "one is, roughly how big it is, and what it is bad at.\n\n"
+        "This install has one model for every language. To give each language its "
+        "own - a Swedish model for Swedish - pair them afterwards in Settings, on "
+        "the General tab.")
+
+    def _page(self, index: int) -> Page:
+        page = PAGES[index]
+        if page.key == "quality" and not any(self._local_profiles_in_use().values()):
+            return self.UNPAIRED_QUALITY
+        return page
+
     def _show_page(self, index: int) -> None:
         self.pages.setCurrentIndex(index)
-        page = PAGES[index]
+        page = self._page(index)
         self.title_label.setText(page.title)
         self.body_label.setText(page.body)
         self.error_label.setText("")
@@ -201,21 +246,30 @@ class SetupWizard(QDialog):
 
     # -- the answers ---------------------------------------------------------
 
+    #: The settings this wizard is allowed to fail over. Anything else wrong in
+    #: the file was wrong before it opened and is not its to fix - and blocking
+    #: on it trapped the owner in a modal dialog that reopened at every start.
+    OWN_KEYS = ("stt.model_dir", ".model")
+
     def finish(self) -> bool:
         """Write the answers. False - and nothing written - if they do not hold."""
+        # Re-read first: this dialog may have sat open while the tray, a hotkey
+        # or the CLI changed something, and writing a whole document back
+        # reverted it.
+        self._cfg.reload()
         self._cfg.set("stt.model_dir", self.model_dir_edit.text().strip())
-        for code, combo in self.model_combos.items():
-            name = self._cfg.profile_for_language(code)
+        for name, combo in self.model_combos.items():
             chosen = combo.currentText().strip()
-            if name and chosen:
+            if chosen:
                 self._cfg.set(f"stt.profiles.{name}.model", chosen)
         self._cfg.set("general.setup_complete", True)
-        errs = self._cfg.errors()
-        if errs:
+        mine = [e for e in self._cfg.errors()
+                if any(key in e for key in self.OWN_KEYS)]
+        if mine:
             # Reloaded, not patched back: the config object is the daemon's, and
             # leaving half-applied answers on it would outlive this dialog.
             self._cfg.reload()
-            self.error_label.setText("; ".join(errs))
+            self.error_label.setText("; ".join(mine))
             return False
         self._cfg.save()
         self.accept()

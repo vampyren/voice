@@ -329,11 +329,15 @@ def _model_cache() -> tuple[bool, str]:
     found, missing = [], []
     for model in models:
         hub = _hub_directory(model)
-        (found if hub.exists() else missing).append(
-            str(hub) if hub.exists() else f"{model} not downloaded yet")
+        # Asked once. Two calls chose the list and the wording independently,
+        # so a download finishing between them read as missing *and* found.
+        if hub.exists():
+            found.append(str(hub))
+        else:
+            # Named in the spelling the config uses, not the repository's: that
+            # is what the owner would have to go and change.
+            missing.append(f"{model} not downloaded yet")
     if missing:
-        # Named in the spelling the config uses, not the repository's: that is
-        # what the owner would have to go and change.
         when = ("the first dictation in that language downloads it" if len(models) > 1
                 else "the first dictation downloads it")
         return False, ", ".join([*missing, *found]) + f" ({when})"

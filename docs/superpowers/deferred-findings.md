@@ -130,3 +130,14 @@ branch.
   (2026-09-12): will not fix.** It requires previewing pill placement in the
   settings window during the ~0.15 s of a paste, and the owner does not dictate
   while in settings. Recorded so it is a decision rather than an oversight.
+
+## Raised while shipping the Swedish model pairing (2026-09-12)
+
+- `voice/ui/settings.py` `_chosen_language_profiles`: a `general.language_profiles`
+  entry naming a profile that does not exist is dropped on Save, silently and with no
+  error label. That is deliberate for a language the table has no row for - the entry
+  would otherwise be unreachable and block every save - but for a language that *does*
+  have a row, the owner watches a line they just added by hand disappear. Now that the
+  shipped config defines `local-swedish`, only a hand edit in the wrong order can reach
+  it, and `docs/usage.md` gives the right order; a visible "this profile is not defined"
+  next to the row would be better than either.

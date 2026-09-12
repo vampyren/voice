@@ -18,7 +18,13 @@ notifications = true
 
 [general.language_profiles]
 # Which transcription profile each language switches to. One model rarely wins
-# in two languages. Delete a line to leave the profile alone for that language.
+# in two languages, so each gets the model that is best at it.
+#
+# To stop the language switch touching the profile at all, comment out BOTH
+# lines - or use the settings window, General tab, where "(keep current)" says
+# the same thing. Leaving one line is the trap: with only `sv` mapped,
+# switching to Swedish loads KB-Whisper and switching back to English finds
+# nothing to switch to, so English keeps being transcribed by the Swedish model.
 en = "local"
 sv = "local-swedish"
 
@@ -283,10 +289,13 @@ whichever is installed, and failing both it prints the path to click yourself.
 profile by pasting an API key: either `api_key = "sk-..."` inline, or set the
 environment variable named by `api_key_env` (`OPENAI_API_KEY`, `GROQ_API_KEY`,
 `OPENROUTER_API_KEY`) and keep the config file free of secrets. Switch with
-`voice profile openai` or from the tray/settings. Swedish is already set up: the shipped config
-defines `local-swedish` (`KBLab/kb-whisper-large`) and `general.language_profiles` pairs
-`sv` with it, so the language switch carries the model with it — see
-[Model per language](usage.md#model-per-language).
+`voice profile openai` or from the tray/settings. Note that a *shipped* config also pairs each
+language with a profile, so the language toggle will move `stt.active` back to `local`
+or `local-swedish`; **(keep current)** in the General tab's table stops that for a
+language you want to keep on a cloud profile. Swedish itself needs no setting up — the
+shipped config defines `local-swedish` (`KBLab/kb-whisper-large`) and pairs `sv` with it.
+An install that predates the pairing has neither, and has to add the profile before
+mapping it — see [Model per language](usage.md#model-per-language).
 
 **Paste behaviour.** Text is copied to the clipboard then pasted with Ctrl+V through the
 desktop portal (`org.freedesktop.portal.RemoteDesktop`); KDE asks permission once and

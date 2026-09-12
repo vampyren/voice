@@ -234,9 +234,31 @@ language" and unpairs it. To add another profile, Transcription tab → **Add fr
 template**. KB-Whisper also publishes `KBLab/kb-whisper-medium`, `-small` and `-base` if
 the large one is too slow on your machine.
 
-**Upgrading?** A config file that already exists is never rewritten, so an install from
-before this pairing keeps the single model it had. Add the two lines by hand, or open the
-settings window and set the table there.
+**A mapped language takes the profile with it, whatever you set by hand.** If you switch
+to a cloud profile (`voice profile openai`) and then use the language toggle, the map puts
+you back on the profile it names for that language. That is what the map is for, but it
+does surprise anyone running a cloud profile full time: set that language's row to
+**(keep current)** — or comment its line out — and the toggle will leave the profile
+alone. `voice profile <name>` on its own never changes the language.
+
+**Upgrading from a version before this pairing?** A config file that already exists is
+never rewritten, so it has neither the profile nor the map. The profile has to exist
+*before* anything can point at it — mapping `sv` to a `local-swedish` that is not defined
+is a config error, and pressing Save in the settings window quietly drops the dangling
+line. Two ways round, in order:
+
+- **Settings window**, in one visit: Transcription tab → **Add from template** →
+  `local-swedish`, then General tab → **Profile per language** → Swedish → `local-swedish`
+  → Save.
+- **By hand**, appending the profile first and only then uncommenting the map:
+
+  ```bash
+  printf '\n[stt.profiles.local-swedish]\nbackend = "local"\nmodel = "KBLab/kb-whisper-large"\ndevice = "cuda"\ncompute_type = "float16"\nbeam_size = 5\nprompt = ""\n' >> ~/.config/voice/config.toml
+  sed -i 's/^# en = "local"/en = "local"/; s/^# sv = "local-swedish"/sv = "local-swedish"/' ~/.config/voice/config.toml
+  voice reload && voice doctor
+  ```
+
+  `voice doctor`'s **config** line is the check: green means the pair is valid.
 
 Every path switches the pair together — the toggle hotkey, the tray, `voice language sv`,
 and Save in the settings window — in a single write, so the model is loaded once. A

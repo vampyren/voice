@@ -467,6 +467,41 @@ def test_the_model_cache_probe_covers_every_model_a_language_can_select(
     assert "models--KBLab--kb-whisper-large" in detail
 
 
+def test_the_model_cache_probe_asks_the_disk_once_per_model(
+        isolated_xdg, monkeypatch, tmp_path):
+    """Two `exists()` calls picked the list and the wording independently.
+
+    A download finishing between them put a model in the missing list carrying
+    the path it was found at - a line that contradicts itself, in the one check
+    the owner reads to decide whether anything is missing.
+    """
+    from voice.config import Config
+    from voice.doctor import default_probes
+
+    cfg = Config.load()
+    cfg.set("stt.profiles.local.model", "medium")
+    cfg.set("general.language_profiles", {})
+    cfg.save()
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+
+    asked = []
+
+    class Flipping(type(tmp_path)):
+        """Not there, then there - a download completing mid-probe."""
+
+        def exists(self):
+            asked.append(1)
+            return len(asked) > 1
+
+    monkeypatch.setattr("voice.doctor._hub_directory",
+                        lambda model: Flipping(tmp_path / "hub" / model))
+
+    ok, detail = default_probes()["model cache"]()
+    assert asked == [1], f"the disk was asked {len(asked)} times for one model"
+    assert ok is False and "medium not downloaded yet" in detail
+    assert str(tmp_path) not in detail, f"reported missing and found at once: {detail}"
+
+
 def test_the_model_cache_probe_names_a_cloud_profile_without_looking_for_a_model(
         isolated_xdg, monkeypatch, tmp_path):
     """A map may send one language to a cloud profile; there is nothing to

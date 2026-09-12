@@ -27,7 +27,13 @@ notifications = true
 
 [general.language_profiles]
 # Which transcription profile each language switches to. One model rarely wins
-# in two languages. Delete a line to leave the profile alone for that language.
+# in two languages, so each gets the model that is best at it.
+#
+# To stop the language switch touching the profile at all, comment out BOTH
+# lines - or use the settings window, General tab, where "(keep current)" says
+# the same thing. Leaving one line is the trap: with only `sv` mapped,
+# switching to Swedish loads KB-Whisper and switching back to English finds
+# nothing to switch to, so English keeps being transcribed by the Swedish model.
 en = "local"
 sv = "local-swedish"
 
@@ -288,8 +294,10 @@ class Config:
     def language_profiles(self) -> dict[str, str]:
         """`general.language_profiles`, normalised to lower-case codes.
 
-        The table is empty in a shipped config (its entries are comments), so
-        an install that never opts in behaves exactly as it did before.
+        A shipped config fills this in - English to `local`, Swedish to
+        `local-swedish` - so a fresh install switches model and language
+        together. A config.toml that already existed is never rewritten, so an
+        upgraded install has whatever it had, usually nothing.
         """
         value = self.get("general.language_profiles", {}) or {}
         if not isinstance(value, dict):

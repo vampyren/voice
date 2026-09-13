@@ -37,7 +37,7 @@ PROFILE_TEMPLATES: dict[str, dict] = {
     "together": {"backend": "openai_compatible", "base_url": "https://api.together.xyz/v1", "model": "openai/whisper-large-v3", "api_key": "", "prompt": ""},
     "local-swedish": {"backend": "local", "model": "KBLab/kb-whisper-large", "device": "cuda", "compute_type": "float16", "beam_size": 5, "prompt": ""},
 }
-_LOCAL_FIELDS = ["model", "device", "compute_type", "beam_size", "prompt"]
+_LOCAL_FIELDS = ["model", "device", "compute_type", "beam_size", "cpu_threads", "prompt"]
 
 #: Smaller than this is a stored size nothing could be read in - a window
 #: dragged shut, or a compositor reporting nonsense while it maps. Ignored
@@ -125,6 +125,7 @@ _FIELD_LABELS = {"backend": "Where it runs", "base_url": "Service address",
                  "model": "Model", "api_key": "API key",
                  "api_key_env": "API key variable", "prompt": "Vocabulary hint",
                  "device": "Processor", "compute_type": "Number format",
+                 "cpu_threads": "Processor cores",
                  "beam_size": "Search width"}
 #: How a profile's kind reads on the tab. The value written to the file is
 #: unchanged; what a person is shown is where the work happens.
@@ -412,6 +413,15 @@ HELP = {
         "5 is the default and a good balance. Higher (8-10) is slightly more accurate "
         "on difficult audio and slower. 1 makes it take the first thing it thinks of: "
         "fastest, and noticeably worse."),
+    "cpu_threads": (
+        "How many processor cores transcription may use. Only applies when it "
+        "runs on the processor - a graphics card ignores this.\n\n"
+        "0 means all of them, which is the default and right for most people.\n\n"
+        "More is not always faster. Whisper writes one word at a time and that "
+        "part cannot be split up, so past your machine's real cores the extra "
+        "threads mostly get in each other's way. On a 16-core processor, try 16 "
+        "against 0 and keep whichever is quicker.\n\n"
+        "Lower it if dictating makes the rest of the machine stutter."),
     "prompt": (
         "A sentence describing the kind of speech, to steer wording and punctuation - "
         "\"Notes on a meeting.\", say.\n\n"
@@ -2065,7 +2075,18 @@ class SettingsDialog(QDialog):
         values: dict[str, object] = {}
         for field, edit in self.profile_form.items():
             value: object = edit.text()
-            if field == "beam_size":
+            if field == "cpu_threads":
+                try:
+                    value = int(str(value).strip() or 0)
+                except ValueError:
+                    value = None
+                if value is None or value < 0:
+                    self.error_label.setText(
+                        f"{self._current_profile}: "
+                        f"{_FIELD_LABELS['cpu_threads']} must be a whole number of "
+                        "cores, or 0 for all of them")
+                    return False
+            elif field == "beam_size":
                 try:
                     value = int(value or 5)
                 except ValueError:

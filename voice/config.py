@@ -451,6 +451,13 @@ class Config:
         if not isinstance(settle, (int, float)) or isinstance(settle, bool) or settle < 0:
             errs.append("inject.pill_settle_ms must be a non-negative number of milliseconds, "
                         f"got {settle!r}")
+        for name, prof in profiles.items():
+            cores = prof.get("cpu_threads")
+            if cores is None:
+                continue                   # absent: all of them, as before
+            if not isinstance(cores, int) or isinstance(cores, bool) or cores < 0:
+                errs.append(f"stt.profiles.{name}.cpu_threads must be a whole number "
+                            f"of cores, or 0 for all of them, got {cores!r}")
         errs += self._model_dir_errors(profiles)
         # Absent in a config written before a transcription could time out;
         # such a file gets the shipped default, which is what it had before.

@@ -2844,3 +2844,37 @@ def test_every_pairing_row_has_room_for_its_dropdown(qapp):
     used = table.horizontalHeader().sizeHint().height() + sum(
         table.rowHeight(r) for r in range(table.rowCount()))
     assert table.height() >= used, f"{table.height()}px of table for {used}px of rows"
+
+
+def test_the_core_count_is_a_field_like_any_other(qapp):
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "local")
+    assert dlg.profile_form["cpu_threads"].text() == "0"
+
+    dlg.profile_form["cpu_threads"].setText("16")
+    dlg.save_button.click()
+    again = Config.load()
+    assert again.get("stt.profiles.local.cpu_threads") == 16
+    assert again.errors() == []
+
+
+def test_a_nonsense_core_count_is_refused_before_it_is_saved(qapp):
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "local")
+    dlg.profile_form["cpu_threads"].setText("plenty")
+    dlg.save_button.click()
+    assert "cores" in dlg.error_label.text().lower(), dlg.error_label.text()
+    assert Config.load().get("stt.profiles.local.cpu_threads") == 0
+
+    dlg.profile_form["cpu_threads"].setText("-2")
+    dlg.save_button.click()
+    assert dlg.error_label.text()
+    assert Config.load().get("stt.profiles.local.cpu_threads") == 0
+
+
+def test_the_core_count_explains_that_zero_means_all(qapp):
+    from voice.ui.settings import HELP
+
+    text = HELP["cpu_threads"].lower()
+    assert "0" in text and "all" in text
+    assert "processor" in text or "cpu" in text

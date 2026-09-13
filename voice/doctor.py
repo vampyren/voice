@@ -14,6 +14,9 @@ from voice import APP_ID, __version__
 # Re-exported: the CUDA question is answered in one place, and both this and
 # the transcriber ask there, so they cannot disagree about the same card.
 from voice.gpu import CUDA_LIBRARY, PACKAGED_CUDA, bundled_cuda_runtime
+from voice.models import first_existing as _first_existing
+from voice.models import hub_directory as _hub_directory
+from voice.models import hub_repository as _hub_repository
 from voice.hotkey.portal_listener import NO_TRIGGER, STATE_BOUND, STATE_UNASSIGNED
 from voice.inject.injector import insertion_status, pill_policy
 from voice.inject.window import (effective_window_command, is_plasma,
@@ -239,50 +242,6 @@ def _cuda() -> tuple[bool, str]:
                        f"rebuild the package with `cd packaging && makepkg -si`, or "
                        f"re-run `./install.sh --gpu` in a checkout.")
     return True, f"{n} CUDA device(s)"
-
-
-def _hub_repository(model: str) -> str:
-    """The repository faster-whisper will really fetch `model` from.
-
-    The short names we ship are aliases: faster-whisper maps `large-v3-turbo`
-    to `mobiuslabsgmbh/faster-whisper-large-v3-turbo` and `medium` to
-    `Systran/faster-whisper-medium`, and the cache directory is named after the
-    repository rather than the alias - so looking up the raw config value here
-    reported "not downloaded yet" over a model that had been on disk all along,
-    for the shipped default profile.
-
-    faster-whisper's own table is asked, never copied: the copy `stt/local.py`
-    used to keep was wrong, and removing it was right. A build without
-    faster-whisper installed gets the name as it stands, which is the answer
-    for anything already spelled as a repository.
-    """
-    try:
-        from faster_whisper.utils import _MODELS
-    except Exception:                       # not installed, or it moved
-        return model
-    return _MODELS.get(model, model)
-
-
-def _hub_directory(model: str, root: Path | None = None) -> Path:
-    """Where `model` lives on this machine, downloaded or not.
-
-    `root` is `stt.model_dir`. Hugging Face lays its own cache out with a `hub`
-    level in it and a directory given to it explicitly without one, so this is
-    not the same path with a different prefix.
-    """
-    name = f"models--{_hub_repository(model).replace('/', '--')}"
-    if root is not None:
-        return Path(root) / name
-    home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
-    return home / "hub" / name
-
-
-def _first_existing(path: Path) -> Path:
-    """The nearest ancestor of `path` that exists - what a write would land in."""
-    for candidate in (path, *path.parents):
-        if candidate.exists():
-            return candidate
-    return path
 
 
 def _models_in_use() -> list[tuple[str, Path | None]]:

@@ -5,6 +5,7 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Callable
 
 import numpy as np
@@ -14,6 +15,16 @@ from voice.gpu import bundled_cuda_runtime
 from voice.stt.base import Transcript, TranscriptionError
 
 log = logging.getLogger(__name__)
+
+
+def _already_downloaded(model: str, model_dir: str) -> bool:
+    """Is this model on the disk, so it can be loaded without the network?"""
+    from voice.models import hub_directory
+
+    try:
+        return hub_directory(model, Path(model_dir) if model_dir else None).exists()
+    except OSError:
+        return False
 
 
 def _usable_cores() -> int:
@@ -72,6 +83,19 @@ class LocalTranscriber:
         self._wanted_compute = profile.get("compute_type", "float16")
         self._device, self._compute = self._wanted, self._wanted_compute
         self.fallback_reason: str | None = None
+        #: Set by `refresh()`. The next load asks huggingface whether there is a
+        #: newer copy; every other load reads the disk.
+        self._check_online = False
+
+    def refresh(self) -> None:
+        """Throw the loaded model away and check for a newer one on the next use.
+
+        The only thing in voice that deliberately reaches for the network after
+        a model is on the disk, and it happens because somebody pressed a button.
+        """
+        with self._lock:
+            self._model = None
+            self._check_online = True
 
     def warmup(self) -> None:
         with self._lock:
@@ -144,6 +168,24 @@ class LocalTranscriber:
             extra["cpu_threads"] = wanted if wanted > 0 else _usable_cores()
         log.info("loading %s on %s/%s%s", name, device, compute,
                  f" from {where}" if where else "")
+        # Straight off the disk when it is already there. Otherwise the hub asks
+        # whether the cached copy is current on every single load: nothing is
+        # downloaded, but a transcriber that runs entirely on this machine then
+        # needs the network to change language, and the HTTP line in the log
+        # reads like the audio is being sent somewhere. Decided by looking,
+        # rather than by trying and catching, so a load that fails for a real
+        # reason fails once.
+        if self._check_online:
+            # Asked for, on the button in Settings. One load, then back to the
+            # disk: checking for an update is a thing the owner does, not
+            # something that happens behind every language switch.
+            log.info("checking huggingface for a newer %s", name)
+        elif _already_downloaded(name, where):
+            extra["local_files_only"] = True
+        # Spent whether or not it works. A check that failed - no network, say -
+        # must not leave every later load reaching out and failing the same way;
+        # one press of the button is one attempt.
+        self._check_online = False
         model = self._factory(name, device, compute, **extra)
         # Only once it has actually loaded. Recorded before, a failed attempt
         # pinned the instance to whatever it fell back to for the life of the

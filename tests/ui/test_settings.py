@@ -2878,3 +2878,28 @@ def test_the_core_count_explains_that_zero_means_all(qapp):
     text = HELP["cpu_threads"].lower()
     assert "0" in text and "all" in text
     assert "processor" in text or "cpu" in text
+
+
+def test_the_downloaded_models_group_can_check_for_updates(qapp):
+    """voice asked huggingface on every language switch. Now it asks when the
+    owner asks, and the button is where the models already are."""
+    asked = []
+    dlg = SettingsDialog(Config.load(), capture_key=lambda cb: None, sources=lambda: [],
+                         check_models=lambda: asked.append(1) or {"ok": True})
+    dlg.check_models_button.click()
+    assert asked == [1]
+    assert dlg.model_dir_note.text(), "it said nothing about what it was doing"
+
+
+def test_a_refusal_from_the_daemon_is_shown_not_swallowed(qapp):
+    dlg = SettingsDialog(Config.load(), capture_key=lambda cb: None, sources=lambda: [],
+                         check_models=lambda: {"ok": False, "reason": "transcribes online"})
+    dlg.check_models_button.click()
+    assert "transcribes online" in dlg.model_dir_note.text()
+
+
+def test_the_button_is_absent_when_no_daemon_is_listening(qapp):
+    """The window opens standalone too; a button that cannot work is worse
+    than no button."""
+    cfg, dlg, _ = make(qapp)
+    assert not dlg.check_models_button.isEnabled()

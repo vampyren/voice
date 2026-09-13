@@ -125,6 +125,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if not args.verbose:
+        # Libraries that narrate their own HTTP. Every model load printed a
+        # request to huggingface, which is alarming to read under a program
+        # whose whole point is that it does not send your voice anywhere.
+        for chatty in ("httpx", "httpcore", "huggingface_hub", "urllib3"):
+            logging.getLogger(chatty).setLevel(logging.WARNING)
     if args.cmd == "doctor":
         from voice.doctor import run_doctor
         return run_doctor()

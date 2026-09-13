@@ -1037,7 +1037,7 @@ class SettingsDialog(QDialog):
                  sources: Callable[[], list[Source]], parent=None, backend: str = "evdev",
                  triggers: Callable[[], dict[str, str]] | None = None,
                  shortcut_store: Callable[[], object | None] = desktop_shortcut_store,
-                 preview_pill: Callable[[str, int, int], dict] | None = None, cancel_capture: Callable[[], None] | None = None):
+                 preview_pill: Callable[[str, int, int], dict] | None = None, cancel_capture: Callable[[], None] | None = None, check_models: Callable[[], dict] | None = None):
         super().__init__(parent)
         self._backend = backend
         #: Asks the daemon to show the real pill at a placement for a few
@@ -1061,6 +1061,10 @@ class SettingsDialog(QDialog):
         #: Told when a capture is given up on. Without it the listener stays
         #: armed and takes the next key pressed anywhere, silently.
         self._cancel_capture = cancel_capture or (lambda: None)
+        #: Asks the daemon to look for a newer copy of the model in use. None
+        #: when this window was opened without one, and the button says so by
+        #: being unpressable rather than by failing when pressed.
+        self._check_models = check_models
         #: Capture waits for a key, and every way of leaving this window presses
         #: something - so it has to end on its own as well.
         self._capture_timeout = QTimer(self)
@@ -1583,10 +1587,18 @@ class SettingsDialog(QDialog):
             "~/.cache/huggingface — the shared cache, where they are now")
         self.model_dir_button = QPushButton("Browse…")
         self.model_dir_button.clicked.connect(self._pick_model_dir)
+        self.check_models_button = QPushButton("Check for updates")
+        self.check_models_button.setToolTip(
+            "Ask huggingface whether there is a newer copy of the model in use. "
+            "Nothing else in voice reaches for the network once a model is here.")
+        self.check_models_button.clicked.connect(self._ask_for_model_update)
+        self.check_models_button.setEnabled(self._check_models is not None)
+        self.model_dir_note = _caption("")
         row = QHBoxLayout()
         row.setSpacing(ROW_SPACING // 2)
         row.addWidget(self.model_dir_edit, 1)
         row.addWidget(self.model_dir_button)
+        row.addWidget(self.check_models_button)
         box = QVBoxLayout()
         box.setSpacing(ROW_SPACING)
         box.addWidget(self._with_help(
@@ -1594,7 +1606,26 @@ class SettingsDialog(QDialog):
                      "dictate in the language that uses it."),
             "model_dir", HELP["model_dir"]))
         box.addLayout(row)
+        box.addWidget(self.model_dir_note)
         return box
+
+    def _ask_for_model_update(self) -> None:
+        """Press the button, say what happened. Never raise out of a click."""
+        if self._check_models is None:
+            return
+        try:
+            reply = self._check_models() or {}
+        except Exception as exc:
+            log.debug("the update check could not be asked for", exc_info=True)
+            self.model_dir_note.setText(f"Could not ask: {exc}")
+            return
+        if reply.get("ok"):
+            self.model_dir_note.setText(
+                "Checking for a newer model. It loads again in the background, "
+                "and the next dictation uses whatever it found.")
+        else:
+            self.model_dir_note.setText(
+                str(reply.get("reason") or "The check was refused."))
 
     def _pick_model_dir(self) -> None:
         chosen = QFileDialog.getExistingDirectory(

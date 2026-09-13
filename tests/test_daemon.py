@@ -3746,3 +3746,51 @@ def test_a_different_reason_is_still_worth_saying(isolated_xdg, qapp, monkeypatc
         d.build()
         d._warmup()
     assert len(notifier.sent) == 2, [n[1] for n in notifier.sent]
+
+
+def test_checking_for_model_updates_is_asked_for_not_automatic(isolated_xdg, qapp, monkeypatch):
+    """Every language switch used to ask huggingface whether the cached model
+    was current. Now nothing does, unless the owner presses the button."""
+    refreshed = []
+
+    class Refreshable:
+        name = "local"
+        fallback_reason = None
+
+        def describe(self):
+            return "local medium (cpu/int8)"
+
+        def refresh(self):
+            refreshed.append(1)
+
+        def warmup(self):
+            pass
+
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: Refreshable())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
+               tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    assert d.handle({"cmd": "check_models"}) == {"ok": True}
+    qapp.processEvents()
+    assert refreshed == [1]
+
+
+def test_a_backend_with_nothing_to_check_says_so(isolated_xdg, qapp, monkeypatch):
+    """A cloud profile has no model on this machine to update."""
+    class Cloud:
+        name = "openai_compatible"
+        fallback_reason = None
+
+        def describe(self):
+            return "openai gpt-transcribe"
+
+        def warmup(self):
+            pass
+
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: Cloud())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
+               tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    reply = d.handle({"cmd": "check_models"})
+    assert reply["ok"] is False
+    assert "nothing" in reply.get("reason", "").lower()

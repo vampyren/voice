@@ -1427,6 +1427,24 @@ class Daemon:
             log.debug("could not remember the CPU notice", exc_info=True)
         return True
 
+    def _check_models(self) -> dict:
+        """Ask huggingface whether there is a newer copy of the active model.
+
+        The one thing in voice that reaches for the network on purpose once a
+        model is on the disk, and it happens because somebody pressed a button.
+        The load itself runs on the warmup thread: it can take a while, and the
+        IPC caller is a settings window waiting for an answer.
+        """
+        transcriber = self.dictation.sv.transcriber
+        refresh = getattr(transcriber, "refresh", None)
+        if refresh is None:
+            return {"ok": False,
+                    "reason": "nothing to check: this profile transcribes online, "
+                              "so there is no model on this computer to update"}
+        refresh()
+        self._start_warmup()
+        return {"ok": True}
+
     def _start_warmup(self) -> None:
         # Its own thread, never the pipeline pool: a model load takes tens of
         # seconds and that pool has a single worker, so recall/retry would sit
@@ -1664,6 +1682,8 @@ class Daemon:
                                                 lambda cb: self.listener.capture_next(cb),
                                                 lambda: list(self._source_cache or []),
                                                 cancel_capture=self.listener.cancel_capture,
+                                                check_models=lambda: self.handle(
+                                                    {"cmd": "check_models"}),
                                                 backend=self.hotkey_backend,
                                                 triggers=self.effective_triggers,
                                                 preview_pill=self._ask_for_preview)
@@ -1739,6 +1759,8 @@ class Daemon:
                   "recall": d.recall, "retry": d.retry}
         if cmd == "ping":
             return {"ok": True}
+        if cmd == "check_models":
+            return self._check_models()
         if cmd in simple:
             simple[cmd]()
             return {"ok": True, "state": d.state.value}

@@ -28,6 +28,17 @@ class FakeModel:
         return iter([FakeSegment(" Hello"), FakeSegment(" world.")]), FakeInfo()
 
 
+def loaded_with():
+    """What each build was given, minus the offline flag.
+
+    Every load tries the disk first, so `local_files_only` is on almost every
+    call and says nothing about the case under test. The tests that are about
+    it look at `FakeModel.kwargs` directly.
+    """
+    return [{k: v for k, v in kw.items() if k != "local_files_only"}
+            for kw in FakeModel.kwargs]
+
+
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
     FakeModel.calls = []
@@ -44,7 +55,7 @@ def test_a_configured_model_dir_is_where_the_model_is_downloaded():
     t = LocalTranscriber({"model": "medium", "model_dir": "/srv/models"},
                          model_factory=FakeModel, cuda_available=lambda: True)
     t.warmup()
-    assert FakeModel.kwargs == [{"download_root": "/srv/models"}]
+    assert loaded_with() == [{"download_root": "/srv/models"}]
 
 
 def test_no_model_dir_leaves_the_loader_on_its_own_default():
@@ -53,7 +64,7 @@ def test_no_model_dir_leaves_the_loader_on_its_own_default():
     t = LocalTranscriber({"model": "medium"},
                          model_factory=FakeModel, cuda_available=lambda: True)
     t.warmup()
-    assert FakeModel.kwargs == [{}]
+    assert loaded_with() == [{}]
 
 
 def test_a_blank_model_dir_is_not_a_directory():
@@ -61,7 +72,7 @@ def test_a_blank_model_dir_is_not_a_directory():
     t = LocalTranscriber({"model": "medium", "model_dir": "   "},
                          model_factory=FakeModel, cuda_available=lambda: True)
     t.warmup()
-    assert FakeModel.kwargs == [{}]
+    assert loaded_with() == [{}]
 
 
 def test_the_model_dir_survives_the_cpu_fallback():
@@ -79,9 +90,9 @@ def test_the_model_dir_survives_the_cpu_fallback():
 
     assert [c[1] for c in FakeModel.calls] == ["cuda", "cpu"]
     # The CPU build also gets its thread count; the card does not.
-    assert FakeModel.kwargs == [{"download_root": "/srv/models"},
-                                {"download_root": "/srv/models",
-                                 "cpu_threads": len(os.sched_getaffinity(0))}]
+    assert loaded_with() == [{"download_root": "/srv/models"},
+                             {"download_root": "/srv/models",
+                              "cpu_threads": len(os.sched_getaffinity(0))}]
 
 
 #: Every model name this project ships: the profiles in DEFAULT_CONFIG and the
@@ -436,7 +447,7 @@ def test_the_thread_count_respects_an_affinity_mask(monkeypatch):
     t = LocalTranscriber({"model": "medium", "device": "cpu", "compute_type": "int8"},
                          model_factory=FakeModel, cuda_available=lambda: False)
     t.warmup()
-    assert FakeModel.kwargs == [{"cpu_threads": 8}]
+    assert loaded_with() == [{"cpu_threads": 8}]
 
 
 def test_the_processor_gets_every_core_by_default():
@@ -448,7 +459,7 @@ def test_the_processor_gets_every_core_by_default():
     t = LocalTranscriber({"model": "medium", "device": "cpu", "compute_type": "int8"},
                          model_factory=FakeModel, cuda_available=lambda: False)
     t.warmup()
-    assert FakeModel.kwargs == [{"cpu_threads": len(os.sched_getaffinity(0))}]
+    assert loaded_with() == [{"cpu_threads": len(os.sched_getaffinity(0))}]
 
 
 def test_a_thread_count_can_be_set_by_hand():
@@ -456,7 +467,7 @@ def test_a_thread_count_can_be_set_by_hand():
                           "cpu_threads": 3},
                          model_factory=FakeModel, cuda_available=lambda: False)
     t.warmup()
-    assert FakeModel.kwargs == [{"cpu_threads": 3}]
+    assert loaded_with() == [{"cpu_threads": 3}]
 
 
 def test_the_card_is_not_given_a_thread_count():
@@ -464,4 +475,90 @@ def test_the_card_is_not_given_a_thread_count():
     t = LocalTranscriber({"model": "medium", "device": "cuda", "compute_type": "float16"},
                          model_factory=FakeModel, cuda_available=lambda: True)
     t.warmup()
-    assert FakeModel.kwargs == [{}]
+    assert loaded_with() == [{}]
+
+
+# -- it runs locally, so it should not need the network -----------------------
+
+def test_a_model_already_on_disk_is_loaded_without_asking_the_internet(monkeypatch, tmp_path):
+    """Switching language logged an HTTP request to huggingface every time.
+
+    Nothing was downloaded - it was the hub checking whether the cached copy
+    was current - but it makes a local transcriber need the network to change
+    language, and it reads like the audio is being sent somewhere.
+    """
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    (tmp_path / "hub" / "models--Systran--faster-whisper-medium").mkdir(parents=True)
+    t = LocalTranscriber({"model": "medium", "device": "cpu", "compute_type": "int8"},
+                         model_factory=FakeModel, cuda_available=lambda: False)
+    t.warmup()
+    assert FakeModel.kwargs[0].get("local_files_only") is True
+
+
+def test_a_model_that_is_not_there_yet_is_still_downloaded(monkeypatch, tmp_path):
+    """Loading offline is for a model already here; the first use of a language
+    has to be able to fetch it, and must not waste an attempt finding out."""
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    t = LocalTranscriber({"model": "medium", "device": "cpu", "compute_type": "int8"},
+                         model_factory=FakeModel, cuda_available=lambda: False)
+    t.warmup()
+    assert len(FakeModel.kwargs) == 1, "it tried twice"
+    assert "local_files_only" not in FakeModel.kwargs[0]
+    assert t.fallback_reason is None, "reaching for the network is not a fallback"
+
+
+def test_a_real_failure_is_still_reported():
+    class Broken(FakeModel):
+        def __init__(self, name, device, compute_type, **kw):
+            super().__init__(name, device, compute_type, **kw)
+            raise OSError("no such model anywhere")
+
+    t = LocalTranscriber({"model": "nope", "device": "cpu", "compute_type": "int8"},
+                         model_factory=Broken, cuda_available=lambda: False)
+    with pytest.raises(TranscriptionError, match="no such model"):
+        t.transcribe(np.zeros(1600, dtype=np.int16), None, None)
+
+
+def test_asking_for_an_update_loads_with_the_network_once(monkeypatch, tmp_path):
+    """The only thing that should ever reach out: the owner pressing a button.
+
+    After that it is back to loading off the disk - an update check is a thing
+    you ask for, not something that happens behind every language switch.
+    """
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    (tmp_path / "hub" / "models--Systran--faster-whisper-medium").mkdir(parents=True)
+    t = LocalTranscriber({"model": "medium", "device": "cpu", "compute_type": "int8"},
+                         model_factory=FakeModel, cuda_available=lambda: False)
+    t.warmup()
+    assert FakeModel.kwargs[0].get("local_files_only") is True
+
+    t.refresh()
+    t.warmup()
+    assert "local_files_only" not in FakeModel.kwargs[1], "it stayed offline"
+
+    t._model = None                # the flag is not sticky
+    t.warmup()
+    assert FakeModel.kwargs[2].get("local_files_only") is True
+
+
+def test_a_refresh_that_fails_leaves_the_old_model_alone(monkeypatch, tmp_path):
+    """A check with no network must not cost the model that was working."""
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    (tmp_path / "hub" / "models--Systran--faster-whisper-medium").mkdir(parents=True)
+    calls = []
+
+    def factory(name, device, compute, **kw):
+        calls.append(kw)
+        if not kw.get("local_files_only"):
+            raise OSError("no network")
+        return FakeModel(name, device, compute, **kw)
+
+    t = LocalTranscriber({"model": "medium", "device": "cpu", "compute_type": "int8"},
+                         model_factory=factory, cuda_available=lambda: False)
+    t.warmup()
+    working = t._model
+    t.refresh()
+    with pytest.raises(Exception):
+        t.warmup()
+    t.warmup()                      # and the next one is offline again, and works
+    assert t._model is not None and t._model is not working

@@ -511,9 +511,28 @@ def test_a_config_written_before_this_setting_still_detects():
     assert inj.last_chord == "ctrl+shift+v"
 
 
-def test_a_locked_chord_counts_as_knowing_where_it_went():
-    """The "we could not read the window" warning is about detection. Having
-    been told which chord to use, there is nothing left to be unsure about."""
-    inj, _ = _pasting({"paste_with": "terminal"}, lambda: "")
+def test_a_locked_chord_does_not_pretend_the_window_was_read():
+    """Reported: with "Always Ctrl+Shift+V" the paste put back the *old*
+    clipboard contents.
+
+    Locking says which chord to send. It says nothing about whether it suited
+    the window - Ctrl+Shift+V does nothing in an ordinary app - and where the
+    window cannot be read there is no way to find out. So the transcript stays
+    on the clipboard, as it did before the setting existed, and the right-click
+    paste that people fall back on still has the right text in it.
+    """
+    inj, _ = _pasting({"paste_with": "terminal", "restore_clipboard": True},
+                      lambda: "")
+    clip = inj._clip
     result = inj.inject("hello")
-    assert result.chord == "ctrl+shift+v", result
+    assert result.chord == "ctrl+shift+v"
+    assert result.restored is False, "the old clipboard was put back over the transcript"
+    assert ("restore", "old") not in clip.log, clip.log
+
+
+def test_a_locked_chord_with_a_window_that_can_be_read_still_restores():
+    """Nothing changes where the window *is* readable: the chord was chosen on
+    purpose and the paste can be trusted, so the clipboard goes back."""
+    inj, _ = _pasting({"paste_with": "terminal", "restore_clipboard": True},
+                      lambda: "konsole")
+    assert inj.inject("hello").restored is True

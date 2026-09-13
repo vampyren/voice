@@ -174,8 +174,15 @@ class Injector:
             chord = self._settings.get(
                 key, "ctrl+shift+v" if forced == "terminal" else "ctrl+v")
             self.last_chord = chord
-            log.info("pasting with %s (chosen in settings, not detected)", chord)
-            return chord, True
+            # Whether the *window* was read is a separate question, and locking
+            # the chord does not answer it: Ctrl+Shift+V does nothing in an
+            # ordinary app, so a locked chord can still be the wrong one. Said
+            # True here once, and the clipboard was then restored over a
+            # transcript that had gone nowhere - the old contents pasted back.
+            cls = (self._window_class() or "").lower()
+            log.info("pasting with %s (chosen in settings) into %s",
+                     chord, cls or "an unknown window")
+            return chord, bool(cls)
         cls = (self._window_class() or "").lower()
         terminals = [str(t).lower() for t in self._settings.get("terminal_classes", [])]
         chord = self._settings.get("terminal_chord", "ctrl+shift+v") if cls and cls in terminals \

@@ -2796,3 +2796,20 @@ def test_the_paste_chord_row_explains_itself(qapp):
     assert "paste_with" in HELP
     text = HELP["paste_with"].lower()
     assert "terminal" in text and "remote" in text
+
+
+def test_the_pairing_table_is_tall_enough_for_its_last_row(qapp):
+    """The Swedish row was cut off by the group's frame, with the caption
+    underneath sitting on top of it."""
+    cfg, dlg, _ = make(qapp)
+    dlg.show()
+    qapp.processEvents()
+    table = dlg.language_profile_table
+    assert table.rowCount() == 2
+    last = table.visualItemRect(table.item(table.rowCount() - 1, 0))
+    needed = table.horizontalHeader().height() + last.bottom()
+    assert table.height() >= needed, (
+        f"the table is {table.height()}px and its last row ends at {needed}px")
+    combo = table.cellWidget(table.rowCount() - 1, 1)
+    assert combo.geometry().bottom() <= table.viewport().height(), (
+        "the last combo hangs out of the table")

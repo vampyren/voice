@@ -44,6 +44,10 @@ _LOCAL_FIELDS = ["model", "device", "compute_type", "beam_size", "prompt"]
 #: rather than obeyed, so a bad number cannot make settings unopenable.
 MIN_SETTINGS_SIZE = 320
 
+#: Spare pixels under the pairing table's rows. Styles disagree about how tall
+#: a combo in a table cell is, and being a few short clips the last row.
+TABLE_SLACK = 6
+
 #: The two the shipped config uses, and what we suggest to anyone who has not
 #: measured their own machine: the best of each family. Marked in the list so
 #: "which one do I want?" has an answer without reading nine tooltips.
@@ -1765,10 +1769,27 @@ class SettingsDialog(QDialog):
         # default height reports about half what the combo will need, which is
         # what squashed this table to a row and a half.
         table.resizeRowsToContents()
-        rows = sum(max(table.rowHeight(r),
-                       table.cellWidget(r, 1).sizeHint().height() if table.cellWidget(r, 1) else 0)
-                   for r in range(table.rowCount()))
-        table.setFixedHeight(table.horizontalHeader().height() + rows + 2 * table.frameWidth())
+        # Each row set to what it actually needs, and only then summed. Summing
+        # what the rows *would* be while leaving them to lay themselves out let
+        # the total come up short by a few pixels a row, and the last row was
+        # then clipped by the group's frame with the caption on top of it.
+        rows = 0
+        for r in range(table.rowCount()):
+            widget = table.cellWidget(r, 1)
+            height = max(table.rowHeight(r),
+                         widget.sizeHint().height() if widget else 0,
+                         widget.minimumSizeHint().height() if widget else 0)
+            table.setRowHeight(r, height)
+            rows += height
+        # A little slack, and a floor rather than only a ceiling. The exact sum
+        # is right on the style this was measured on and a few pixels short on
+        # Breeze, where the last row was clipped by the group's frame with the
+        # caption sitting on top of it. Slack costs nothing; clipping hides a
+        # language.
+        needed = (table.horizontalHeader().sizeHint().height() + rows
+                  + 2 * table.frameWidth() + TABLE_SLACK)
+        table.setMinimumHeight(needed)
+        table.setFixedHeight(needed)
         self._loading_language_profiles = False
 
     def _on_language_picked(self, index: int) -> None:

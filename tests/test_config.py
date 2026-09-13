@@ -343,26 +343,6 @@ def test_the_shipped_swedish_profile_is_the_same_one_the_settings_window_adds(is
     assert shipped == PROFILE_TEMPLATES["local-swedish"]
 
 
-def test_a_new_config_asks_for_setup_and_an_upgraded_one_does_not(isolated_xdg):
-    """The wizard runs once, on a machine that has never been set up.
-
-    Keyed on the setting rather than on "the file was just written", so
-    cancelling the wizard leaves it to run again next time - and on a key that
-    is absent from every config written before it existed, so an upgrade never
-    shows a setup screen to someone already using the program.
-    """
-    cfg = Config.load()
-    assert cfg.get("general.setup_complete") is False
-    assert cfg.needs_setup() is True
-
-    cfg.set("general.setup_complete", True)
-    assert cfg.needs_setup() is False
-
-    older = paths.config_file()
-    older.write_text('[general]\nlanguage = "en"\n')
-    assert Config.load(older).needs_setup() is False
-
-
 def test_model_dir_is_empty_by_default_and_means_the_hugging_face_cache(isolated_xdg):
     cfg = Config.load()
     assert cfg.get("stt.model_dir") == ""

@@ -142,22 +142,22 @@ branch.
   it, and `docs/usage.md` gives the right order; a visible "this profile is not defined"
   next to the row would be better than either.
 
-## The first-run wizard, held back (2026-09-13)
+## The first-run wizard, removed (2026-09-13)
 
-`voice/ui/wizard.py` works and is tested, and `voice setup` runs it. What is
-*not* wired is `Daemon.run()` opening it on a new install. Three review rounds
-found three separate ways for it to misfire at startup, and the last one has no
-small fix:
+It asked where the models should go and which model each language should use,
+and wrote the answers. Three review rounds found eleven defects in it. None
+were in the settings those questions map to; all were in the asking - a guard
+that skipped the line below it, a key matched as a substring, a page describing
+rows it did not have, a modal dialog racing the IPC socket, a whole-document
+write reverting edits made while it was open.
 
-- It is modal, and `run()` has already started the IPC server by the time it
-  would open. `Daemon.handle()` dispatches `start`/`toggle`/`retry` straight to
-  the pipeline on the IPC thread - no Qt event loop needed - so `voice toggle`
-  from a desktop shortcut begins a dictation, and downloads a model into the
-  default folder, while the dialog is on screen asking where models should go.
-  That is the exact failure the wizard exists to prevent.
-- Re-enabling it needs the dictation-starting commands refused while setup is
-  open (a flag `handle()` checks, with its own tests), not another reordering:
-  moving it before `listener.start()` closed the hotkey path and left this one.
+It is now `voice/ui/guide.py`: four pages of prose, opened by `voice guide`,
+which reads nothing and writes nothing. A test asserts it never touches Config.
 
-`tests/test_daemon.py::test_starting_the_daemon_never_opens_the_wizard` fails if
-it is wired back in, so this note cannot be lost.
+If an interactive setup flow is wanted again, the thing that has to be solved
+first is the one that had no small fix: it is modal, and `Daemon.handle()`
+dispatches `start`/`toggle`/`retry` straight to the pipeline on the IPC thread,
+so a dictation can start - and download a model into the default folder - while
+the dialog is asking where models should go. That needs the dictation-starting
+commands refused while setup is open, with its own tests; reordering startup
+closed the hotkey path and left the socket open.

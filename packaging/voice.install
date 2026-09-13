@@ -31,6 +31,7 @@ voice is installed. Three things to do, once:
      and give "voice" a key. The desktop owns that key from then on; the
      hotkeys.portal_* settings are only a first-run preference.
   2. Run `voice doctor`. It says what works on this machine and what to fix.
+     `voice guide` is a short walk-through of how it is used.
   3. The first dictation opens the desktop's RemoteDesktop permission dialog -
      accept it. The restore token is cached, so it asks once.
 

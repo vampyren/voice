@@ -42,7 +42,6 @@ from voice.ui.overlay_model import FINISH as PILL_FILL_S
 from voice.ui.placement import (LEGACY_POSITIONS, POSITIONS, is_margin,
                                  normalise_position)
 from voice.ui.settings import SettingsDialog
-from voice.ui.wizard import SetupWizard
 from voice.ui.tray import Tray
 
 log = logging.getLogger(__name__)
@@ -1308,15 +1307,8 @@ class Daemon:
             return self._hand_over()
         self.overlay.start()
         self.tray.show()
-        # The first-run wizard is deliberately NOT opened here. It is a modal
-        # dialog, and by this point the IPC socket is live: `voice toggle` from
-        # a desktop shortcut dispatches straight to the pipeline on the IPC
-        # thread, so a dictation can start - and download a model into the
-        # default folder - while the dialog is still asking where models should
-        # go. `voice setup` runs it on request instead, with nothing else
-        # starting at the same moment. See docs/superpowers/deferred-findings.md.
         self.listener.start()
-        self.warm_up_once(answered=False)
+        self._start_warmup()
         # Before the first hotkey, so the no-microphone guard has an answer to
         # read rather than the "nobody asked yet" it starts out with.
         self._refresh_sources()
@@ -1329,34 +1321,6 @@ class Daemon:
         code = app.exec()
         self.shutdown()
         return code
-
-    def warm_up_once(self, answered: bool) -> None:
-        """Load the model, exactly one thread's worth.
-
-        `apply_config()` starts its own warmup whenever the profile moved, so
-        calling both after an answered wizard ran two - and both then read
-        `fallback_reason` and notified, telling the owner "Running on CPU"
-        twice in the second after finishing setup.
-        """
-        if answered and self.apply_config():
-            return
-        self._start_warmup()
-
-    def offer_setup(self) -> bool:
-        """Run the first-run wizard if this machine has never been set up.
-
-        True when it was answered, which is the caller's cue to rebuild from
-        what it wrote. Never a reason the daemon fails to start: dictation with
-        the shipped defaults works, and a setup screen that cannot open is
-        worth a line in the log and nothing more.
-        """
-        if not self.config.needs_setup():
-            return False
-        try:
-            return bool(SetupWizard(self.config).exec())
-        except Exception:
-            log.exception("the first-run wizard could not be shown")
-            return False
 
     def _hand_over(self) -> int:
         """Defer to the daemon that already owns the socket."""
@@ -1423,21 +1387,16 @@ class Daemon:
             return False
         return True
 
-    def apply_config(self) -> bool:
-        """Re-reads config. Runs on the Qt thread only (see _Bridge.apply_config).
-
-        True when it started a warmup, so a caller that would otherwise start
-        one of its own does not end up with two.
-        """
+    def apply_config(self) -> None:
+        """Re-reads config. Runs on the Qt thread only (see _Bridge.apply_config)."""
         if not self._reload_config():
-            return False
+            return
         self.tracker.set_specs(hotkey_specs(self.config))
         self._notifier.set_enabled(bool(self.config.get("general.notifications", True)))
         self._rebind_hotkeys_if_needed()      # before the injector: it holds the listener
         self._refresh_settings_inputs()       # and after it: the new listener is the one to ask
         current = self._profile_snapshot()
-        warmed = current != self._active_profile
-        if warmed:
+        if current != self._active_profile:
             self._active_profile = current
             self.dictation.set_transcriber(self._make_transcriber())
             self._start_warmup()
@@ -1454,7 +1413,6 @@ class Daemon:
         self.tray.set_profile_hint(profile_hint(self.config))
         self._rebuild_overlay_if_needed()
         self._sync_overlay_language()
-        return warmed
 
     def _set_profile(self, name: str) -> None:
         """Qt thread: persist the profile switch, then apply it.

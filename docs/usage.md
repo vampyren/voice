@@ -207,21 +207,20 @@ the command line (`voice language sv`, `voice language next`), and `voice status
 which one is active. Every switch is saved to `config.toml` and applies to the next
 dictation.
 
-#### The first-run wizard
+#### A short guide
 
-A short setup dialog covering the two settings worth deciding up front: where the speech
-models should be kept, and which model each language uses. Nothing is written until
-**Finish**, and closing it changes nothing.
-
-**It does not open by itself.** Until the rest of this settles it is on request only —
-starting the daemon never shows it. Run it when you want it:
+Four pages describing how voice is used — the shortcut, dictating, and where to change
+things. It reads nothing and changes nothing:
 
 ```bash
-voice setup
+voice guide
 ```
 
-A running daemon picks the answers up straight away, and `voice setup` exits 1 if you
-close it without answering.
+It used to be an interactive first-run wizard that wrote settings. Three review rounds
+found eleven defects in it, none of them in the settings it wrote and all of them in the
+asking, so it now only describes. Everything it used to ask is a row in the settings
+window — [Model per language](#model-per-language) below, and **Downloaded models** on
+the Transcription tab.
 
 #### Model per language
 

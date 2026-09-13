@@ -18,7 +18,6 @@ from voice import paths
 from voice.audio.capture import Source
 from voice.config import DEFAULT_CONFIG, Config
 from voice.ui.settings import PROFILE_TEMPLATES, SettingsDialog
-from voice.ui.wizard import SetupWizard
 
 #: A config.toml from before the language pairing existed: one local profile,
 #: no `general.language_profiles`. What every upgraded install looks like.
@@ -119,44 +118,3 @@ def test_the_add_template_button_is_pressable_exactly_when_it_would_do_something
     if offered:
         dlg.add_profile_button.click()        # must not raise
     assert dlg.error_label.text() == ""
-
-
-@pytest.mark.parametrize("shape", list(CONFIGS))
-def test_the_wizard_never_shows_a_page_that_describes_rows_it_has_not_got(
-        qapp, config_of, shape):
-    """The model page claimed "the recommended pair is already selected" over a
-    blank area, and later "one model for every language" on an install with no
-    local model at all."""
-    cfg = config_of(shape)
-    wiz = SetupWizard(cfg)
-    quality = next(i for i, page in enumerate(wiz.pages_shown()) if page.key == "quality")
-    page = wiz.page_at(quality)
-    if wiz.model_combos:
-        assert "nothing on this computer" not in page.body.lower(), shape
-    else:
-        assert "model" in page.body.lower()
-        assert "pair is already selected" not in page.body.lower(), shape
-        assert "one model for every language" not in page.body.lower(), shape
-
-
-@pytest.mark.parametrize("shape", list(CONFIGS))
-def test_the_wizard_can_always_be_finished(qapp, config_of, shape):
-    """Finish refusing over something it cannot edit traps the owner in a modal
-    dialog. Whatever the config looks like, answering it has to be possible."""
-    cfg = config_of(shape)
-    wiz = SetupWizard(cfg)
-    assert wiz.finish() is True, f"{shape}: {wiz.error_label.text()}"
-    assert Config.load().needs_setup() is False
-
-
-def test_a_per_profile_model_folder_does_not_trap_the_wizard(qapp, isolated_xdg):
-    """The exact misfire: OWN_KEYS matched `.model` inside
-    `stt.profiles.local.model_dir`, a key the wizard never writes."""
-    paths.config_file().write_text(DEFAULT_CONFIG)
-    cfg = Config.load()
-    cfg.set("stt.profiles.local.model_dir", "models")      # relative: a real error
-    cfg.save()
-
-    wiz = SetupWizard(Config.load())
-    assert wiz.finish() is True, wiz.error_label.text()
-    assert Config.load().needs_setup() is False

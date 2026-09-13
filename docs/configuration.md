@@ -12,11 +12,6 @@ survive settings-window saves. The defaults:
 # voice configuration. Edited by the settings window; hand edits are fine too.
 
 [general]
-setup_complete = false     # the first-run wizard sets this. Absent from a config
-                           # written before the wizard existed, which is how an
-                           # upgrade avoids showing a setup screen to someone who
-                           # has been using voice for months. `voice setup` runs it
-                           # again whenever you want.
 language = "en"            # "en", "sv", or "auto"
 languages = ["en", "sv"]   # cycle order for the language toggle
 notifications = true

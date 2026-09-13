@@ -102,4 +102,3 @@ def update_status(models: list[tuple[str, Path | None]]) -> list[tuple[str, str,
         else:
             out.append((model, UPDATE_AVAILABLE, there))
     return out
-

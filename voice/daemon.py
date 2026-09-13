@@ -25,7 +25,7 @@ from voice.inject.fallback import make_key_sender
 from voice.inject.injector import (BLIND_PASTE, WINDOW_COMMAND_TIMEOUT_S, Injector,
                                    insertion_status, pill_policy, pill_settle_s,
                                    run_window_command)
-from voice.models import UPDATE_AVAILABLE, update_status
+from voice.models import UPDATE_AVAILABLE, download, update_status
 from voice.inject.kwin import KWinWindowReader
 from voice.inject.window import (effective_window_command, is_plasma,
                                  terminal_chord_is_unreachable)
@@ -1447,36 +1447,86 @@ class Daemon:
                 out.append(entry)
         return out
 
-    def _check_models(self) -> dict:
+    def _one_model(self, model: str | None) -> tuple[list, dict | None]:
+        """The models a request means, or a refusal.
+
+        A name that is not one of this machine's is a mistake rather than a
+        request: the window offers a list, and anything else would have voice
+        fetching a repository nobody configured.
+        """
+        known = self._local_models()
+        if not known:
+            return [], {"ok": False,
+                        "reason": "nothing to check: this profile transcribes online, "
+                                  "so there is no model on this computer to update"}
+        if model is None:
+            return known, None
+        chosen = [(m, root) for m, root in known if m == model]
+        if not chosen:
+            return [], {"ok": False,
+                        "reason": f"{model} is not one of the models this computer uses"}
+        return chosen, None
+
+    def _check_models(self, model: str | None = None) -> dict:
         """What is on this machine, against what huggingface publishes now.
 
         Downloads nothing: it compares the commit recorded beside the files with
         the one the hub reports. Updating is a separate button, because "tell me
         what changed" and "spend three gigabytes" are different decisions.
         """
-        models = self._local_models()
-        if not models:
-            return {"ok": False,
-                    "reason": "nothing to check: this profile transcribes online, "
-                              "so there is no model on this computer to update"}
+        models, refusal = self._one_model(model)
+        if refusal:
+            return refusal
         report = update_status(models)
         return {"ok": True,
                 "models": [[model, state] for model, state, _ in report],
                 "updatable": any(state == UPDATE_AVAILABLE for _, state, _ in report)}
 
-    def _update_models(self) -> dict:
-        """Fetch whatever the check found. This is the one that downloads.
+    def _update_models(self, model: str | None = None) -> dict:
+        """Fetch the newer files for one model. This is the one that downloads.
 
-        The load runs on the warmup thread: it can take a long time, and the
-        caller is a settings window waiting for an answer.
+        On a thread of its own: it can take many minutes, and the caller is a
+        settings window waiting for an answer. Nothing is loaded into memory to
+        do it, so a model that is not the one running can be updated too - and
+        if it *is* the one running, the loaded copy is dropped afterwards so the
+        new files are what the next dictation uses.
         """
-        refresh = getattr(self.dictation.sv.transcriber, "refresh", None)
-        if refresh is None:
-            return {"ok": False,
-                    "reason": "nothing to update: this profile transcribes online"}
-        refresh()
-        self._start_warmup()
+        models, refusal = self._one_model(model)
+        if refusal:
+            return refusal
+        threading.Thread(target=self._fetch, args=(models,), name="model-update",
+                         daemon=True).start()
         return {"ok": True}
+
+    def _fetch(self, models: list) -> None:
+        active = {m for m, _ in self._active_models()}
+        for name, root in models:
+            try:
+                where = download(name, root)
+                log.info("updated %s in %s", name, where)
+            except Exception as exc:
+                log.warning("could not update %s: %s", name, exc)
+                self._notifier.notify("Model update failed", f"{name}: {exc}", "normal")
+                continue
+            if name in active:
+                # The running copy was loaded from files that have just been
+                # replaced; drop it so the next dictation loads the new ones.
+                refresh = getattr(self.dictation.sv.transcriber, "refresh", None)
+                if refresh is not None:
+                    refresh()
+                    self._start_warmup()
+
+    def _active_models(self) -> list[tuple[str, object]]:
+        """The model the loaded transcriber is using, if it is a local one."""
+        try:
+            _, profile = self.config.stt_profile()
+        except Exception:
+            return []
+        if profile.get("backend") != "local":
+            return []
+        own = str(profile.get("model_dir") or "").strip()
+        return [(str(profile.get("model", "")).strip(),
+                 Path(own) if own else self.config.model_dir())]
 
     def _start_warmup(self) -> None:
         # Its own thread, never the pipeline pool: a model load takes tens of
@@ -1715,10 +1765,12 @@ class Daemon:
                                                 lambda cb: self.listener.capture_next(cb),
                                                 lambda: list(self._source_cache or []),
                                                 cancel_capture=self.listener.cancel_capture,
-                                                check_models=lambda: self.handle(
-                                                    {"cmd": "check_models"}),
-                                                update_models=lambda: self.handle(
-                                                    {"cmd": "update_models"}),
+                                                models=lambda: self.handle(
+                                                    {"cmd": "models"}),
+                                                check_models=lambda m: self.handle(
+                                                    {"cmd": "check_models", "model": m}),
+                                                update_models=lambda m: self.handle(
+                                                    {"cmd": "update_models", "model": m}),
                                                 backend=self.hotkey_backend,
                                                 triggers=self.effective_triggers,
                                                 preview_pill=self._ask_for_preview)
@@ -1794,10 +1846,12 @@ class Daemon:
                   "recall": d.recall, "retry": d.retry}
         if cmd == "ping":
             return {"ok": True}
+        if cmd == "models":
+            return {"ok": True, "models": [m for m, _ in self._local_models()]}
         if cmd == "check_models":
-            return self._check_models()
+            return self._check_models(request.get("model"))
         if cmd == "update_models":
-            return self._update_models()
+            return self._update_models(request.get("model"))
         if cmd in simple:
             simple[cmd]()
             return {"ok": True, "state": d.state.value}

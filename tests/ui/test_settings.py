@@ -2880,55 +2880,91 @@ def test_the_core_count_explains_that_zero_means_all(qapp):
     assert "processor" in text or "cpu" in text
 
 
-def test_checking_lists_what_it_found(qapp):
-    """"I want to check and see what has updated" - so the check reports, and
-    downloads nothing."""
-    from voice.models import UPDATE_AVAILABLE, UP_TO_DATE
+def _models_dialog(**kw):
+    """A settings window wired to a daemon that knows two models."""
+    defaults = {"models": lambda: {"ok": True,
+                                   "models": ["large-v3", "KBLab/kb-whisper-large"]}}
+    return SettingsDialog(Config.load(), capture_key=lambda cb: None, sources=lambda: [],
+                          **{**defaults, **kw})
 
-    dlg = SettingsDialog(Config.load(), capture_key=lambda cb: None, sources=lambda: [],
-                         check_models=lambda: {
-                             "ok": True, "updatable": True,
-                             "models": [["large-v3", UP_TO_DATE],
-                                        ["KBLab/kb-whisper-large", UPDATE_AVAILABLE]]},
-                         update_models=lambda: {"ok": True})
+
+def test_the_models_on_this_computer_are_listed_to_choose_from(qapp):
+    """The folder and which model to check are two different things, and one
+    row holding both read as one thing."""
+    dlg = _models_dialog()
+    assert [dlg.model_choice.itemText(i) for i in range(dlg.model_choice.count())] == [
+        "large-v3", "KBLab/kb-whisper-large"]
+
+
+def test_checking_reports_the_chosen_model_only(qapp):
+    from voice.models import UPDATE_AVAILABLE
+
+    asked = []
+    dlg = _models_dialog(
+        check_models=lambda model: asked.append(model) or {
+            "ok": True, "updatable": True,
+            "models": [[model, UPDATE_AVAILABLE]]},
+        update_models=lambda model: {"ok": True})
+    dlg.model_choice.setCurrentText("KBLab/kb-whisper-large")
     dlg.check_models_button.click()
-    note = dlg.model_dir_note.text()
-    assert "large-v3" in note and UP_TO_DATE in note
-    assert "KBLab/kb-whisper-large" in note and UPDATE_AVAILABLE in note
-    assert dlg.update_models_button.isEnabled(), "something to update, and no way to"
+    assert asked == ["KBLab/kb-whisper-large"]
+    assert dlg.model_dir_note.text() == f"KBLab/kb-whisper-large: {UPDATE_AVAILABLE}"
+    assert dlg.update_models_button.isEnabled()
+
+
+def test_updating_sends_the_chosen_model_too(qapp):
+    from voice.models import UPDATE_AVAILABLE
+
+    updated = []
+    dlg = _models_dialog(
+        check_models=lambda model: {"ok": True, "updatable": True,
+                                    "models": [[model, UPDATE_AVAILABLE]]},
+        update_models=lambda model: updated.append(model) or {"ok": True})
+    dlg.model_choice.setCurrentText("KBLab/kb-whisper-large")
+    dlg.check_models_button.click()
+    dlg.update_models_button.click()
+    assert updated == ["KBLab/kb-whisper-large"]
+
+
+def test_choosing_a_different_model_clears_the_last_answer(qapp):
+    """A status line under one model, still showing another model's answer, is
+    the confusion this whole row is being rebuilt to remove."""
+    from voice.models import UPDATE_AVAILABLE
+
+    dlg = _models_dialog(
+        check_models=lambda model: {"ok": True, "updatable": True,
+                                    "models": [[model, UPDATE_AVAILABLE]]},
+        update_models=lambda model: {"ok": True})
+    dlg.check_models_button.click()
+    assert dlg.model_dir_note.text()
+    dlg.model_choice.setCurrentText("KBLab/kb-whisper-large")
+    assert dlg.model_dir_note.text() == ""
+    assert not dlg.update_models_button.isEnabled()
 
 
 def test_nothing_to_update_leaves_the_update_button_alone(qapp):
     from voice.models import UP_TO_DATE
 
-    dlg = SettingsDialog(Config.load(), capture_key=lambda cb: None, sources=lambda: [],
-                         check_models=lambda: {"ok": True, "updatable": False,
-                                               "models": [["large-v3", UP_TO_DATE]]})
+    dlg = _models_dialog(check_models=lambda model: {
+        "ok": True, "updatable": False, "models": [[model, UP_TO_DATE]]},
+        update_models=lambda model: {"ok": True})
     dlg.check_models_button.click()
     assert not dlg.update_models_button.isEnabled()
 
 
-def test_updating_is_a_second_press(qapp):
-    """Checking says what changed; updating spends the gigabytes. Two buttons."""
-    from voice.models import UPDATE_AVAILABLE
-
-    updated = []
-    dlg = SettingsDialog(Config.load(), capture_key=lambda cb: None, sources=lambda: [],
-                         check_models=lambda: {"ok": True, "updatable": True,
-                                               "models": [["large-v3", UPDATE_AVAILABLE]]},
-                         update_models=lambda: updated.append(1) or {"ok": True})
-    dlg.check_models_button.click()
-    assert updated == [], "checking must not download"
-    dlg.update_models_button.click()
-    assert updated == [1]
-    assert "download" in dlg.model_dir_note.text().lower()
-
-
 def test_a_refusal_from_the_daemon_is_shown_not_swallowed(qapp):
-    dlg = SettingsDialog(Config.load(), capture_key=lambda cb: None, sources=lambda: [],
-                         check_models=lambda: {"ok": False, "reason": "transcribes online"})
+    dlg = _models_dialog(check_models=lambda model: {"ok": False,
+                                                     "reason": "transcribes online"})
     dlg.check_models_button.click()
     assert "transcribes online" in dlg.model_dir_note.text()
+
+
+def test_no_daemon_means_no_model_row_at_all(qapp):
+    """Opened standalone there is nothing to ask, so nothing pretends to work."""
+    cfg, dlg, _ = make(qapp)
+    assert dlg.model_choice.count() == 0
+    assert not dlg.check_models_button.isEnabled()
+    assert not dlg.update_models_button.isEnabled()
 
 
 def test_the_window_says_which_voice_is_running(qapp):
@@ -2939,10 +2975,3 @@ def test_the_window_says_which_voice_is_running(qapp):
     cfg, dlg, _ = make(qapp)
     assert __version__ in dlg.version_label.text()
     assert "voice" in dlg.version_label.text().lower()
-
-
-def test_the_button_is_absent_when_no_daemon_is_listening(qapp):
-    """The window opens standalone too; a button that cannot work is worse
-    than no button."""
-    cfg, dlg, _ = make(qapp)
-    assert not dlg.check_models_button.isEnabled()

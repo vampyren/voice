@@ -102,3 +102,15 @@ def update_status(models: list[tuple[str, Path | None]]) -> list[tuple[str, str,
         else:
             out.append((model, UPDATE_AVAILABLE, there))
     return out
+
+
+def download(model: str, root: Path | None) -> str:
+    """Fetch or refresh one model's files. Returns where they ended up.
+
+    faster-whisper's own downloader, so the file set matches what it will later
+    load - and nothing is loaded into memory here, which is what lets the
+    window update a model that is not the one running.
+    """
+    from faster_whisper.utils import download_model
+
+    return download_model(model, cache_dir=str(root) if root else None)

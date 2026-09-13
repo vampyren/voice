@@ -1038,7 +1038,7 @@ class SettingsDialog(QDialog):
                  sources: Callable[[], list[Source]], parent=None, backend: str = "evdev",
                  triggers: Callable[[], dict[str, str]] | None = None,
                  shortcut_store: Callable[[], object | None] = desktop_shortcut_store,
-                 preview_pill: Callable[[str, int, int], dict] | None = None, cancel_capture: Callable[[], None] | None = None, check_models: Callable[[], dict] | None = None, update_models: Callable[[], dict] | None = None):
+                 preview_pill: Callable[[str, int, int], dict] | None = None, cancel_capture: Callable[[], None] | None = None, check_models: Callable[[], dict] | None = None, update_models: Callable[[], dict] | None = None, models: Callable[[], dict] | None = None):
         super().__init__(parent)
         self._backend = backend
         #: Asks the daemon to show the real pill at a placement for a few
@@ -1070,6 +1070,9 @@ class SettingsDialog(QDialog):
         #: "tell me what changed" and "spend three gigabytes" are different
         #: decisions, and the owner asked for them to be different buttons.
         self._update_models = update_models
+        #: Asks the daemon which models this machine has. None when the window
+        #: was opened without one, and the row is then empty rather than lying.
+        self._models = models
         #: Capture waits for a key, and every way of leaving this window presses
         #: something - so it has to end on its own as well.
         self._capture_timeout = QTimer(self)
@@ -1594,6 +1597,9 @@ class SettingsDialog(QDialog):
             "~/.cache/huggingface — the shared cache, where they are now")
         self.model_dir_button = QPushButton("Browse…")
         self.model_dir_button.clicked.connect(self._pick_model_dir)
+        self.model_choice = QComboBox()
+        self.model_choice.setToolTip("Which model to check or update")
+        self.model_choice.currentIndexChanged.connect(self._forget_model_answer)
         self.check_models_button = QPushButton("Check for updates")
         self.check_models_button.setToolTip(
             "Ask huggingface whether there is a newer copy of the model in use. "
@@ -1606,12 +1612,21 @@ class SettingsDialog(QDialog):
         self.update_models_button.clicked.connect(self._ask_for_model_download)
         self.update_models_button.setEnabled(False)
         self.model_dir_note = _caption("")
+        # The folder and which model to act on are two questions, so they get a
+        # row each. One row holding both read as a single thing, and pressing
+        # Check beside a path made it look as though the path was what was
+        # being checked.
         row = QHBoxLayout()
         row.setSpacing(ROW_SPACING // 2)
+        row.addWidget(QLabel("Folder"))
         row.addWidget(self.model_dir_edit, 1)
         row.addWidget(self.model_dir_button)
-        row.addWidget(self.check_models_button)
-        row.addWidget(self.update_models_button)
+        models_row = QHBoxLayout()
+        models_row.setSpacing(ROW_SPACING // 2)
+        models_row.addWidget(QLabel("Model"))
+        models_row.addWidget(self.model_choice, 1)
+        models_row.addWidget(self.check_models_button)
+        models_row.addWidget(self.update_models_button)
         box = QVBoxLayout()
         box.setSpacing(ROW_SPACING)
         box.addWidget(self._with_help(
@@ -1619,14 +1634,37 @@ class SettingsDialog(QDialog):
                      "dictate in the language that uses it."),
             "model_dir", HELP["model_dir"]))
         box.addLayout(row)
+        box.addLayout(models_row)
         box.addWidget(self.model_dir_note)
+        self._load_model_choices()
         return box
+
+    def _load_model_choices(self) -> None:
+        """Fill the dropdown with the models this machine actually has."""
+        if self._models is None:
+            self.check_models_button.setEnabled(False)
+            return
+        try:
+            reply = self._models() or {}
+        except Exception:
+            log.debug("could not ask which models are here", exc_info=True)
+            reply = {}
+        found = [str(m) for m in (reply.get("models") or [])]
+        self.model_choice.clear()
+        self.model_choice.addItems(found)
+        self.model_choice.setEnabled(bool(found))
+        self.check_models_button.setEnabled(bool(found) and self._check_models is not None)
+
+    def _forget_model_answer(self) -> None:
+        """A status line under a model must not be another model's answer."""
+        self.model_dir_note.setText("")
+        self.update_models_button.setEnabled(False)
 
     def _ask_for_model_update(self) -> None:
         """Look, and say what was found. Never raise out of a click."""
         if self._check_models is None:
             return
-        reply = self._ask(self._check_models)
+        reply = self._ask(lambda: self._check_models(self.model_choice.currentText()))
         if reply is None:
             return
         if not reply.get("ok"):
@@ -1647,7 +1685,7 @@ class SettingsDialog(QDialog):
         """The second press: this is the one that spends the bandwidth."""
         if self._update_models is None:
             return
-        reply = self._ask(self._update_models)
+        reply = self._ask(lambda: self._update_models(self.model_choice.currentText()))
         if reply is None:
             return
         if reply.get("ok"):

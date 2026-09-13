@@ -3786,21 +3786,28 @@ def test_checking_reports_every_model_without_downloading(isolated_xdg, qapp, mo
     assert warmed == [], "checking must not reload anything"
 
 
-def test_updating_is_the_other_button(isolated_xdg, qapp, monkeypatch):
-    refreshed, warmed = [], []
+def test_updating_downloads_on_a_thread_of_its_own(isolated_xdg, qapp, monkeypatch):
+    """It can take many minutes, and the caller is a window waiting for yes."""
+    fetched = []
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
         "name": "local", "describe": lambda self: "x", "warmup": lambda self: None,
-        "refresh": lambda self: refreshed.append(1)})())
+        "refresh": lambda self: None})())
+    monkeypatch.setattr("voice.daemon.download",
+                        lambda model, root: fetched.append(model) or "/tmp/x")
     d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
                tray=FakeTray(), notifier=QuietNotifier())
     d.build()
-    monkeypatch.setattr(d, "_start_warmup", lambda: warmed.append(1))
-
     assert d.handle({"cmd": "update_models"}) == {"ok": True}
-    assert refreshed == [1] and warmed == [1]
+    _join_background()
+    assert sorted(fetched) == sorted(["large-v3", "KBLab/kb-whisper-large"])
 
 
-def test_updating_a_cloud_profile_says_there_is_nothing_to_update(isolated_xdg, qapp, monkeypatch):
+def test_updating_with_no_local_model_says_there_is_nothing_to_update(
+        isolated_xdg, qapp, monkeypatch):
+    cfg = Config.load()
+    cfg.set("stt.active", "openai")
+    cfg.set("general.language_profiles", {})
+    cfg.save()
     monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
         "name": "openai_compatible", "describe": lambda self: "x",
         "warmup": lambda self: None})())
@@ -3809,3 +3816,89 @@ def test_updating_a_cloud_profile_says_there_is_nothing_to_update(isolated_xdg, 
     d.build()
     reply = d.handle({"cmd": "update_models"})
     assert reply["ok"] is False and "nothing" in reply["reason"].lower()
+
+def test_the_window_is_told_which_models_it_could_check(isolated_xdg, qapp, monkeypatch):
+    """The dropdown's contents: every local model a language here can reach."""
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "local", "describe": lambda self: "x", "warmup": lambda self: None,
+        "refresh": lambda self: None})())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
+               tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    reply = d.handle({"cmd": "models"})
+    assert reply["ok"] is True
+    assert reply["models"] == ["large-v3", "KBLab/kb-whisper-large"]
+
+
+def test_checking_one_model_checks_only_that_one(isolated_xdg, qapp, monkeypatch):
+    from voice.models import UP_TO_DATE
+
+    asked = []
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "local", "describe": lambda self: "x", "warmup": lambda self: None,
+        "refresh": lambda self: None})())
+    monkeypatch.setattr("voice.daemon.update_status",
+                        lambda models: asked.append(models) or [(models[0][0], UP_TO_DATE, "a")])
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
+               tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    reply = d.handle({"cmd": "check_models", "model": "KBLab/kb-whisper-large"})
+    assert [m for m, _ in asked[0]] == ["KBLab/kb-whisper-large"]
+    assert reply["models"] == [["KBLab/kb-whisper-large", UP_TO_DATE]]
+
+
+def test_a_model_this_machine_does_not_use_is_refused(isolated_xdg, qapp, monkeypatch):
+    """The window offers a list; anything else is a mistake, not a request."""
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "local", "describe": lambda self: "x", "warmup": lambda self: None,
+        "refresh": lambda self: None})())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
+               tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    reply = d.handle({"cmd": "check_models", "model": "someone/else"})
+    assert reply["ok"] is False and "someone/else" in reply["reason"]
+
+
+def test_updating_one_model_downloads_only_that_one(isolated_xdg, qapp, monkeypatch):
+    fetched, refreshed = [], []
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "local", "describe": lambda self: "x", "warmup": lambda self: None,
+        "refresh": lambda self: refreshed.append(1)})())
+    monkeypatch.setattr("voice.daemon.download",
+                        lambda model, root: fetched.append(model) or "/tmp/x")
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
+               tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    assert d.handle({"cmd": "update_models", "model": "KBLab/kb-whisper-large"})["ok"] is True
+    _join_background()
+    assert fetched == ["KBLab/kb-whisper-large"]
+
+
+def test_updating_the_model_in_use_reloads_it(isolated_xdg, qapp, monkeypatch):
+    """A model that was replaced under a loaded copy has to be picked up."""
+    refreshed = []
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "local", "describe": lambda self: "x", "warmup": lambda self: None,
+        "refresh": lambda self: refreshed.append(1)})())
+    monkeypatch.setattr("voice.daemon.download", lambda model, root: "/tmp/x")
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
+               tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    d.handle({"cmd": "update_models", "model": "large-v3"})    # the active one
+    _join_background()
+    assert refreshed == [1]
+
+
+def _join_background(timeout=5.0):
+    """Wait for the daemon's download thread, whatever it is called."""
+    import threading
+    import time
+
+    ends = time.monotonic() + timeout
+    while time.monotonic() < ends:
+        workers = [t for t in threading.enumerate()
+                   if t.name in ("model-update", "warmup") and t.is_alive()]
+        if not workers:
+            return
+        for t in workers:
+            t.join(timeout=0.2)

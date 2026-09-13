@@ -72,3 +72,33 @@ def test_a_per_profile_folder_is_looked_in(tmp_path, monkeypatch):
     _cached(tmp_path / "mine", "Systran/faster-whisper-medium", "here")
     assert local_revision("medium", tmp_path / "mine") == "here"
     assert hub_directory("medium", tmp_path / "mine").parent == tmp_path / "mine"
+
+
+def test_downloading_one_model_fetches_exactly_that_repository(monkeypatch, tmp_path):
+    """Update applies to the model picked in the window, which is not
+    necessarily the one loaded right now."""
+    from voice.models import download
+
+    asked = {}
+
+    def fake(size_or_id, cache_dir=None, **kw):
+        asked.update(size_or_id=size_or_id, cache_dir=cache_dir)
+        return str(tmp_path / "snapshot")
+
+    monkeypatch.setattr("faster_whisper.utils.download_model", fake)
+    download("KBLab/kb-whisper-large", tmp_path / "models")
+    assert asked == {"size_or_id": "KBLab/kb-whisper-large",
+                     "cache_dir": str(tmp_path / "models")}
+
+
+def test_downloading_into_the_shared_cache_says_nothing_about_where(monkeypatch, tmp_path):
+    """No folder configured means huggingface's own default, and passing None
+    is how that is said - not passing the path we guessed it would be."""
+    from voice.models import download
+
+    asked = {}
+    monkeypatch.setattr("faster_whisper.utils.download_model",
+                        lambda size_or_id, cache_dir=None, **kw: asked.update(
+                            cache_dir=cache_dir) or "x")
+    download("medium", None)
+    assert asked == {"cache_dir": None}

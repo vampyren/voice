@@ -2705,3 +2705,66 @@ def test_the_paired_languages_read_as_a_sentence(qapp):
     cfg, dlg, _ = make(qapp)
     assert "English and Swedish" in dlg.profile_mode_label.text(), \
         dlg.profile_mode_label.text()
+
+
+# -- assigning and clearing a shortcut ----------------------------------------
+
+def test_every_shortcut_row_can_be_cleared(qapp):
+    """There was no way to unbind anything: the only control was "Change…",
+    which waits for a key, and there is no key that means "none"."""
+    cfg, dlg, _ = make(qapp)
+    assert set(dlg.clear_buttons) == set(dlg.key_edits)
+
+    dlg.clear_buttons["dictate"].click()
+    assert dlg.key_edits["dictate"].text() == ""
+    assert dlg.key_labels["dictate"].text() == NOT_SET
+    dlg.save_button.click()
+    assert dlg.error_label.text(), "dictate cannot be left unbound silently"
+
+    dlg.key_edits["dictate"].setText("KEY_F13")
+    dlg.clear_buttons["cancel"].click()
+    dlg.save_button.click()
+    again = Config.load()
+    assert again.get("hotkeys.cancel") == ""
+    assert again.get("hotkeys.dictate") == "KEY_F13"
+    assert again.errors() == []
+
+
+def test_clearing_is_offered_only_for_a_key_that_is_set(qapp):
+    cfg, dlg, _ = make(qapp)
+    dlg.key_edits["recall"].setText("")
+    dlg._show_key_row("recall")
+    assert not dlg.clear_buttons["recall"].isEnabled()
+    dlg.key_edits["recall"].setText("KEY_F14")
+    dlg._show_key_row("recall")
+    assert dlg.clear_buttons["recall"].isEnabled()
+
+
+def test_capture_gives_up_on_its_own(qapp, monkeypatch):
+    """Capture waits for a key for ever, and every way of leaving the dialog
+    presses something. It has to end by itself."""
+    from voice.ui.settings import CAPTURE_TIMEOUT_MS
+
+    cancelled = []
+    cfg = Config.load()
+    dlg = SettingsDialog(cfg, capture_key=lambda cb: None, sources=lambda: [],
+                         cancel_capture=lambda: cancelled.append(1))
+    assert CAPTURE_TIMEOUT_MS >= 5000
+    dlg._start_change("dictate")
+    assert dlg._changing == "dictate"
+    dlg._capture_timeout.timeout.emit()          # as if the clock ran out
+    assert dlg._changing is None
+    assert cancelled == [1], "the listener was left waiting"
+    assert dlg.change_buttons["dictate"].text() == CHANGE
+
+
+def test_giving_up_on_a_capture_tells_the_listener(qapp):
+    """Pressing Change… twice used to leave the listener armed, so the next
+    key pressed anywhere was silently taken."""
+    cancelled = []
+    dlg = SettingsDialog(Config.load(), capture_key=lambda cb: None, sources=lambda: [],
+                         cancel_capture=lambda: cancelled.append(1))
+    dlg._start_change("dictate")
+    dlg._start_change("dictate")                 # a second press gives up
+    assert dlg._changing is None
+    assert cancelled == [1]

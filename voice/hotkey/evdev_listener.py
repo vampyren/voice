@@ -17,6 +17,14 @@ INPUT_DIR = "/dev/input"
 RESCAN_SECONDS = 2.0
 
 
+#: The three buttons a dialog is operated with. Binding dictation to one makes
+#: the program unusable, so capture refuses them; every other button on a mouse
+#: can be assigned.
+POINTER_BUTTONS: frozenset[int] = frozenset({
+    ecodes.BTN_LEFT, ecodes.BTN_RIGHT, ecodes.BTN_MIDDLE,
+})
+
+
 def _is_keyboard_like(dev: evdev.InputDevice) -> bool:
     keys = dev.capabilities().get(ecodes.EV_KEY, [])
     return ecodes.KEY_A in keys or ecodes.BTN_SIDE in keys
@@ -80,6 +88,15 @@ class EvdevListener:
         with self._lock:
             self._capture = callback
             self._capture_modifiers = []
+
+    def cancel_capture(self) -> None:
+        """Stop waiting for a key, having been given up on.
+
+        Without this the only way out of capture is to press something - and
+        every way of leaving the dialog presses something.
+        """
+        with self._lock:
+            self._capture, self._capture_modifiers = None, []
 
     def held(self):
         return self._tracker.held()
@@ -159,7 +176,14 @@ class EvdevListener:
         with self._lock:
             cb = self._capture
             if cb is not None:
-                if value == 1:
+                if code in POINTER_BUTTONS:
+                    # Never: the dialog is operated with these, so taking one
+                    # as the answer binds dictation to clicking. It happened -
+                    # every click anywhere then started and stopped a
+                    # recording. A side button is still fair game, which is why
+                    # mice are listened to at all.
+                    cb = None
+                elif value == 1:
                     if code in MODIFIER_CODES:
                         if code not in self._capture_modifiers:
                             self._capture_modifiers.append(code)

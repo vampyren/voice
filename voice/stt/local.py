@@ -9,6 +9,7 @@ from typing import Callable
 import numpy as np
 
 from voice.audio.pcm import duration_s, to_float32
+from voice.gpu import bundled_cuda_runtime
 from voice.stt.base import Transcript, TranscriptionError
 
 log = logging.getLogger(__name__)
@@ -67,6 +68,16 @@ class LocalTranscriber:
         device, compute = self._wanted, self._wanted_compute
         if not _is_cpu(device) and not self._cuda():
             self.fallback_reason = "CUDA not available; using CPU int8 (slower)"
+            log.warning(self.fallback_reason)
+            return self._build("cpu", "int8")
+        if not _is_cpu(device) and not bundled_cuda_runtime():
+            # A card is there and the libraries to drive it are not. Asked
+            # before anything is built, because building proves nothing: a model
+            # constructs on cuda quite happily and only needs cuBLAS when it
+            # first computes - so the first dictation died at the end, past
+            # every fallback, with "Library libcublas.so.12 is not found".
+            self.fallback_reason = ("this build has no CUDA runtime, so the card "
+                                    "cannot be used; using CPU int8 (slower)")
             log.warning(self.fallback_reason)
             return self._build("cpu", "int8")
         if _is_cpu(device):
@@ -148,5 +159,29 @@ class LocalTranscriber:
             )
             text = "".join(s.text for s in segments).strip()
         except Exception as exc:
-            raise TranscriptionError(f"local transcription failed: {exc}") from exc
+            if _is_cpu(self._device):
+                raise TranscriptionError(f"local transcription failed: {exc}") from exc
+            # The card failed while computing, which the checks above are meant
+            # to have ruled out - but a dictation already spoken must not be
+            # lost to one. Rebuilt on the processor and run once more; from here
+            # on this instance stays there.
+            log.warning("the GPU failed mid-transcription (%s); retrying on CPU", exc)
+            try:
+                with self._lock:
+                    self._model = self._build("cpu", "int8")
+                self.fallback_reason = (f"the GPU failed during transcription ({exc}); "
+                                        f"using CPU int8 (slower)")
+                segments, info = self._model.transcribe(
+                    to_float32(pcm),
+                    language=lang,
+                    initial_prompt=prompt or None,
+                    beam_size=int(self._profile.get("beam_size", 5)),
+                    **({"hotwords": hotwords.strip()}
+                       if hotwords and hotwords.strip() else {}),
+                    vad_filter=False,
+                    condition_on_previous_text=False,
+                )
+                text = "".join(s.text for s in segments).strip()
+            except Exception:
+                raise TranscriptionError(f"local transcription failed: {exc}") from exc
         return Transcript(text, getattr(info, "language", lang), duration_s(pcm), time.time() - start, self.name)

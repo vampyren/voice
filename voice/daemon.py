@@ -41,6 +41,7 @@ from voice.ui.overlay_client import (OverlayClient, cached_probe, default_launch
 from voice.ui.overlay_model import FINISH as PILL_FILL_S
 from voice.ui.placement import (LEGACY_POSITIONS, POSITIONS, is_margin,
                                  normalise_position)
+from voice.ui.icons import icon_for
 from voice.ui.settings import SettingsDialog
 from voice.ui.tray import Tray
 
@@ -69,6 +70,25 @@ def profile_for_status(config: Config) -> tuple[str, str | None]:
     language = str(config.get("general.language", "en") or "en")
     mapped = config.profile_for_language(language)
     return active, (language if mapped and mapped == active else None)
+
+
+def name_the_application(app) -> None:
+    """Tell the desktop which program these windows belong to.
+
+    Without a desktop file name the compositor has nothing to match the window
+    against, so the settings window appeared in the taskbar as "python3" with
+    the stock interpreter icon. The name must equal the installed .desktop
+    file's, which is what APP_ID is.
+    """
+    from voice import APP_ID
+
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
+    app.setDesktopFileName(APP_ID)
+    try:
+        app.setWindowIcon(icon_for("idle"))
+    except Exception:
+        log.debug("could not set the window icon", exc_info=True)
 
 
 def profile_hint(config: Config) -> str:
@@ -1298,7 +1318,7 @@ class Daemon:
             return self._hand_over()
         app = QApplication.instance() or QApplication(sys.argv)
         app.setQuitOnLastWindowClosed(False)
-        app.setApplicationName(APP_NAME)
+        name_the_application(app)
         self.build()
         try:
             self._server.start()
@@ -1618,6 +1638,7 @@ class Daemon:
                 self._settings = SettingsDialog(self.config,
                                                 lambda cb: self.listener.capture_next(cb),
                                                 lambda: list(self._source_cache or []),
+                                                cancel_capture=self.listener.cancel_capture,
                                                 backend=self.hotkey_backend,
                                                 triggers=self.effective_triggers,
                                                 preview_pill=self._ask_for_preview)

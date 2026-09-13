@@ -193,6 +193,11 @@ CHANGE_PROMPT = {
 }
 #: How a change that came to nothing reads, and a key nothing can be made of.
 CHANGE_STOPPED = "Left as it was."
+#: How long capture waits before giving up. Long enough to find the key, short
+#: enough that a window left open is not still listening an hour later.
+CAPTURE_TIMEOUT_MS = 15000
+CAPTURE_GAVE_UP = "No key was pressed, so nothing changed."
+CLEAR_KEY = "Clear"
 #: How a change that reached the desktop reads, and a save of the whole set.
 #: The store answers with a sentence of its own - the key it wrote, in the
 #: desktop's own spelling, and the ids it skipped - which is a sentence for
@@ -994,7 +999,7 @@ class SettingsDialog(QDialog):
                  sources: Callable[[], list[Source]], parent=None, backend: str = "evdev",
                  triggers: Callable[[], dict[str, str]] | None = None,
                  shortcut_store: Callable[[], object | None] = desktop_shortcut_store,
-                 preview_pill: Callable[[str, int, int], dict] | None = None):
+                 preview_pill: Callable[[str, int, int], dict] | None = None, cancel_capture: Callable[[], None] | None = None):
         super().__init__(parent)
         self._backend = backend
         #: Asks the daemon to show the real pill at a placement for a few
@@ -1015,6 +1020,16 @@ class SettingsDialog(QDialog):
         # Save writes to disk and emits `saved`; the daemon reloads from disk.
         self._cfg = Config.load(config.path)
         self._capture_key, self._sources = capture_key, sources
+        #: Told when a capture is given up on. Without it the listener stays
+        #: armed and takes the next key pressed anywhere, silently.
+        self._cancel_capture = cancel_capture or (lambda: None)
+        #: Capture waits for a key, and every way of leaving this window presses
+        #: something - so it has to end on its own as well.
+        self._capture_timeout = QTimer(self)
+        self._capture_timeout.setSingleShot(True)
+        self._capture_timeout.setInterval(CAPTURE_TIMEOUT_MS)
+        self._capture_timeout.timeout.connect(
+            lambda: self._stop_change(CAPTURE_GAVE_UP))
         #: The microphone the *user* picked in this window, or None while the
         #: combo is only showing what the config holds. Listing the sources is
         #: slow enough that the daemon does it in the background and calls
@@ -1301,6 +1316,9 @@ class SettingsDialog(QDialog):
         #: what the desktop holds, which is the only truthful thing to show.
         self.key_labels: dict[str, QLabel] = {}
         self.change_buttons: dict[str, QPushButton] = {}
+        #: "Clear" beside each: there is no key that means "none", so unbinding
+        #: needed a control of its own.
+        self.clear_buttons: dict[str, QPushButton] = {}
         self.portal_edits: dict[str, QLineEdit] = {}
         self.portal_effective: dict[str, QLabel] = {}
         self.shortcuts_button: QPushButton | None = None
@@ -1333,14 +1351,20 @@ class SettingsDialog(QDialog):
             button = QPushButton(CHANGE)
             button.setAccessibleName(f"Change the key for {label.lower()}")
             button.clicked.connect(lambda _checked=False, n=name: self._start_change(n))
+            clear = QPushButton(CLEAR_KEY)
+            clear.setAccessibleName(f"Clear the key for {label.lower()}")
+            clear.setToolTip(f"Leave {label.lower()} with no key at all")
+            clear.clicked.connect(lambda _checked=False, n=name: self._clear_key(n))
             self.key_labels[name] = shown
             self.change_buttons[name] = button
+            self.clear_buttons[name] = clear
             holder = QWidget()
             row = QHBoxLayout(holder)
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(COLUMN_SPACING)
             row.addWidget(shown, 1)
             row.addWidget(button, 0)
+            row.addWidget(clear, 0)
             keys.addRow(label, holder)
         keys.addRow("Dictation key", self.mode_combo)
         if self._route == CAPTURE:
@@ -2109,14 +2133,34 @@ class SettingsDialog(QDialog):
         they are a spare set and the row keeps showing the desktop's answer.
         """
         if self._route != CAPTURE:
+            self._show_key_row(name)
             return
         self.key_labels[name].setText(pretty_device_key(self.key_edits[name].text()) or NOT_SET)
+        self._show_key_row(name)
+
+    def _show_key_row(self, name: str) -> None:
+        """Whether this row has anything to clear."""
+        if name not in self.clear_buttons:
+            return
+        edit = self.key_edits.get(name) or self.portal_edits.get(name)
+        self.clear_buttons[name].setEnabled(bool(edit and edit.text().strip()))
 
     def hotkey_help_text(self) -> str:
         """The detail behind the Hotkeys tab's "?", for what is in force here."""
         return HOTKEY_HELP[self._route]
 
     # -- one button per key ----------------------------------------------------
+    def _clear_key(self, name: str) -> None:
+        """Unbind one action. Written on Save like any other edit."""
+        if self._changing is not None:
+            self._stop_change(CHANGE_STOPPED)
+        if name in self.key_edits:
+            self.key_edits[name].setText("")
+        if name in self.portal_edits:
+            self.portal_edits[name].setText("")
+        self._show_key_row(name)
+        self._say_about_hotkeys("")
+
     def _start_change(self, name: str) -> None:
         """"Change…" on one row: set that key, however this machine does it."""
         if self._changing is not None:
@@ -2133,12 +2177,18 @@ class SettingsDialog(QDialog):
     def _begin_change(self, name: str) -> None:
         """Say, on the row and under the list, that this key is being changed."""
         self._changing = name
+        self._capture_timeout.start()
         self.change_buttons[name].setText(CHANGE_BUSY[self._route])
         self._say_about_hotkeys(CHANGE_PROMPT[self._route])
 
     def _stop_change(self, note: str) -> None:
         """Put the button back and say how it went, in one line or none."""
         name, self._changing = self._changing, None
+        self._capture_timeout.stop()
+        if name is not None:
+            # Whatever ended it, the listener must stop waiting: left armed, it
+            # takes the next key pressed anywhere and saves it.
+            self._cancel_capture()
         self._release_keyboard()
         if name is not None and name in self.change_buttons:
             self.change_buttons[name].setText(CHANGE)

@@ -165,6 +165,14 @@ class PortalListener:
             self._thread = None
         self._close()
 
+    def cancel_capture(self) -> None:
+        """Nothing to disarm: this listener never holds a pending capture.
+
+        Part of the listener interface all the same - the daemon calls it
+        whenever a change is given up on, and must not have to ask which
+        backend it is talking to.
+        """
+
     def capture_next(self, callback: Callable[[str], None]) -> None:
         """Ask the desktop to show its own rebinding dialog; we never see raw keys.
 

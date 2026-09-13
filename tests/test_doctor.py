@@ -823,7 +823,7 @@ def test_cuda_says_so_when_the_build_cannot_use_the_card(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "ctranslate2",
                         types.SimpleNamespace(get_cuda_device_count=lambda: 1))
-    monkeypatch.setattr("voice.doctor._bundled_cuda_runtime", lambda: False)
+    monkeypatch.setattr("voice.doctor.bundled_cuda_runtime", lambda: False)
 
     ok, detail = default_probes()["cuda"]()
 
@@ -838,7 +838,7 @@ def test_cuda_is_reported_plainly_when_the_runtime_is_there(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "ctranslate2",
                         types.SimpleNamespace(get_cuda_device_count=lambda: 2))
-    monkeypatch.setattr("voice.doctor._bundled_cuda_runtime", lambda: True)
+    monkeypatch.setattr("voice.doctor.bundled_cuda_runtime", lambda: True)
 
     ok, detail = default_probes()["cuda"]()
 
@@ -861,7 +861,7 @@ def test_a_source_install_with_the_wheels_is_not_called_the_cpu_build(tmp_path, 
     monkeypatch.setattr(doctor.site, "getsitepackages", lambda: [str(tmp_path)], raising=False)
     monkeypatch.setattr(doctor, "PACKAGED_CUDA", tmp_path / "nowhere")
 
-    assert doctor._bundled_cuda_runtime() is True
+    assert doctor.bundled_cuda_runtime() is True
 
 
 def test_no_wheels_anywhere_is_the_cpu_build(tmp_path, monkeypatch):
@@ -871,4 +871,4 @@ def test_no_wheels_anywhere_is_the_cpu_build(tmp_path, monkeypatch):
     monkeypatch.setattr(doctor, "PACKAGED_CUDA", tmp_path / "nowhere")
     monkeypatch.setattr(doctor.sys, "path", [str(tmp_path)])
 
-    assert doctor._bundled_cuda_runtime() is False
+    assert doctor.bundled_cuda_runtime() is False

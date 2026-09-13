@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Callable
 
 from voice import APP_ID, __version__
+# Re-exported: the CUDA question is answered in one place, and both this and
+# the transcriber ask there, so they cannot disagree about the same card.
+from voice.gpu import CUDA_LIBRARY, PACKAGED_CUDA, bundled_cuda_runtime
 from voice.hotkey.portal_listener import NO_TRIGGER, STATE_BOUND, STATE_UNASSIGNED
 from voice.inject.injector import insertion_status, pill_policy
 from voice.inject.window import (effective_window_command, is_plasma,
@@ -218,35 +221,6 @@ def _portal() -> tuple[bool, str]:
 #: the library CTranslate2 actually dlopens rather than for a directory: the
 #: package wrapper already keys on `nvidia/*/lib` existing, and a bare `cuda`
 #: directory proves nothing about what is in it.
-CUDA_LIBRARY = "libcublas.so.12"
-PACKAGED_CUDA = Path("/usr/lib/voice/cuda")
-
-
-def _bundled_cuda_runtime() -> bool:
-    """Can this install actually drive a card, or is it the CPU-only build?
-
-    A card being present says nothing: the CPU build leaves the libraries out
-    on purpose, so `get_cuda_device_count()` counts the card and CTranslate2
-    then cannot load it. Looked for where *this* process would find them -
-    hardcoding the package path told every source install, with a working GPU
-    in use, that it was the CPU-only build and to replace itself with a package.
-    """
-    import site
-    roots = [PACKAGED_CUDA]
-    try:
-        roots += [Path(p) for p in site.getsitepackages()]
-    except Exception:
-        pass
-    roots += [Path(p) for p in sys.path if p]
-    for root in roots:
-        try:
-            if any(root.glob(f"nvidia/*/lib/{CUDA_LIBRARY}")):
-                return True
-        except OSError:
-            continue
-    return False
-
-
 def _cuda() -> tuple[bool, str]:
     try:
         import ctranslate2
@@ -255,7 +229,7 @@ def _cuda() -> tuple[bool, str]:
         return False, f"ctranslate2 cuda probe failed: {exc}"
     if n == 0:
         return False, "no CUDA device; local transcription will run on CPU (install with --extra gpu on the NVIDIA PC)"
-    if not _bundled_cuda_runtime():
+    if not bundled_cuda_runtime():
         # False, not True: the practical outcome is identical to having no card
         # at all - CPU int8 - and that case renders as a cross. A green tick
         # beside "your card cannot be used" is read as "the GPU is fine" by

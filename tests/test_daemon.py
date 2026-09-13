@@ -22,6 +22,7 @@ class FakeListener:
     def start(self): self.started = True
     def stop(self): self.started = False
     def capture_next(self, cb): self.cb = cb
+    def cancel_capture(self): self.cb = None
     def modifiers_held(self): return False
     def devices_ok(self): return True
 
@@ -3674,3 +3675,16 @@ def test_the_guide_opens_without_blocking_the_daemon(isolated_xdg, qapp, monkeyp
     d._on_tray_action("guide")
     qapp.processEvents()
     assert len(opened) == 1, "a second window instead of raising the first"
+
+
+def test_the_windows_say_they_are_voice_not_python(isolated_xdg, qapp):
+    """The settings window showed "python3" in the taskbar and the wrong icon:
+    nothing told the desktop which .desktop file this process belongs to."""
+    from PySide6.QtWidgets import QApplication
+
+    from voice import APP_ID
+    from voice.daemon import name_the_application
+
+    name_the_application(QApplication.instance())
+    assert QApplication.instance().desktopFileName() == APP_ID
+    assert QApplication.instance().applicationDisplayName() == "voice"

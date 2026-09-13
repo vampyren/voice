@@ -164,6 +164,67 @@ def test_capture_ends_after_one_answer():
         listener.stop()
 
 
+def test_the_buttons_you_click_with_are_never_captured():
+    """Binding the left mouse button to dictation is catastrophic: every click
+    starts and stops a recording.
+
+    It happened. Capture stays armed until a key arrives, and the only way to
+    reach Save is to click - so the click was taken as the answer, saved, and
+    from then on the pill flashed on every click anywhere on the screen.
+    """
+    dev = FakeDevice()
+    captured = []
+    listener = EvdevListener(Tracker({}), lambda n, k: None, device_factory=lambda: [dev])
+    listener.start()
+    try:
+        listener.capture_next(captured.append)
+        for button in (e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE):
+            dev.push(button, 1)
+            dev.push(button, 0)
+        time.sleep(0.05)
+        assert captured == [], f"a pointer button was captured: {captured}"
+        dev.push(e.KEY_F13, 1)
+        assert wait_for(lambda: captured == ["KEY_F13"]), "capture stopped working"
+    finally:
+        listener.stop()
+
+
+def test_a_side_button_is_still_capturable():
+    """Mice are listened to precisely so a side button can be push-to-talk;
+    only the three you operate a dialog with are off limits."""
+    dev = FakeDevice()
+    captured = []
+    listener = EvdevListener(Tracker({}), lambda n, k: None, device_factory=lambda: [dev])
+    listener.start()
+    try:
+        listener.capture_next(captured.append)
+        dev.push(e.BTN_SIDE, 1)
+        assert wait_for(lambda: captured == ["BTN_SIDE"])
+    finally:
+        listener.stop()
+
+
+def test_capture_can_be_called_off():
+    """Escape, or the timeout, has to be able to disarm it - otherwise the only
+    way out of capture is to press something, and everything is a something."""
+    dev = FakeDevice()
+    got, captured = [], []
+    tracker = Tracker({"dictate": parse_keyspec("KEY_F13")})
+    listener = EvdevListener(tracker, lambda n, k: got.append((n, k)), device_factory=lambda: [dev])
+    listener.start()
+    try:
+        listener.capture_next(captured.append)
+        dev.push(e.KEY_LEFTCTRL, 1)          # half a chord, then given up on
+        listener.cancel_capture()
+        dev.push(e.KEY_SPACE, 1)
+        time.sleep(0.05)
+        assert captured == []
+        dev.push(e.KEY_F13, 1)
+        assert wait_for(lambda: got == [("dictate", "press")]), "keys never came back"
+    finally:
+        listener.stop()
+
+
 def test_no_devices_marks_not_ok_and_stop_is_clean():
     listener = EvdevListener(Tracker({}), lambda n, k: None, device_factory=lambda: [])
     listener.start()

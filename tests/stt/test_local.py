@@ -29,9 +29,14 @@ class FakeModel:
 
 
 @pytest.fixture(autouse=True)
-def _reset():
+def _reset(monkeypatch):
     FakeModel.calls = []
     FakeModel.kwargs = []
+    # These cases are about what the transcriber does with a card it *can*
+    # drive; the machine running the suite has no CUDA wheels, and without this
+    # every one of them would take the "no runtime" path instead. The tests
+    # that are about that path say so themselves.
+    monkeypatch.setattr("voice.stt.local.bundled_cuda_runtime", lambda: True)
 
 
 def test_a_configured_model_dir_is_where_the_model_is_downloaded():
@@ -150,7 +155,10 @@ def test_model_loaded_once_and_errors_wrapped():
         t.transcribe(np.zeros(1600, dtype=np.int16), None, None)
     with pytest.raises(TranscriptionError):
         t.transcribe(np.zeros(1600, dtype=np.int16), None, None)
-    assert len(FakeModel.calls) == 1
+    # Two builds, not one: the card failed while computing, so it was rebuilt on
+    # the processor and tried once more. That failed too, and the instance stays
+    # on the processor - so the second dictation builds nothing and just fails.
+    assert [c[1] for c in FakeModel.calls] == ["cuda", "cpu"]
 
 
 def test_model_load_failure_is_wrapped():
@@ -347,3 +355,66 @@ def test_auto_with_no_card_goes_straight_to_cpu():
                            cuda_available=lambda: False)
     stt.warmup()
     assert tried == ["cpu"]
+
+
+# -- a card the libraries cannot drive ----------------------------------------
+
+def test_a_card_with_no_runtime_is_not_even_tried(monkeypatch):
+    """The CPU-only package on a machine with an NVIDIA card.
+
+    The model *constructs* on cuda perfectly well - cuBLAS is only needed when
+    it first computes - so the 0.1.4 fallback, which watched the construction,
+    never fired. The first dictation then died with "Library libcublas.so.12 is
+    not found or cannot be loaded" and no fallback at all.
+    """
+    monkeypatch.setattr("voice.stt.local.bundled_cuda_runtime", lambda: False)
+    t = LocalTranscriber({"model": "medium", "device": "cuda", "compute_type": "float16"},
+                         model_factory=FakeModel, cuda_available=lambda: True)
+    t.warmup()
+    assert FakeModel.calls == [("medium", "cpu", "int8")], FakeModel.calls
+    assert "cpu" in t.describe()
+    assert t.fallback_reason and "runtime" in t.fallback_reason.lower()
+
+
+def test_a_card_with_its_runtime_is_used(monkeypatch):
+    monkeypatch.setattr("voice.stt.local.bundled_cuda_runtime", lambda: True)
+    t = LocalTranscriber({"model": "medium", "device": "cuda", "compute_type": "float16"},
+                         model_factory=FakeModel, cuda_available=lambda: True)
+    t.warmup()
+    assert FakeModel.calls == [("medium", "cuda", "float16")]
+    assert t.fallback_reason is None
+
+
+def test_a_gpu_that_fails_mid_transcription_is_retried_on_the_processor(monkeypatch):
+    """The safety net behind the check above: whatever the reason, a dictation
+    must not be lost to a card that cannot compute."""
+    monkeypatch.setattr("voice.stt.local.bundled_cuda_runtime", lambda: True)
+
+    class CublasOnGpu(FakeModel):
+        def transcribe(self, audio, **kw):
+            if FakeModel.calls[-1][1] != "cpu":
+                raise RuntimeError("Library libcublas.so.12 is not found or cannot be loaded")
+            return super().transcribe(audio, **kw)
+
+    t = LocalTranscriber({"model": "medium", "device": "cuda", "compute_type": "float16"},
+                         model_factory=CublasOnGpu, cuda_available=lambda: True)
+    out = t.transcribe(np.zeros(16000, dtype=np.int16), language="en", prompt=None)
+    assert out.text == "Hello world."
+    assert [c[1] for c in FakeModel.calls] == ["cuda", "cpu"]
+    assert t.fallback_reason and "cpu" in t.fallback_reason.lower()
+    assert "cpu" in t.describe()
+
+
+def test_a_processor_failure_is_not_retried_for_ever(monkeypatch):
+    """Only a GPU failure earns a second go; a broken model must still fail."""
+    monkeypatch.setattr("voice.stt.local.bundled_cuda_runtime", lambda: False)
+
+    class AlwaysBroken(FakeModel):
+        def transcribe(self, audio, **kw):
+            raise RuntimeError("nothing works")
+
+    t = LocalTranscriber({"model": "medium", "device": "cpu", "compute_type": "int8"},
+                         model_factory=AlwaysBroken, cuda_available=lambda: False)
+    with pytest.raises(TranscriptionError):
+        t.transcribe(np.zeros(16000, dtype=np.int16), language="en", prompt=None)
+    assert len(FakeModel.calls) == 1, FakeModel.calls

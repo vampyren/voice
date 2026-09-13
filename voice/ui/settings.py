@@ -46,7 +46,7 @@ MIN_SETTINGS_SIZE = 320
 
 #: Spare pixels under the pairing table's rows. Styles disagree about how tall
 #: a combo in a table cell is, and being a few short clips the last row.
-TABLE_SLACK = 6
+TABLE_SLACK = 14
 
 #: The two the shipped config uses, and what we suggest to anyone who has not
 #: measured their own machine: the best of each family. Marked in the list so

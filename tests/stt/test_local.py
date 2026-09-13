@@ -75,8 +75,13 @@ def test_the_model_dir_survives_the_cpu_fallback():
     t = LocalTranscriber({"model": "medium", "device": "cuda", "model_dir": "/srv/models"},
                          model_factory=FailsOnGpu, cuda_available=lambda: True)
     t.warmup()
+    import os
+
     assert [c[1] for c in FakeModel.calls] == ["cuda", "cpu"]
-    assert FakeModel.kwargs == [{"download_root": "/srv/models"}] * 2
+    # The CPU build also gets its thread count; the card does not.
+    assert FakeModel.kwargs == [{"download_root": "/srv/models"},
+                                {"download_root": "/srv/models",
+                                 "cpu_threads": os.cpu_count()}]
 
 
 #: Every model name this project ships: the profiles in DEFAULT_CONFIG and the
@@ -418,3 +423,31 @@ def test_a_processor_failure_is_not_retried_for_ever(monkeypatch):
     with pytest.raises(TranscriptionError):
         t.transcribe(np.zeros(16000, dtype=np.int16), language="en", prompt=None)
     assert len(FakeModel.calls) == 1, FakeModel.calls
+
+
+def test_the_processor_gets_every_core_by_default():
+    """faster-whisper uses four threads unless told otherwise - "Number of
+    threads to use when running on CPU (4 by default)" - so a 16-core machine
+    transcribed on a quarter of itself."""
+    import os
+
+    t = LocalTranscriber({"model": "medium", "device": "cpu", "compute_type": "int8"},
+                         model_factory=FakeModel, cuda_available=lambda: False)
+    t.warmup()
+    assert FakeModel.kwargs == [{"cpu_threads": os.cpu_count()}]
+
+
+def test_a_thread_count_can_be_set_by_hand():
+    t = LocalTranscriber({"model": "medium", "device": "cpu", "compute_type": "int8",
+                          "cpu_threads": 3},
+                         model_factory=FakeModel, cuda_available=lambda: False)
+    t.warmup()
+    assert FakeModel.kwargs == [{"cpu_threads": 3}]
+
+
+def test_the_card_is_not_given_a_thread_count():
+    """It is a CPU setting; passing it alongside a GPU load says nothing."""
+    t = LocalTranscriber({"model": "medium", "device": "cuda", "compute_type": "float16"},
+                         model_factory=FakeModel, cuda_available=lambda: True)
+    t.warmup()
+    assert FakeModel.kwargs == [{}]

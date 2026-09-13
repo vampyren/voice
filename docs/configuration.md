@@ -83,6 +83,9 @@ model = "large-v3"         # English, and the best Whisper there is.
 device = "cuda"            # falls back to cpu/int8 with a warning
 compute_type = "float16"
 beam_size = 5
+cpu_threads = 0            # processor cores to transcribe on; 0 = all of them.
+                           # Only used when it runs on the processor. Lower it if
+                           # dictating makes the rest of the machine stutter.
 prompt = ""                # steers the style of what is written, e.g. "Notes on a
                            # meeting." Names and jargon belong in [dictionary]
                            # hotwords instead: a prose prompt here pulls ordinary

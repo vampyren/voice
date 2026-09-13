@@ -2664,7 +2664,11 @@ def test_closing_the_window_writes_the_file_once(qapp):
         Config.save = real
     assert len(writes) == 1, f"{len(writes)} rewrites for one close"
     again = Config.load()
-    assert (again.get("ui.settings_width"), again.get("ui.settings_height")) == (880, 690)
+    # Whatever size it ended up at - a resize below the window's own minimum is
+    # not honoured, and what has to be recorded is the size it actually has.
+    assert (again.get("ui.settings_width"), again.get("ui.settings_height")) \
+        == (dlg.width(), dlg.height())
+    assert again.get("ui.settings_width") == 880
 
 
 def test_a_size_from_a_bigger_screen_does_not_open_off_the_bottom(qapp):

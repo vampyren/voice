@@ -46,6 +46,9 @@ DEFAULT_STT_TIMEOUT = 300.0
 #: pipeline gives up on it. Recording is bounded by `audio.max_seconds`, which
 #: has its own timer; this is what catches that timer never firing.
 STUCK_GRACE = 30.0
+#: How much longer to record after "stop" arrives. Long enough to catch the end
+#: of a word already spoken, short enough that nobody waits for it.
+TAIL_S = 0.25
 
 #: The bound on an insertion. Every step of one - the clipboard, waiting for
 #: the hotkey modifiers to clear, the paste chord and the pill's settle - is
@@ -532,6 +535,12 @@ class Dictation:
                 return
             if self._timer:
                 self._timer.cancel()
+            # Keep listening for a moment. The key event arrives the instant you
+            # let go, and the syllable you were still saying is at that point
+            # somewhere in PipeWire's buffers - killing the recorder here left
+            # the audio ending mid-word, which Whisper guesses at or drops.
+            # Reported as "it does not catch the last word".
+            time.sleep(TAIL_S)
             pcm = self.sv.recorder.stop()
             if self.sv.recorder.error:
                 self.sv.notify("Microphone problem", self.sv.recorder.error, "critical")

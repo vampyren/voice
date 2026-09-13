@@ -1020,3 +1020,36 @@ def test_a_press_while_working_is_answered_in_hold_mode_too():
 
     assert busy == [State.TRANSCRIBING]
     assert sv.recorder.started_with == [None], "a refused press must not record"
+
+
+# -- the last word ------------------------------------------------------------
+
+def test_recording_keeps_going_briefly_after_you_let_go(monkeypatch):
+    """"it does not catch the last word, as if it stops listening too early".
+
+    The recorder was killed at the instant the key event arrived, so a syllable
+    still travelling through PipeWire's buffers never reached us - and Whisper,
+    given audio that ends mid-word, guesses at it or drops it.
+    """
+    from voice.pipeline import TAIL_S
+
+    assert 0.1 <= TAIL_S <= 0.6, TAIL_S
+    slept = []
+    monkeypatch.setattr("voice.pipeline.time.sleep", slept.append)
+    d, sv, states, notes = make()
+    d.on_hotkey("dictate", "press")
+    d.on_hotkey("dictate", "release")
+    assert slept and slept[0] == TAIL_S, slept
+    assert sv.injector.texts == ["hello world"]
+
+
+def test_the_tail_is_not_waited_for_when_the_recording_is_thrown_away(monkeypatch):
+    """Cancel puts the audio in the bin; waiting for more of it only makes
+    Escape feel slow."""
+    slept = []
+    monkeypatch.setattr("voice.pipeline.time.sleep", slept.append)
+    d, sv, states, notes = make()
+    d.on_hotkey("dictate", "press")
+    d.on_hotkey("cancel", "press")
+    assert slept == []
+    assert sv.recorder.cancelled == 1

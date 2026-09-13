@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from typing import Callable
@@ -116,6 +117,18 @@ class LocalTranscriber:
         # on its own default.
         where = str(self._profile.get("model_dir") or "").strip()
         extra = {"download_root": where} if where else {}
+        if _is_cpu(device):
+            # faster-whisper's own default is four threads - "Number of threads
+            # to use when running on CPU (4 by default)" - so a machine with
+            # sixteen cores transcribed on a quarter of itself. 0 in the config
+            # means "all of them", which is what most people want and nobody
+            # would think to ask for.
+            wanted = self._profile.get("cpu_threads", 0)
+            try:
+                wanted = int(wanted)
+            except (TypeError, ValueError):
+                wanted = 0
+            extra["cpu_threads"] = wanted if wanted > 0 else (os.cpu_count() or 4)
         log.info("loading %s on %s/%s%s", name, device, compute,
                  f" from {where}" if where else "")
         model = self._factory(name, device, compute, **extra)

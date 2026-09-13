@@ -151,6 +151,10 @@ class Injector:
         #: run, in seconds. Only the `hide` policy has anything to wait for.
         self._fill_wait = fill_wait
 
+    #: The chord the last paste used. Read by the tests and by nothing else;
+    #: the log line beside it is what a person reads.
+    last_chord: str | None = None
+
     def _chord(self) -> tuple[str, bool]:
         """The chord to send, and whether we actually knew what we were aiming at.
 
@@ -160,10 +164,23 @@ class Injector:
         names the pill, never a terminal. Reading it up front removes the
         question entirely - there is no focus to distrust and no settle to race.
         """
+        forced = str(self._settings.get("paste_with", "auto")).strip().lower()
+        if forced in ("normal", "terminal"):
+            # Told which one to use, so there is nothing to detect and nothing
+            # to be unsure about. This is the way out where the window can
+            # never be read - a remote desktop, say - and a terminal therefore
+            # always got the chord it ignores.
+            key = "terminal_chord" if forced == "terminal" else "paste_chord"
+            chord = self._settings.get(
+                key, "ctrl+shift+v" if forced == "terminal" else "ctrl+v")
+            self.last_chord = chord
+            log.info("pasting with %s (chosen in settings, not detected)", chord)
+            return chord, True
         cls = (self._window_class() or "").lower()
         terminals = [str(t).lower() for t in self._settings.get("terminal_classes", [])]
         chord = self._settings.get("terminal_chord", "ctrl+shift+v") if cls and cls in terminals \
             else self._settings.get("paste_chord", "ctrl+v")
+        self.last_chord = chord
         # The one line that makes a paste which went nowhere reconstructable
         # afterwards. "unknown" is the interesting case and is said explicitly:
         # it means the desktop would not name the focused window, so the

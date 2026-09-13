@@ -1402,6 +1402,31 @@ class Daemon:
             pass
         return 0
 
+    #: The last thing "Running on CPU" said, so the same fact is not announced
+    #: at every start. It describes the machine, not something that happened.
+    CPU_NOTICE_MARKER = "cpu-notice"
+
+    def _is_news(self, reason: str) -> bool:
+        """Has this exact reason been said on this machine before?
+
+        Told once and then remembered, because a notification at every restart
+        reads as something being broken - and it is the normal, working state
+        of a CPU-only install. A *different* reason is news again: a card that
+        stops working later has something new to say.
+        """
+        marker = paths.state_dir() / self.CPU_NOTICE_MARKER
+        try:
+            if marker.read_text() == reason:
+                return False
+        except OSError:
+            pass
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(reason)
+        except OSError:
+            log.debug("could not remember the CPU notice", exc_info=True)
+        return True
+
     def _start_warmup(self) -> None:
         # Its own thread, never the pipeline pool: a model load takes tens of
         # seconds and that pool has a single worker, so recall/retry would sit
@@ -1412,7 +1437,7 @@ class Daemon:
         try:
             self.dictation.sv.transcriber.warmup()
             reason = getattr(self.dictation.sv.transcriber, "fallback_reason", None)
-            if reason:
+            if reason and self._is_news(reason):
                 self._notifier.notify("Running on CPU", reason, "normal")
             if self.dictation.state == State.IDLE:
                 self.tray.state_changed.emit("idle", self.dictation.sv.transcriber.describe())

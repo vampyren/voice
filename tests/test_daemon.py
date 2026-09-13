@@ -3688,3 +3688,61 @@ def test_the_windows_say_they_are_voice_not_python(isolated_xdg, qapp):
     name_the_application(QApplication.instance())
     assert QApplication.instance().desktopFileName() == APP_ID
     assert QApplication.instance().applicationDisplayName() == "voice"
+
+
+def test_the_cpu_notice_is_said_once_not_at_every_start(isolated_xdg, qapp, monkeypatch):
+    """"this build has no CUDA runtime" on every single restart reads like
+    something is broken. It is a fact about the machine, not an event."""
+    class OnCpu:
+        name = "local"
+        fallback_reason = "this build has no CUDA runtime, so the card cannot be used"
+
+        def describe(self):
+            return "local medium (cpu/int8)"
+
+        def warmup(self):
+            pass
+
+    notifier = QuietNotifier()
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: OnCpu())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
+               tray=FakeTray(), notifier=notifier)
+    d.build()
+    d._warmup()
+    assert len(notifier.sent) == 1
+    assert notifier.sent[0][0] == "Running on CPU"
+
+    d._warmup()
+    assert len(notifier.sent) == 1, "said again on the same machine"
+    d2 = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
+                tray=FakeTray(), notifier=notifier)
+    d2.build()
+    d2._warmup()
+    assert len(notifier.sent) == 1, "said again on the next start"
+
+
+def test_a_different_reason_is_still_worth_saying(isolated_xdg, qapp, monkeypatch):
+    """Silence must be about this exact fact, not about CPU notices in general:
+    a card that breaks later says something new."""
+    reasons = iter(["no CUDA runtime in this build", "the GPU failed during transcription"])
+
+    class Changing:
+        name = "local"
+
+        def __init__(self):
+            self.fallback_reason = next(reasons)
+
+        def describe(self):
+            return "local medium (cpu/int8)"
+
+        def warmup(self):
+            pass
+
+    notifier = QuietNotifier()
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: Changing())
+    for _ in range(2):
+        d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
+                   tray=FakeTray(), notifier=notifier)
+        d.build()
+        d._warmup()
+    assert len(notifier.sent) == 2, [n[1] for n in notifier.sent]

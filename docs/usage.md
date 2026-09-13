@@ -207,6 +207,25 @@ the command line (`voice language sv`, `voice language next`), and `voice status
 which one is active. Every switch is saved to `config.toml` and applies to the next
 dictation.
 
+#### Which key voice presses to paste
+
+Terminals ignore Ctrl+V and want Ctrl+Shift+V, so voice reads the window you dictated
+into and sends whichever fits. That needs the desktop to say which window has the
+keyboard — and over a remote desktop, or into a virtual machine's window, it cannot. The
+terminal then gets Ctrl+V, ignores it, and the text stays on the clipboard with nothing
+saying so.
+
+**Paste with**, on the General tab, takes the guessing out:
+
+| choice | what it does |
+| --- | --- |
+| Work it out from the window | the default: terminal → Ctrl+Shift+V, anything else → Ctrl+V |
+| Always Ctrl+V | never guesses; ordinary programs only |
+| Always Ctrl+Shift+V | never guesses; what to pick if you mostly dictate into terminals |
+
+In `config.toml` it is `inject.paste_with = "auto" | "normal" | "terminal"`, and the two
+chords themselves stay `inject.paste_chord` and `inject.terminal_chord`.
+
 #### A short guide
 
 Four pages describing how voice is used — the shortcut, dictating, and where to change

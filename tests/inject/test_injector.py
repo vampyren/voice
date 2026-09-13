@@ -470,3 +470,50 @@ def test_no_terminal_chord_configured_means_there_is_nothing_to_be_blind_about()
 
     assert res.method == "fake" and res.chord == "ctrl+v"
     assert res.restored is True
+
+
+# -- choosing the paste chord by hand -----------------------------------------
+
+def _pasting(settings, window_class):
+    """An injector with these settings, and what it sent."""
+    sender = FakeSender()
+    inj = Injector(FakeClipboard(), sender, {**SETTINGS, **settings},
+                   lambda: False, window_class, sleep=lambda s: None)
+    return inj, sender
+
+
+def test_paste_with_can_be_locked_to_the_terminal_chord():
+    """Over a remote desktop the focused window cannot be read - the class comes
+    back empty - so a terminal always got Ctrl+V and the text went nowhere.
+    Someone who works in a terminal has to be able to say so once."""
+    inj, sender = _pasting({"paste_with": "terminal"}, lambda: "")
+    inj.inject("hello")
+    assert sender.chords, "nothing was sent"
+    assert inj.last_chord == "ctrl+shift+v"
+
+
+def test_paste_with_can_be_locked_to_the_ordinary_chord():
+    inj, sender = _pasting({"paste_with": "normal"}, lambda: "konsole")
+    inj.inject("hello")
+    assert inj.last_chord == "ctrl+v"
+
+
+def test_paste_with_auto_is_what_it_always_did():
+    inj, _ = _pasting({"paste_with": "auto"}, lambda: "konsole")
+    inj.inject("hello")
+    assert inj.last_chord == "ctrl+shift+v"
+
+
+def test_a_config_written_before_this_setting_still_detects():
+    """No key at all means the behaviour that file already had."""
+    inj, _ = _pasting({}, lambda: "konsole")
+    inj.inject("hello")
+    assert inj.last_chord == "ctrl+shift+v"
+
+
+def test_a_locked_chord_counts_as_knowing_where_it_went():
+    """The "we could not read the window" warning is about detection. Having
+    been told which chord to use, there is nothing left to be unsure about."""
+    inj, _ = _pasting({"paste_with": "terminal"}, lambda: "")
+    result = inj.inject("hello")
+    assert result.chord == "ctrl+shift+v", result

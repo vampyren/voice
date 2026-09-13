@@ -2768,3 +2768,31 @@ def test_giving_up_on_a_capture_tells_the_listener(qapp):
     dlg._start_change("dictate")                 # a second press gives up
     assert dlg._changing is None
     assert cancelled == [1]
+
+
+def test_the_paste_chord_can_be_locked_in_the_window(qapp):
+    """Over a remote desktop the focused window cannot be read, so a terminal
+    always got the chord it ignores and the dictation vanished."""
+    from voice.ui.settings import PASTE_WITH_LABELS
+
+    cfg, dlg, _ = make(qapp)
+    assert dlg.paste_with_combo.currentData() == "auto"
+    assert [dlg.paste_with_combo.itemData(i)
+            for i in range(dlg.paste_with_combo.count())] == list(PASTE_WITH_LABELS)
+
+    dlg.paste_with_combo.setCurrentIndex(dlg.paste_with_combo.findData("terminal"))
+    dlg.save_button.click()
+    again = Config.load()
+    assert again.get("inject.paste_with") == "terminal"
+    assert again.errors() == []
+
+    reopened = SettingsDialog(Config.load(), capture_key=lambda cb: None, sources=lambda: [])
+    assert reopened.paste_with_combo.currentData() == "terminal"
+
+
+def test_the_paste_chord_row_explains_itself(qapp):
+    from voice.ui.settings import HELP
+
+    assert "paste_with" in HELP
+    text = HELP["paste_with"].lower()
+    assert "terminal" in text and "remote" in text

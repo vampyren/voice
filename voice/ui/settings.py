@@ -122,6 +122,15 @@ _FIELD_LABELS = {"backend": "Where it runs", "base_url": "Service address",
 #: unchanged; what a person is shown is where the work happens.
 _BACKEND_LABELS = {"local": "On this computer", "openai_compatible": "On an online service"}
 _CLOUD_FIELDS = ["base_url", "model", "api_key", "api_key_env", "prompt"]
+#: The Paste with row, in the order it is offered. Keyed by what goes in the
+#: file; the labels name the keys, because "terminal_chord" is a setting name
+#: and Ctrl+Shift+V is the thing the owner recognises.
+PASTE_WITH_LABELS = {
+    "auto": "Work it out from the window",
+    "normal": "Always Ctrl+V",
+    "terminal": "Always Ctrl+Shift+V",
+}
+
 _LANGUAGES = [("English", "en"), ("Swedish", "sv"), ("Auto-detect", "auto")]
 
 
@@ -344,6 +353,17 @@ HELP = {
         "the next language switch puts the paired profile back.\n\n"
         "A profile has to exist before a language can point at it; add it on the "
         "Transcription tab first."),
+    "paste_with": (
+        "How voice presses paste for you.\n\n"
+        "\"Work it out\" looks at the window you were dictating into: terminals "
+        "ignore Ctrl+V and want Ctrl+Shift+V, so it sends whichever fits.\n\n"
+        "That needs the desktop to say which window has the keyboard, and over a "
+        "remote desktop - or in a virtual machine window - it cannot. A terminal "
+        "then gets Ctrl+V, which it ignores, and the text silently stays on the "
+        "clipboard.\n\n"
+        "So if you mostly dictate into a terminal, choose \"Always Ctrl+Shift+V\" "
+        "and nothing is guessed. Ordinary programs accept it too, in most cases - "
+        "but not all, which is why it is not the default."),
     "text_insertion": (
         "\"Paste automatically\" copies the text and presses Ctrl+V for you.\n\n"
         "\"Copy only\" leaves the text on the clipboard and tells you to press Ctrl+V "
@@ -1223,6 +1243,9 @@ class SettingsDialog(QDialog):
         # Connected after the items exist, and for the same reason as the language
         # combo: only a change made *here* may overwrite what the file says.
         self.inject_mode_combo.currentIndexChanged.connect(self._on_inject_mode_picked)
+        self.paste_with_combo = QComboBox()
+        for value, label in PASTE_WITH_LABELS.items():
+            self.paste_with_combo.addItem(label, value)
         # This screen in miniature, with the pill in it. Only a drag or a nudge
         # *here* may overwrite what the file says - it can be hand-edited while
         # this window sits open - so the widget stays quiet when it is merely
@@ -1287,6 +1310,7 @@ class SettingsDialog(QDialog):
         self._row(dictation, "Language", self.language_combo)
         self._row(dictation, "Notifications", self.notifications_combo)
         self._row(dictation, "Inserting text", self.inject_mode_combo, "text_insertion")
+        self._row(dictation, "Paste with", self.paste_with_combo, "paste_with")
         self._row(dictation, "Profile per language", self.language_profile_table,
                   "profile_per_language")
         self.profile_mode_label = _caption("")
@@ -1644,6 +1668,8 @@ class SettingsDialog(QDialog):
         self.set_sources(self._sources())
         self.max_seconds.setValue(int(c.get("audio.max_seconds", 120)))
         self.model_dir_edit.setText(str(c.get("stt.model_dir", "") or ""))
+        self.paste_with_combo.setCurrentIndex(
+            max(0, self.paste_with_combo.findData(c.get("inject.paste_with", "auto"))))
         # The pairing table first: the profile list is annotated from those
         # combos, and building it first read the ones this reload is about to
         # discard - so a dropped edit lived on in the other tab's labels.
@@ -2619,6 +2645,7 @@ class SettingsDialog(QDialog):
         c.set("general.language", self.language_combo.currentData())
         c.set("general.notifications", bool(self.notifications_combo.currentData()))
         c.set("inject.mode", self.inject_mode_combo.currentData())
+        c.set("inject.paste_with", self.paste_with_combo.currentData())
         c.set("hotkeys.dictate_mode", self.mode_combo.currentData())
         c.set("audio.device", self.device_combo.currentData() or "")
         c.set("audio.max_seconds", self.max_seconds.value())

@@ -137,6 +137,12 @@ hotwords = []
 mode = "paste"             # "paste" sends the paste chord; "clipboard" only copies and
                            # tells you to press Ctrl+V yourself (remote desktops, and any
                            # compositor that refuses synthetic keystrokes)
+paste_with = "auto"        # which chord to paste with: "auto" looks at the focused
+                           # window and uses terminal_chord for a terminal;
+                           # "normal" always sends paste_chord; "terminal" always
+                           # sends terminal_chord. Lock it where the focused window
+                           # cannot be read - over a remote desktop, say - and a
+                           # terminal would otherwise always get the wrong one.
 paste_chord = "ctrl+v"
 terminal_chord = "ctrl+shift+v"
 terminal_classes = ["konsole", "org.kde.konsole", "kitty", "alacritty", "foot", "wezterm", "org.gnome.Ptyxis", "gnome-terminal"]

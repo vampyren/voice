@@ -146,6 +146,12 @@ hotwords = []
 mode = "paste"             # "paste" sends the paste chord; "clipboard" only copies and
                            # tells you to press Ctrl+V yourself (remote desktops, and any
                            # compositor that refuses synthetic keystrokes)
+paste_with = "auto"        # which chord to paste with: "auto" looks at the focused
+                           # window and uses terminal_chord for a terminal;
+                           # "normal" always sends paste_chord; "terminal" always
+                           # sends terminal_chord. Lock it where the focused window
+                           # cannot be read - over a remote desktop, say - and a
+                           # terminal would otherwise always get the wrong one.
 paste_chord = "ctrl+v"
 terminal_chord = "ctrl+shift+v"
 terminal_classes = ["konsole", "org.kde.konsole", "kitty", "alacritty", "foot", "wezterm", "org.gnome.Ptyxis", "gnome-terminal"]
@@ -173,6 +179,8 @@ DEFAULT_PORTAL_TRIGGERS = {"dictate": "CTRL+space", "recall": "", "cancel": "",
 _VALID_MODES = {"hold", "toggle"}
 #: `inject.mode`: send the paste chord, or leave the text on the clipboard and say so.
 INJECT_MODES = ("paste", "clipboard")
+#: `inject.paste_with`: detect the window, or always use one of the two chords.
+PASTE_WITH = ("auto", "normal", "terminal")
 #: `inject.pill_focus`: see PILL_FOCUS_CHOICES, and the README's GNOME section.
 DEFAULT_PILL_SETTLE_MS = 150
 _VALID_HOTKEY_BACKENDS = {"auto", "evdev", "portal"}
@@ -426,6 +434,12 @@ class Config:
         inject_mode = self.get("inject.mode", "paste")
         if inject_mode not in INJECT_MODES:
             errs.append(f"inject.mode must be one of {sorted(INJECT_MODES)}, got {inject_mode!r}")
+        # Absent in a config written before this existed: that file detects, as
+        # it always did.
+        paste_with = self.get("inject.paste_with", "auto")
+        if paste_with not in PASTE_WITH:
+            errs.append(f"inject.paste_with must be one of {sorted(PASTE_WITH)}, "
+                        f"got {paste_with!r}")
         pill_focus = self.get("inject.pill_focus", "hide")
         if pill_focus not in PILL_FOCUS_CHOICES:
             errs.append(f"inject.pill_focus must be one of {sorted(PILL_FOCUS_CHOICES)}, "

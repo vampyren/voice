@@ -46,7 +46,11 @@ MIN_SETTINGS_SIZE = 320
 
 #: Spare pixels under the pairing table's rows. Styles disagree about how tall
 #: a combo in a table cell is, and being a few short clips the last row.
-TABLE_SLACK = 14
+TABLE_SLACK = 12
+
+#: Added to every row of that table. A combo in a table cell is drawn with its
+#: own frame on some styles and the row has to hold all of it.
+ROW_PADDING = 6
 
 #: The two the shipped config uses, and what we suggest to anyone who has not
 #: measured their own machine: the best of each family. Marked in the list so
@@ -1190,6 +1194,9 @@ class SettingsDialog(QDialog):
         """
         super().showEvent(event)
         self.retint_all()
+        # And now the real row heights are known, which they are not while the
+        # window is being built.
+        self._fit_pairing_table()
 
     def changeEvent(self, event) -> None:
         """A palette set on this window has to be passed on by hand.
@@ -1768,28 +1775,7 @@ class SettingsDialog(QDialog):
         # measured after the combos are in them - a row still holding only its
         # default height reports about half what the combo will need, which is
         # what squashed this table to a row and a half.
-        table.resizeRowsToContents()
-        # Each row set to what it actually needs, and only then summed. Summing
-        # what the rows *would* be while leaving them to lay themselves out let
-        # the total come up short by a few pixels a row, and the last row was
-        # then clipped by the group's frame with the caption on top of it.
-        rows = 0
-        for r in range(table.rowCount()):
-            widget = table.cellWidget(r, 1)
-            height = max(table.rowHeight(r),
-                         widget.sizeHint().height() if widget else 0,
-                         widget.minimumSizeHint().height() if widget else 0)
-            table.setRowHeight(r, height)
-            rows += height
-        # A little slack, and a floor rather than only a ceiling. The exact sum
-        # is right on the style this was measured on and a few pixels short on
-        # Breeze, where the last row was clipped by the group's frame with the
-        # caption sitting on top of it. Slack costs nothing; clipping hides a
-        # language.
-        needed = (table.horizontalHeader().sizeHint().height() + rows
-                  + 2 * table.frameWidth() + TABLE_SLACK)
-        table.setMinimumHeight(needed)
-        table.setFixedHeight(needed)
+        self._fit_pairing_table()
         self._loading_language_profiles = False
 
     def _on_language_picked(self, index: int) -> None:
@@ -1892,6 +1878,32 @@ class SettingsDialog(QDialog):
             self._show_profile(row)           # a different profile: rebuild the form
         else:
             self._refresh_profile_buttons()   # the same one: only the labels moved
+
+    def _fit_pairing_table(self) -> None:
+        """Make the table exactly tall enough for every row, and then some.
+
+        Recomputed whenever it is rebuilt *and* once the window is shown: before
+        that the style has not laid the combos out, so their heights are a guess
+        - and being a few pixels short clips the last row behind the group's
+        frame, which is how a language disappeared on Breeze twice.
+        """
+        table = self.language_profile_table
+        table.resizeRowsToContents()
+        rows = 0
+        for r in range(table.rowCount()):
+            widget = table.cellWidget(r, 1)
+            # Every term here is content-derived and stable. Feeding the row's
+            # *current* height back in made it grow by ROW_PADDING on every
+            # call, and this runs again each time the window is shown.
+            height = max(table.sizeHintForRow(r),
+                         widget.sizeHint().height() if widget else 0,
+                         widget.minimumSizeHint().height() if widget else 0) + ROW_PADDING
+            table.setRowHeight(r, height)
+            rows += height
+        needed = (table.horizontalHeader().sizeHint().height() + rows
+                  + 2 * table.frameWidth() + TABLE_SLACK)
+        table.setMinimumHeight(needed)
+        table.setFixedHeight(needed)
 
     def _on_pairing_picked(self) -> None:
         if self._loading_language_profiles:

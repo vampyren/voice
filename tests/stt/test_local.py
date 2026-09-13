@@ -81,7 +81,7 @@ def test_the_model_dir_survives_the_cpu_fallback():
     # The CPU build also gets its thread count; the card does not.
     assert FakeModel.kwargs == [{"download_root": "/srv/models"},
                                 {"download_root": "/srv/models",
-                                 "cpu_threads": os.cpu_count()}]
+                                 "cpu_threads": len(os.sched_getaffinity(0))}]
 
 
 #: Every model name this project ships: the profiles in DEFAULT_CONFIG and the
@@ -425,6 +425,20 @@ def test_a_processor_failure_is_not_retried_for_ever(monkeypatch):
     assert len(FakeModel.calls) == 1, FakeModel.calls
 
 
+def test_the_thread_count_respects_an_affinity_mask(monkeypatch):
+    """`os.cpu_count()` reports the machine, not what this process may use.
+
+    Started under `taskset`, or inside a container with a CPU limit, asking for
+    every core on the box means threads fighting over the few that are allowed.
+    """
+    monkeypatch.setattr("voice.stt.local.os.cpu_count", lambda: 32)
+    monkeypatch.setattr("voice.stt.local.os.sched_getaffinity", lambda pid: set(range(8)))
+    t = LocalTranscriber({"model": "medium", "device": "cpu", "compute_type": "int8"},
+                         model_factory=FakeModel, cuda_available=lambda: False)
+    t.warmup()
+    assert FakeModel.kwargs == [{"cpu_threads": 8}]
+
+
 def test_the_processor_gets_every_core_by_default():
     """faster-whisper uses four threads unless told otherwise - "Number of
     threads to use when running on CPU (4 by default)" - so a 16-core machine
@@ -434,7 +448,7 @@ def test_the_processor_gets_every_core_by_default():
     t = LocalTranscriber({"model": "medium", "device": "cpu", "compute_type": "int8"},
                          model_factory=FakeModel, cuda_available=lambda: False)
     t.warmup()
-    assert FakeModel.kwargs == [{"cpu_threads": os.cpu_count()}]
+    assert FakeModel.kwargs == [{"cpu_threads": len(os.sched_getaffinity(0))}]
 
 
 def test_a_thread_count_can_be_set_by_hand():

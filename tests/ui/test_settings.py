@@ -2817,3 +2817,30 @@ def test_the_pairing_table_is_tall_enough_for_its_last_row(qapp):
     combo = table.cellWidget(table.rowCount() - 1, 1)
     assert combo.geometry().bottom() <= table.viewport().height(), (
         "the last combo hangs out of the table")
+
+
+def test_fitting_the_pairing_table_twice_does_not_grow_it(qapp):
+    """It runs when the table is rebuilt and again when the window is shown, so
+    it has to land on the same answer both times - measuring the row's current
+    height fed the result back in and it grew on every call."""
+    cfg, dlg, _ = make(qapp)
+    dlg.show()
+    qapp.processEvents()
+    first = dlg.language_profile_table.height()
+    for _ in range(5):
+        dlg._fit_pairing_table()
+    assert dlg.language_profile_table.height() == first
+
+
+def test_every_pairing_row_has_room_for_its_dropdown(qapp):
+    """Twice now the last row has been clipped by the group's frame on Breeze."""
+    cfg, dlg, _ = make(qapp)
+    dlg.show()
+    qapp.processEvents()
+    table = dlg.language_profile_table
+    for r in range(table.rowCount()):
+        combo = table.cellWidget(r, 1)
+        assert table.rowHeight(r) >= combo.sizeHint().height(), f"row {r} is too short"
+    used = table.horizontalHeader().sizeHint().height() + sum(
+        table.rowHeight(r) for r in range(table.rowCount()))
+    assert table.height() >= used, f"{table.height()}px of table for {used}px of rows"

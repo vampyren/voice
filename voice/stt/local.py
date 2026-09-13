@@ -16,6 +16,19 @@ from voice.stt.base import Transcript, TranscriptionError
 log = logging.getLogger(__name__)
 
 
+def _usable_cores() -> int:
+    """Cores this process may actually run on.
+
+    `os.cpu_count()` describes the machine, not the process: under `taskset` or
+    a container CPU limit it over-reports, and asking for more threads than
+    there are cores to put them on makes transcription slower, not faster.
+    """
+    try:
+        return len(os.sched_getaffinity(0)) or 4
+    except (AttributeError, OSError):       # not Linux, or not permitted
+        return os.cpu_count() or 4
+
+
 def _is_cpu(device: str) -> bool:
     """Is this device definitely not a GPU?
 
@@ -128,7 +141,7 @@ class LocalTranscriber:
                 wanted = int(wanted)
             except (TypeError, ValueError):
                 wanted = 0
-            extra["cpu_threads"] = wanted if wanted > 0 else (os.cpu_count() or 4)
+            extra["cpu_threads"] = wanted if wanted > 0 else _usable_cores()
         log.info("loading %s on %s/%s%s", name, device, compute,
                  f" from {where}" if where else "")
         model = self._factory(name, device, compute, **extra)

@@ -2880,15 +2880,48 @@ def test_the_core_count_explains_that_zero_means_all(qapp):
     assert "processor" in text or "cpu" in text
 
 
-def test_the_downloaded_models_group_can_check_for_updates(qapp):
-    """voice asked huggingface on every language switch. Now it asks when the
-    owner asks, and the button is where the models already are."""
-    asked = []
+def test_checking_lists_what_it_found(qapp):
+    """"I want to check and see what has updated" - so the check reports, and
+    downloads nothing."""
+    from voice.models import UPDATE_AVAILABLE, UP_TO_DATE
+
     dlg = SettingsDialog(Config.load(), capture_key=lambda cb: None, sources=lambda: [],
-                         check_models=lambda: asked.append(1) or {"ok": True})
+                         check_models=lambda: {
+                             "ok": True, "updatable": True,
+                             "models": [["large-v3", UP_TO_DATE],
+                                        ["KBLab/kb-whisper-large", UPDATE_AVAILABLE]]},
+                         update_models=lambda: {"ok": True})
     dlg.check_models_button.click()
-    assert asked == [1]
-    assert dlg.model_dir_note.text(), "it said nothing about what it was doing"
+    note = dlg.model_dir_note.text()
+    assert "large-v3" in note and UP_TO_DATE in note
+    assert "KBLab/kb-whisper-large" in note and UPDATE_AVAILABLE in note
+    assert dlg.update_models_button.isEnabled(), "something to update, and no way to"
+
+
+def test_nothing_to_update_leaves_the_update_button_alone(qapp):
+    from voice.models import UP_TO_DATE
+
+    dlg = SettingsDialog(Config.load(), capture_key=lambda cb: None, sources=lambda: [],
+                         check_models=lambda: {"ok": True, "updatable": False,
+                                               "models": [["large-v3", UP_TO_DATE]]})
+    dlg.check_models_button.click()
+    assert not dlg.update_models_button.isEnabled()
+
+
+def test_updating_is_a_second_press(qapp):
+    """Checking says what changed; updating spends the gigabytes. Two buttons."""
+    from voice.models import UPDATE_AVAILABLE
+
+    updated = []
+    dlg = SettingsDialog(Config.load(), capture_key=lambda cb: None, sources=lambda: [],
+                         check_models=lambda: {"ok": True, "updatable": True,
+                                               "models": [["large-v3", UPDATE_AVAILABLE]]},
+                         update_models=lambda: updated.append(1) or {"ok": True})
+    dlg.check_models_button.click()
+    assert updated == [], "checking must not download"
+    dlg.update_models_button.click()
+    assert updated == [1]
+    assert "download" in dlg.model_dir_note.text().lower()
 
 
 def test_a_refusal_from_the_daemon_is_shown_not_swallowed(qapp):
@@ -2896,6 +2929,16 @@ def test_a_refusal_from_the_daemon_is_shown_not_swallowed(qapp):
                          check_models=lambda: {"ok": False, "reason": "transcribes online"})
     dlg.check_models_button.click()
     assert "transcribes online" in dlg.model_dir_note.text()
+
+
+def test_the_window_says_which_voice_is_running(qapp):
+    """Two versions on one machine - a package and a checkout - look identical
+    from inside the window."""
+    from voice import __version__
+
+    cfg, dlg, _ = make(qapp)
+    assert __version__ in dlg.version_label.text()
+    assert "voice" in dlg.version_label.text().lower()
 
 
 def test_the_button_is_absent_when_no_daemon_is_listening(qapp):

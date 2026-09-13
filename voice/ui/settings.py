@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFormLayout, QG
                                QTableWidgetItem, QTabWidget,
                                QFileDialog, QToolButton, QToolTip, QVBoxLayout, QWidget)
 
+from voice import __version__
 from voice.audio.capture import Source
 from voice.config import INJECT_MODES, Config, is_language_code
 from voice.hotkey.desktop_shortcuts import (PUNCTUATION_KEYSYMS, PUNCTUATION_NAMES,
@@ -1037,7 +1038,7 @@ class SettingsDialog(QDialog):
                  sources: Callable[[], list[Source]], parent=None, backend: str = "evdev",
                  triggers: Callable[[], dict[str, str]] | None = None,
                  shortcut_store: Callable[[], object | None] = desktop_shortcut_store,
-                 preview_pill: Callable[[str, int, int], dict] | None = None, cancel_capture: Callable[[], None] | None = None, check_models: Callable[[], dict] | None = None):
+                 preview_pill: Callable[[str, int, int], dict] | None = None, cancel_capture: Callable[[], None] | None = None, check_models: Callable[[], dict] | None = None, update_models: Callable[[], dict] | None = None):
         super().__init__(parent)
         self._backend = backend
         #: Asks the daemon to show the real pill at a placement for a few
@@ -1065,6 +1066,10 @@ class SettingsDialog(QDialog):
         #: when this window was opened without one, and the button says so by
         #: being unpressable rather than by failing when pressed.
         self._check_models = check_models
+        #: Downloads whatever the check found. Separate from the check because
+        #: "tell me what changed" and "spend three gigabytes" are different
+        #: decisions, and the owner asked for them to be different buttons.
+        self._update_models = update_models
         #: Capture waits for a key, and every way of leaving this window presses
         #: something - so it has to end on its own as well.
         self._capture_timeout = QTimer(self)
@@ -1110,7 +1115,9 @@ class SettingsDialog(QDialog):
         self.save_button.clicked.connect(self._save)
         close = QPushButton("Close")
         close.clicked.connect(self.close)
+        self.version_label = _caption(f"voice {__version__}")
         buttons = QHBoxLayout()
+        buttons.addWidget(self.version_label)
         buttons.addStretch()
         buttons.addWidget(self.save_button)
         buttons.addWidget(close)
@@ -1593,12 +1600,18 @@ class SettingsDialog(QDialog):
             "Nothing else in voice reaches for the network once a model is here.")
         self.check_models_button.clicked.connect(self._ask_for_model_update)
         self.check_models_button.setEnabled(self._check_models is not None)
+        self.update_models_button = QPushButton("Update")
+        self.update_models_button.setToolTip(
+            "Download the newer model the check found. Several gigabytes.")
+        self.update_models_button.clicked.connect(self._ask_for_model_download)
+        self.update_models_button.setEnabled(False)
         self.model_dir_note = _caption("")
         row = QHBoxLayout()
         row.setSpacing(ROW_SPACING // 2)
         row.addWidget(self.model_dir_edit, 1)
         row.addWidget(self.model_dir_button)
         row.addWidget(self.check_models_button)
+        row.addWidget(self.update_models_button)
         box = QVBoxLayout()
         box.setSpacing(ROW_SPACING)
         box.addWidget(self._with_help(
@@ -1610,22 +1623,50 @@ class SettingsDialog(QDialog):
         return box
 
     def _ask_for_model_update(self) -> None:
-        """Press the button, say what happened. Never raise out of a click."""
+        """Look, and say what was found. Never raise out of a click."""
         if self._check_models is None:
             return
-        try:
-            reply = self._check_models() or {}
-        except Exception as exc:
-            log.debug("the update check could not be asked for", exc_info=True)
-            self.model_dir_note.setText(f"Could not ask: {exc}")
+        reply = self._ask(self._check_models)
+        if reply is None:
             return
-        if reply.get("ok"):
-            self.model_dir_note.setText(
-                "Checking for a newer model. It loads again in the background, "
-                "and the next dictation uses whatever it found.")
-        else:
+        if not reply.get("ok"):
+            self.update_models_button.setEnabled(False)
             self.model_dir_note.setText(
                 str(reply.get("reason") or "The check was refused."))
+            return
+        found = reply.get("models") or []
+        self.model_dir_note.setText(
+            "; ".join(f"{model}: {state}" for model, state in found)
+            or "Nothing on this computer to check.")
+        # Only offered when there is something to fetch: a button that would
+        # download nothing is a button that looks like it failed.
+        self.update_models_button.setEnabled(
+            bool(reply.get("updatable")) and self._update_models is not None)
+
+    def _ask_for_model_download(self) -> None:
+        """The second press: this is the one that spends the bandwidth."""
+        if self._update_models is None:
+            return
+        reply = self._ask(self._update_models)
+        if reply is None:
+            return
+        if reply.get("ok"):
+            self.update_models_button.setEnabled(False)
+            self.model_dir_note.setText(
+                "Downloading. It loads again in the background, and the next "
+                "dictation uses the new one.")
+        else:
+            self.model_dir_note.setText(
+                str(reply.get("reason") or "The update was refused."))
+
+    def _ask(self, call: Callable[[], dict]) -> dict | None:
+        """Call the daemon, and put a failure on screen instead of raising."""
+        try:
+            return call() or {}
+        except Exception as exc:
+            log.debug("the daemon could not be asked", exc_info=True)
+            self.model_dir_note.setText(f"Could not ask: {exc}")
+            return None
 
     def _pick_model_dir(self) -> None:
         chosen = QFileDialog.getExistingDirectory(

@@ -3748,49 +3748,64 @@ def test_a_different_reason_is_still_worth_saying(isolated_xdg, qapp, monkeypatc
     assert len(notifier.sent) == 2, [n[1] for n in notifier.sent]
 
 
-def test_checking_for_model_updates_is_asked_for_not_automatic(isolated_xdg, qapp, monkeypatch):
-    """Every language switch used to ask huggingface whether the cached model
-    was current. Now nothing does, unless the owner presses the button."""
-    refreshed = []
-
-    class Refreshable:
-        name = "local"
-        fallback_reason = None
-
-        def describe(self):
-            return "local medium (cpu/int8)"
-
-        def refresh(self):
-            refreshed.append(1)
-
-        def warmup(self):
-            pass
-
-    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: Refreshable())
-    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
-               tray=FakeTray(), notifier=QuietNotifier())
-    d.build()
-    assert d.handle({"cmd": "check_models"}) == {"ok": True}
-    qapp.processEvents()
-    assert refreshed == [1]
-
-
-def test_a_backend_with_nothing_to_check_says_so(isolated_xdg, qapp, monkeypatch):
-    """A cloud profile has no model on this machine to update."""
-    class Cloud:
-        name = "openai_compatible"
-        fallback_reason = None
-
-        def describe(self):
-            return "openai gpt-transcribe"
-
-        def warmup(self):
-            pass
-
-    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: Cloud())
+def test_a_machine_with_no_local_model_has_nothing_to_check(isolated_xdg, qapp, monkeypatch):
+    """Every profile online: there is no model here to compare against."""
+    cfg = Config.load()
+    cfg.set("stt.active", "openai")
+    cfg.set("general.language_profiles", {})
+    cfg.save()
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "openai_compatible", "describe": lambda self: "x",
+        "warmup": lambda self: None})())
     d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
                tray=FakeTray(), notifier=QuietNotifier())
     d.build()
     reply = d.handle({"cmd": "check_models"})
-    assert reply["ok"] is False
-    assert "nothing" in reply.get("reason", "").lower()
+    assert reply["ok"] is False and "nothing" in reply["reason"].lower()
+
+def test_checking_reports_every_model_without_downloading(isolated_xdg, qapp, monkeypatch):
+    """Two buttons, two jobs: this one only looks."""
+    from voice.models import UPDATE_AVAILABLE, UP_TO_DATE
+
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "local", "describe": lambda self: "x", "warmup": lambda self: None,
+        "refresh": lambda self: None})())
+    monkeypatch.setattr("voice.daemon.update_status",
+                        lambda models: [("large-v3", UP_TO_DATE, "aaa"),
+                                        ("KBLab/kb-whisper-large", UPDATE_AVAILABLE, "bbb")])
+    warmed = []
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
+               tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    monkeypatch.setattr(d, "_start_warmup", lambda: warmed.append(1))
+
+    reply = d.handle({"cmd": "check_models"})
+    assert reply["ok"] is True
+    assert reply["models"] == [["large-v3", UP_TO_DATE], ["KBLab/kb-whisper-large", UPDATE_AVAILABLE]]
+    assert reply["updatable"] is True
+    assert warmed == [], "checking must not reload anything"
+
+
+def test_updating_is_the_other_button(isolated_xdg, qapp, monkeypatch):
+    refreshed, warmed = [], []
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "local", "describe": lambda self: "x", "warmup": lambda self: None,
+        "refresh": lambda self: refreshed.append(1)})())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
+               tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    monkeypatch.setattr(d, "_start_warmup", lambda: warmed.append(1))
+
+    assert d.handle({"cmd": "update_models"}) == {"ok": True}
+    assert refreshed == [1] and warmed == [1]
+
+
+def test_updating_a_cloud_profile_says_there_is_nothing_to_update(isolated_xdg, qapp, monkeypatch):
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "openai_compatible", "describe": lambda self: "x",
+        "warmup": lambda self: None})())
+    d = Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
+               tray=FakeTray(), notifier=QuietNotifier())
+    d.build()
+    reply = d.handle({"cmd": "update_models"})
+    assert reply["ok"] is False and "nothing" in reply["reason"].lower()

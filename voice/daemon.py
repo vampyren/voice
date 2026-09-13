@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QObject, Signal
@@ -24,6 +25,7 @@ from voice.inject.fallback import make_key_sender
 from voice.inject.injector import (BLIND_PASTE, WINDOW_COMMAND_TIMEOUT_S, Injector,
                                    insertion_status, pill_policy, pill_settle_s,
                                    run_window_command)
+from voice.models import UPDATE_AVAILABLE, update_status
 from voice.inject.kwin import KWinWindowReader
 from voice.inject.window import (effective_window_command, is_plasma,
                                  terminal_chord_is_unreachable)
@@ -1427,20 +1429,51 @@ class Daemon:
             log.debug("could not remember the CPU notice", exc_info=True)
         return True
 
-    def _check_models(self) -> dict:
-        """Ask huggingface whether there is a newer copy of the active model.
+    def _local_models(self) -> list[tuple[str, object]]:
+        """Every local model a language here could reach, with its folder."""
+        profiles = self.config.get("stt.profiles", {}) or {}
+        names = [self.config.get("stt.active")]
+        names += list(self.config.language_profiles().values())
+        shared = self.config.model_dir()
+        out: list[tuple[str, object]] = []
+        for name in names:
+            profile = profiles.get(name)
+            if not isinstance(profile, dict) or profile.get("backend") != "local":
+                continue
+            own = str(profile.get("model_dir") or "").strip()
+            entry = (str(profile.get("model", "")).strip(),
+                     Path(own) if own else shared)
+            if entry[0] and entry not in out:
+                out.append(entry)
+        return out
 
-        The one thing in voice that reaches for the network on purpose once a
-        model is on the disk, and it happens because somebody pressed a button.
-        The load itself runs on the warmup thread: it can take a while, and the
-        IPC caller is a settings window waiting for an answer.
+    def _check_models(self) -> dict:
+        """What is on this machine, against what huggingface publishes now.
+
+        Downloads nothing: it compares the commit recorded beside the files with
+        the one the hub reports. Updating is a separate button, because "tell me
+        what changed" and "spend three gigabytes" are different decisions.
         """
-        transcriber = self.dictation.sv.transcriber
-        refresh = getattr(transcriber, "refresh", None)
-        if refresh is None:
+        models = self._local_models()
+        if not models:
             return {"ok": False,
                     "reason": "nothing to check: this profile transcribes online, "
                               "so there is no model on this computer to update"}
+        report = update_status(models)
+        return {"ok": True,
+                "models": [[model, state] for model, state, _ in report],
+                "updatable": any(state == UPDATE_AVAILABLE for _, state, _ in report)}
+
+    def _update_models(self) -> dict:
+        """Fetch whatever the check found. This is the one that downloads.
+
+        The load runs on the warmup thread: it can take a long time, and the
+        caller is a settings window waiting for an answer.
+        """
+        refresh = getattr(self.dictation.sv.transcriber, "refresh", None)
+        if refresh is None:
+            return {"ok": False,
+                    "reason": "nothing to update: this profile transcribes online"}
         refresh()
         self._start_warmup()
         return {"ok": True}
@@ -1684,6 +1717,8 @@ class Daemon:
                                                 cancel_capture=self.listener.cancel_capture,
                                                 check_models=lambda: self.handle(
                                                     {"cmd": "check_models"}),
+                                                update_models=lambda: self.handle(
+                                                    {"cmd": "update_models"}),
                                                 backend=self.hotkey_backend,
                                                 triggers=self.effective_triggers,
                                                 preview_pill=self._ask_for_preview)
@@ -1761,6 +1796,8 @@ class Daemon:
             return {"ok": True}
         if cmd == "check_models":
             return self._check_models()
+        if cmd == "update_models":
+            return self._update_models()
         if cmd in simple:
             simple[cmd]()
             return {"ok": True, "state": d.state.value}

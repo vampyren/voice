@@ -51,3 +51,55 @@ def first_existing(path: Path) -> Path:
         if candidate.exists():
             return candidate
     return path
+
+
+#: What a check can conclude about one model.
+UP_TO_DATE = "up to date"
+UPDATE_AVAILABLE = "update available"
+NOT_DOWNLOADED = "not downloaded"
+UNKNOWN = "could not check"
+
+
+def local_revision(model: str, root: Path | None) -> str | None:
+    """The revision of the copy on this machine, or None if there is none.
+
+    huggingface_hub writes the commit it fetched into `refs/main` beside the
+    files. Reading it costs nothing and touches no model data.
+    """
+    try:
+        return (hub_directory(model, root) / "refs" / "main").read_text().strip() or None
+    except OSError:
+        return None
+
+
+def remote_revision(model: str) -> str:
+    """The revision huggingface currently publishes. Metadata only."""
+    from huggingface_hub import HfApi
+
+    return HfApi().model_info(hub_repository(model), revision="main").sha
+
+
+def update_status(models: list[tuple[str, Path | None]]) -> list[tuple[str, str, str | None]]:
+    """For each (model, folder): what it is, and the revision published now.
+
+    Downloads nothing - it compares the commit recorded beside the files with
+    the one the hub reports. "could not check" is kept distinct from "up to
+    date": saying the second when the network is down is how a stale model goes
+    unnoticed for ever.
+    """
+    out = []
+    for model, root in models:
+        here = local_revision(model, root)
+        try:
+            there = remote_revision(model)
+        except Exception:
+            out.append((model, UNKNOWN, None))
+            continue
+        if here is None:
+            out.append((model, NOT_DOWNLOADED, there))
+        elif here == there:
+            out.append((model, UP_TO_DATE, there))
+        else:
+            out.append((model, UPDATE_AVAILABLE, there))
+    return out
+

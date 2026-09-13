@@ -9,7 +9,8 @@ from html import escape
 from typing import Callable, Iterable
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QKeySequence, QPalette, QRegion
+from PySide6.QtGui import (QColor, QGuiApplication, QImage, QKeySequence, QPalette,
+                           QRegion)
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFormLayout, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
                                QListWidgetItem, QSizePolicy, QSpinBox, QTableWidget,
@@ -1067,12 +1068,23 @@ class SettingsDialog(QDialog):
 
     # -- the pieces every tab is built from -----------------------------------
     def _restore_size(self) -> None:
-        """The size this window was last closed at, if it is a usable one."""
+        """The size this window was last closed at, if it is a usable one.
+
+        Clamped to the screen it is opening on, not only to a floor: a size
+        stored while maximised on a 4K monitor reopened at 3840x2160 on a
+        laptop, with the Save and Close row below the bottom of the display and
+        nothing on X11 to pull it back.
+        """
         width = self._cfg.get("ui.settings_width")
         height = self._cfg.get("ui.settings_height")
-        if all(isinstance(v, int) and not isinstance(v, bool) and v >= MIN_SETTINGS_SIZE
-               for v in (width, height)):
-            self.resize(width, height)
+        if not all(isinstance(v, int) and not isinstance(v, bool) and v >= MIN_SETTINGS_SIZE
+                   for v in (width, height)):
+            return
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is not None:
+            room = screen.availableGeometry()
+            width, height = min(width, room.width()), min(height, room.height())
+        self.resize(width, height)
 
     def _form(self, parent: QWidget | None = None) -> QFormLayout:
         """One form layout, spaced and aligned like every other one here."""
@@ -1098,14 +1110,21 @@ class SettingsDialog(QDialog):
         form.addRow(label, field if help_key is None
                     else self._with_help(field, help_key, HELP[help_key]))
 
-    def _with_help(self, field: QWidget, key: str, text: str) -> QWidget:
+    def _with_help(self, field: QWidget, key: str, text: str,
+                   register: bool = True) -> QWidget:
         """`field` with a circled "?" after it, as one widget the form can take.
 
         The "?" ends up in the same place on every row, so the buttons read as
         a column rather than as decoration stuck to each field.
+
+        `register` is False for a row that gets rebuilt - the profile form,
+        whose widgets are destroyed when another profile is selected. Kept in
+        the dialog-wide dict, those keys went on pointing at deleted C++
+        objects, and anything iterating it afterwards raised.
         """
         button = HelpButton(text)
-        self.help_buttons[key] = button
+        if register:
+            self.help_buttons[key] = button
         holder = QWidget()
         row = QHBoxLayout(holder)
         row.setContentsMargins(0, 0, 0, 0)
@@ -1154,10 +1173,10 @@ class SettingsDialog(QDialog):
         """Re-read the file and repopulate every widget, discarding unsaved edits."""
         self._cfg = Config.load(self._cfg.path)
         self._current_profile = None       # so repopulating cannot commit stale form values
-        # And neither may the profile "Use this profile" chose but never saved.
-        # Left set, the list marked the wrong row "in use" and - because Remove
-        # refuses whatever is in use - offered to delete the profile that really
-        # was, leaving stt.active naming nothing and every later save blocked.
+        # Rebuilding the pairing table fires every combo's signal, which is not
+        # somebody changing a pairing. (The comment that used to sit here
+        # described clearing a remembered active profile; there is no such flag
+        # any more - `_active_profile_name()` reads the config.)
         self._loading_language_profiles = False
         self._active_changed = False
         self._language_changed = False
@@ -1860,7 +1879,9 @@ class SettingsDialog(QDialog):
         """
         paired = [code for code, name in self._pairings_now().items() if name]
         if paired:
-            names = ", ".join(language_name(code) for code in sorted(paired))
+            named = [language_name(code) for code in sorted(paired)]
+            names = " and ".join([", ".join(named[:-1]), named[-1]] if len(named) > 1
+                                 else named)
             text = (f"Switching to {names} also switches the model. "
                     f'"Use this profile" on the Transcription tab overrides that '
                     f"until the next language switch.")
@@ -1950,9 +1971,9 @@ class SettingsDialog(QDialog):
             # A cloud profile's Model row wants the name that service uses, so
             # the nine local Whisper models behind the shared "?" are wrong there.
             key = ("cloud_model" if field == "model" and kind != "local" else field)
-            row = self._with_help(edit, key, HELP[key])
-            self.profile_help_buttons[field] = row.findChild(QToolButton)
-            self._form_layout.addRow(_FIELD_LABELS.get(field, field), row)
+            labelled = self._with_help(edit, key, HELP[key], register=False)
+            self.profile_help_buttons[field] = labelled.findChild(QToolButton)
+            self._form_layout.addRow(_FIELD_LABELS.get(field, field), labelled)
         self._refresh_profile_buttons()
 
     def _commit_profile_form(self) -> bool:
@@ -2366,12 +2387,19 @@ class SettingsDialog(QDialog):
         never allowed to stop the window closing.
         """
         try:
+            width, height = int(self.width()), int(self.height())
+            if (self._cfg.get("ui.settings_width"), self._cfg.get("ui.settings_height")) \
+                    == (width, height):
+                # Already recorded. Closing runs this twice - closeEvent, then
+                # reject() -> done() underneath it - and each write is a whole
+                # file rewritten, fsynced and replaced.
+                return
             fresh = Config.load(self._cfg.path)
-            fresh.set("ui.settings_width", int(self.width()))
-            fresh.set("ui.settings_height", int(self.height()))
+            fresh.set("ui.settings_width", width)
+            fresh.set("ui.settings_height", height)
             fresh.save()
-            self._cfg.set("ui.settings_width", int(self.width()))
-            self._cfg.set("ui.settings_height", int(self.height()))
+            self._cfg.set("ui.settings_width", width)
+            self._cfg.set("ui.settings_height", height)
         except Exception:
             log.debug("could not remember the settings window size", exc_info=True)
 

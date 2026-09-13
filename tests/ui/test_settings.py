@@ -2379,7 +2379,13 @@ def test_the_window_remembers_how_big_it_was(qapp):
 
     reopened = SettingsDialog(Config.load(), capture_key=lambda cb: None,
                               sources=lambda: [])
-    assert (reopened.width(), reopened.height()) == (1100, 820)
+    # Clamped to the screen it opens on, so the expected size depends on the
+    # display the suite is running against - 800x800 under xvfb.
+    from PySide6.QtGui import QGuiApplication
+
+    room = QGuiApplication.primaryScreen().availableGeometry()
+    assert (reopened.width(), reopened.height()) == (min(1100, room.width()),
+                                                     min(820, room.height()))
 
 
 # -- what "Use this profile" is actually for ----------------------------------
@@ -2634,3 +2640,68 @@ def test_the_add_button_goes_quiet_when_there_is_nothing_left_to_add(qapp):
         dlg.add_profile_button.click()
     assert dlg.add_profile_combo.count() == 0
     assert not dlg.add_profile_button.isEnabled()
+
+
+# -- the fourth review round --------------------------------------------------
+
+def test_closing_the_window_writes_the_file_once(qapp):
+    """Finding 2. closeEvent called the cleanup, then super() reached reject()
+    -> done(), which called it again: two whole-file rewrites per close."""
+    writes = []
+    cfg, dlg, _ = make(qapp)
+    real = Config.save
+
+    def counted(self):
+        writes.append(self.path)
+        return real(self)
+
+    Config.save = counted
+    try:
+        dlg.show()                 # shown, like the window the owner closes
+        dlg.resize(880, 690)
+        dlg.close()
+    finally:
+        Config.save = real
+    assert len(writes) == 1, f"{len(writes)} rewrites for one close"
+    again = Config.load()
+    assert (again.get("ui.settings_width"), again.get("ui.settings_height")) == (880, 690)
+
+
+def test_a_size_from_a_bigger_screen_does_not_open_off_the_bottom(qapp):
+    """Finding 3. Maximise on a 4K monitor, reopen on a laptop, and the Save
+    and Close row sits below the visible area. MIN_SETTINGS_SIZE's docstring
+    promised a stored size could not make settings unopenable."""
+    from PySide6.QtGui import QGuiApplication
+
+    available = QGuiApplication.primaryScreen().availableGeometry()
+    external = Config.load()
+    external.set("ui.settings_width", available.width() * 3)
+    external.set("ui.settings_height", available.height() * 3)
+    external.save()
+
+    dlg = SettingsDialog(Config.load(), capture_key=lambda cb: None, sources=lambda: [])
+    assert dlg.width() <= available.width()
+    assert dlg.height() <= available.height()
+
+
+def test_switching_to_a_cloud_profile_leaves_no_dead_help_buttons(qapp):
+    """Finding 4. The per-field buttons were registered in the dialog-wide dict
+    and deleted with the form, so the local-only keys pointed at destroyed C++
+    objects the moment a cloud profile was selected."""
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "local")
+    select_profile(dlg, "openai")
+    dead = []
+    for key, button in dlg.help_buttons.items():
+        try:
+            button.toolTip()
+        except RuntimeError as exc:
+            dead.append((key, str(exc)))
+    assert not dead, dead
+
+
+def test_the_paired_languages_read_as_a_sentence(qapp):
+    """A nit, but it is a sentence the owner reads."""
+    cfg, dlg, _ = make(qapp)
+    assert "English and Swedish" in dlg.profile_mode_label.text(), \
+        dlg.profile_mode_label.text()

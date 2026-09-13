@@ -347,7 +347,8 @@ def _model_cache() -> tuple[bool, str]:
     models = _models_in_use()
     if not models:
         return True, "nothing runs locally; no model to cache"
-    found, missing, wanted = [], [], []
+    found: list[str] = []
+    missing: list[tuple[str, Path | None, Path]] = []
     for model, root in models:
         hub = _hub_directory(model, root)
         # Asked once. Two calls chose the list and the wording independently,
@@ -355,14 +356,12 @@ def _model_cache() -> tuple[bool, str]:
         if hub.exists():
             found.append(str(hub))
         else:
-            # Named in the spelling the config uses, not the repository's: that
-            # is what the owner would have to go and change.
-            missing.append(f"{model} not downloaded yet")
-            wanted.append(root)
-    # Only where something still has to be written. A read-only models share
-    # that already holds every model is a working machine, and failing it said
-    # the download would fail when there is no download left to do.
-    unwritable = _unwritable_roots(wanted)
+            missing.append((model, root, hub))
+    # Only a directory something still has to be written into, and only one the
+    # owner chose: a read-only models share that already holds every model is a
+    # working machine, and failing it said a download would fail when there is
+    # none left to do.
+    unwritable = _unwritable_roots([root for _, root, _ in missing])
     if unwritable:
         return False, (", ".join(unwritable) + " - stt.model_dir cannot be written. "
                        "The download fails there, and the error the pill shows "
@@ -371,12 +370,15 @@ def _model_cache() -> tuple[bool, str]:
     if missing:
         when = ("the first dictation in that language downloads it" if len(models) > 1
                 else "the first dictation downloads it")
-        # Where the *missing* ones land, and only those: naming a directory
-        # that belongs to a model already on the disk sent the owner to look
-        # in the wrong place.
-        roots = sorted({str(root) for root in wanted if root is not None})
-        into = f", into {' and '.join(roots)}" if roots else ""
-        return False, ", ".join([*missing, *found]) + f" ({when}{into})"
+        # Where the missing ones actually land, taken from the directory each
+        # one was looked for in. `root` is None for the shared Hugging Face
+        # cache, which is a destination like any other - leaving it out named
+        # one profile's folder as the destination for every missing model.
+        into = " and ".join(sorted({str(hub.parent) for _, _, hub in missing}))
+        # Named in the spelling the config uses, not the repository's: that is
+        # what the owner would have to go and change.
+        said = [f"{model} not downloaded yet" for model, _, _ in missing]
+        return False, ", ".join([*said, *found]) + f" ({when}, into {into})"
     return True, ", ".join(found)
 
 

@@ -555,6 +555,23 @@ def test_the_destination_named_is_the_one_the_missing_model_goes_to(
         f"medium goes to the Hugging Face cache, not {chosen}: {detail}")
 
 
+def test_the_destination_is_named_for_every_missing_model(
+        isolated_xdg, monkeypatch, tmp_path):
+    """The shared cache is a destination too, and dropping it named one folder
+    as where *both* missing models go - which is what the line exists to say."""
+    from voice.doctor import default_probes
+
+    chosen = tmp_path / "sv-models"
+    _two_local_profiles(**{"stt.profiles.local-swedish.model_dir": chosen})
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+
+    ok, detail = default_probes()["model cache"]()
+    assert ok is False
+    assert str(chosen) in detail, detail
+    assert str(tmp_path / "hf" / "hub") in detail, (
+        f"medium goes to the shared cache and the line does not say so: {detail}")
+
+
 def test_a_read_only_model_folder_that_already_holds_everything_is_fine(
         isolated_xdg, monkeypatch, tmp_path):
     """A models share on a NAS, or a folder root filled in, is not a fault.
@@ -631,7 +648,10 @@ def test_the_model_cache_probe_asks_the_disk_once_per_model(
     ok, detail = default_probes()["model cache"]()
     assert asked == [1], f"the disk was asked {len(asked)} times for one model"
     assert ok is False and "medium not downloaded yet" in detail
-    assert str(tmp_path) not in detail, f"reported missing and found at once: {detail}"
+    # The destination is named, as it must be - what must not appear is the
+    # path it would have been *found* at, which is the contradiction.
+    assert f"{tmp_path}/hub/medium" not in detail, (
+        f"reported missing and found at once: {detail}")
 
 
 def test_the_model_cache_probe_names_a_cloud_profile_without_looking_for_a_model(

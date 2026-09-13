@@ -1022,9 +1022,6 @@ class SettingsDialog(QDialog):
         #: Whether this desktop can place the pill at all; None until probed.
         self._layer_shell: bool | None = None
         self._current_profile: str | None = None
-        #: "Use this profile" pressed here, before Save. The list has to mark
-        #: the profile the owner just chose, not the one still on disk.
-        self._chosen_active: str | None = None
         #: Rebuilding the pairing table fires every combo's signal; that is not
         #: somebody changing a pairing.
         self._loading_language_profiles = False
@@ -1161,7 +1158,6 @@ class SettingsDialog(QDialog):
         # Left set, the list marked the wrong row "in use" and - because Remove
         # refuses whatever is in use - offered to delete the profile that really
         # was, leaving stt.active naming nothing and every later save blocked.
-        self._chosen_active = None
         self._loading_language_profiles = False
         self._active_changed = False
         self._language_changed = False
@@ -1445,7 +1441,6 @@ class SettingsDialog(QDialog):
         self.profile_list = QListWidget()
         self.profile_list.currentRowChanged.connect(self._show_profile)
         self.add_profile_combo = QComboBox()
-        self.add_profile_combo.addItems(list(PROFILE_TEMPLATES))
         self.add_profile_button = QPushButton("Add from template")
         self.add_profile_button.clicked.connect(self._add_profile)
         self.activate_button = QPushButton("Use this profile")
@@ -1606,6 +1601,11 @@ class SettingsDialog(QDialog):
         self.set_sources(self._sources())
         self.max_seconds.setValue(int(c.get("audio.max_seconds", 120)))
         self.model_dir_edit.setText(str(c.get("stt.model_dir", "") or ""))
+        # The pairing table first: the profile list is annotated from those
+        # combos, and building it first read the ones this reload is about to
+        # discard - so a dropped edit lived on in the other tab's labels.
+        self._load_language_profiles()
+        self._update_profile_mode()
         self._load_profile_list()
         self.active_label.setText(f"Active profile: {c.get('stt.active')}")
         self.profile_list.setCurrentRow(0)
@@ -1616,8 +1616,6 @@ class SettingsDialog(QDialog):
         self.replacements_table.setRowCount(len(rules))
         for i, rule in enumerate(rules):
             self.set_replacement_row(i, *(list(rule) + ["", "", ""])[:3])
-        self._load_language_profiles()
-        self._update_profile_mode()
         self._language_changed = False     # populating the combos is not a user edit
         self._inject_mode_changed = False
         self._pill_placement_changed = False
@@ -1775,6 +1773,12 @@ class SettingsDialog(QDialog):
         which two the owner's own languages actually use.
         """
         chosen = self._current_profile
+        # Signals blocked across the rebuild: clear() selects row -1, which
+        # tears the profile form down and commits it - and a commit that fails
+        # validation rebuilds every field from disk, losing edits on rows that
+        # were perfectly good. Nothing about relabelling this list should touch
+        # what is being typed on the other side of the tab.
+        self.profile_list.blockSignals(True)
         self.profile_list.clear()
         used_by: dict[str, list[str]] = {}
         # What the table says, not what the file says: the caption under it
@@ -1785,7 +1789,14 @@ class SettingsDialog(QDialog):
         for name in sorted(self._cfg.get("stt.profiles", {}) or {}):
             self._add_profile_row(name, used_by.get(name, []), name == active)
         row = self._profile_row(chosen) if chosen else -1
-        self.profile_list.setCurrentRow(row if row >= 0 else 0)
+        row = row if row >= 0 else 0
+        self.profile_list.setCurrentRow(row)
+        self.profile_list.blockSignals(False)
+        self._refresh_templates_on_offer()
+        if self._profile_at(row) != chosen:
+            self._show_profile(row)           # a different profile: rebuild the form
+        else:
+            self._refresh_profile_buttons()   # the same one: only the labels moved
 
     def _on_pairing_picked(self) -> None:
         if self._loading_language_profiles:
@@ -1806,8 +1817,16 @@ class SettingsDialog(QDialog):
                 if name}
 
     def _active_profile_name(self) -> str:
-        """Which profile actually transcribes, counting an unsaved choice here."""
-        return str(self._chosen_active or self._cfg.get("stt.active") or "")
+        """Which profile actually transcribes.
+
+        Read from the config this window edits, never from a flag beside it.
+        A remembered copy has to be cleared at every path that changes
+        `stt.active` - "Use this profile", a language save, an external edit
+        carried over - and missing one of them let the window offer to delete
+        the profile that was really in use, which blocks every later save. It
+        was missed twice. There is nothing to miss now.
+        """
+        return str(self._cfg.get("stt.active") or "")
 
     def _add_profile_row(self, name: str, languages: Iterable[str] = (),
                          active: bool = False) -> None:
@@ -1845,6 +1864,26 @@ class SettingsDialog(QDialog):
                     'model - you choose it yourself with "Use this profile" on the '
                     'Transcription tab.')
         self.profile_mode_label.setText(text)
+
+    def _refresh_templates_on_offer(self) -> None:
+        """Only templates this config does not already define.
+
+        The shipped config now defines every one of them, so on a new install
+        the button did nothing whatever was picked - under a caption and a "?"
+        this branch added to draw attention to it.
+        """
+        defined = set(self._cfg.get("stt.profiles", {}) or {})
+        wanted = [name for name in PROFILE_TEMPLATES if name not in defined]
+        if wanted == [self.add_profile_combo.itemText(i)
+                      for i in range(self.add_profile_combo.count())]:
+            return
+        self.add_profile_combo.clear()
+        self.add_profile_combo.addItems(wanted)
+        self.add_profile_combo.setEnabled(bool(wanted))
+        self.add_profile_button.setEnabled(bool(wanted))
+        self.add_profile_label.setText(
+            "Add another profile:" if wanted
+            else "Every ready-made profile is already here.")
 
     def _refresh_profile_buttons(self) -> None:
         """What can be done to the selected profile, said by the buttons.
@@ -1955,7 +1994,6 @@ class SettingsDialog(QDialog):
         name = self._current_profile
         if not name:
             return
-        self._chosen_active = name
         self._cfg.set("stt.active", name)
         self._active_changed = True
         self.active_label.setText(f"Active profile: {name}")
@@ -2511,6 +2549,9 @@ class SettingsDialog(QDialog):
                                       if word.strip()])
         self._save_language_profiles()
         self._update_profile_mode()
+        # The pairing may have moved the active profile; the list beside the
+        # caption has to say so too.
+        self._load_profile_list()
         if not self._carry_over_external_edits():
             return
         errs = c.errors()

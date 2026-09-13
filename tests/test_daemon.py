@@ -3643,6 +3643,44 @@ def test_the_wizard_never_stops_the_daemon_starting(isolated_xdg, qapp, monkeypa
     assert d.offer_setup() is False          # and must not raise
 
 
+def test_the_wizard_does_not_leave_two_warmups_running(isolated_xdg, qapp, monkeypatch):
+    """Finding 5. apply_config() starts its own warmup when the profile moved,
+    and run() then started another - so a CPU-only machine said "Running on
+    CPU" twice, immediately after the owner finished setup."""
+    started = []
+    monkeypatch.setattr("voice.daemon.SetupWizard",
+                        lambda cfg, parent=None: type("W", (), {"exec": lambda self: 1})())
+    d = Daemon(config=Config.load(), notifier=QuietNotifier(), tray=object())
+    monkeypatch.setattr(d, "_start_warmup", lambda: started.append(1))
+    monkeypatch.setattr(d, "apply_config", lambda: started.append(1) or True)
+
+    assert d.offer_setup() is True
+    d.warm_up_once(answered=True)
+    assert started == [1], f"{len(started)} warmups for one start"
+
+
+def test_a_start_with_no_wizard_still_warms_up(isolated_xdg, qapp, monkeypatch):
+    started = []
+    d = Daemon(config=Config.load(), notifier=QuietNotifier(), tray=object())
+    monkeypatch.setattr(d, "_start_warmup", lambda: started.append(1))
+    d.warm_up_once(answered=False)
+    assert started == [1]
+
+
+def test_the_wizard_is_offered_before_the_keyboard_is_listened_to(isolated_xdg):
+    """Finding 6. It blocks in a nested event loop, and the hotkey listener was
+    already running: a dictate press while it was open started a model download
+    into the folder the wizard was at that moment asking about."""
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "voice" / "daemon.py"
+    body = source.read_text()
+    run = body[body.index("    def run(self)"):]
+    run = run[:run.index("\n    def ", 10)]
+    assert run.index("self.offer_setup()") < run.index("self.listener.start()"), (
+        "offer_setup() blocks; every source of a dictation has to be quiet first")
+
+
 #: Tests that reach `run()` but return before the wizard could ever open,
 #: because they hand over to a daemon that already owns the socket.
 _HANDS_OVER_BEFORE_STARTING = {

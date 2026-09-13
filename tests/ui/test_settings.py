@@ -2517,3 +2517,120 @@ def test_the_list_and_the_caption_agree_about_an_unsaved_pairing(qapp):
             dlg.profile_list.item(i).text() for i in range(dlg.profile_list.count())}
     assert "Swedish" not in rows["local-swedish"], rows["local-swedish"]
     assert "Swedish" not in dlg.profile_mode_label.text()
+
+
+# -- the seven found on the second pre-push review ----------------------------
+
+def test_a_language_save_cannot_strand_the_window_on_a_stale_active_profile(qapp):
+    """Finding 1, and the same lockout as last round through a second door.
+
+    The previous fix cleared the remembered choice on reload and not on save,
+    so: activate a cloud profile, save; switch language to Swedish, save - the
+    pairing moves the real active profile, the window keeps believing its own
+    older choice, and Remove is offered on the profile that is actually in use.
+    """
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "openai")
+    dlg.activate_button.click()
+    dlg.save_button.click()
+    assert Config.load().get("stt.active") == "openai"
+
+    dlg.language_combo.setCurrentIndex(dlg.language_combo.findData("sv"))
+    dlg.save_button.click()
+    assert Config.load().get("stt.active") == "local-swedish"
+    assert dlg._active_profile_name() == "local-swedish", "it kept believing 'openai'"
+
+    select_profile(dlg, "local-swedish")
+    assert not dlg.remove_profile_button.isEnabled()
+    dlg.remove_profile_button.click()
+    dlg.save_button.click()
+    assert dlg.error_label.text() == ""
+    assert Config.load().errors() == []
+
+
+def test_the_window_has_no_second_memory_of_the_active_profile(qapp):
+    """The bug twice over was a flag shadowing the config, reset at some of the
+    places that change it. There is nothing left to forget: the config object
+    this window edits is the only answer to "which profile is in use"."""
+    import inspect
+
+    from voice.ui import settings
+
+    source = inspect.getsource(settings.SettingsDialog)
+    assert "_chosen_active" not in source, (
+        "a shadow copy of stt.active is back; _active_profile_name must read the "
+        "config, which every path that changes the active profile already writes")
+
+
+def test_saving_a_language_change_redraws_the_list_beside_it(qapp):
+    """Finding 2. The caption said local-swedish, the list still bolded local."""
+    cfg, dlg, _ = make(qapp)
+    dlg.language_combo.setCurrentIndex(dlg.language_combo.findData("sv"))
+    dlg.save_button.click()
+    rows = {dlg.profile_list.item(i).data(Qt.ItemDataRole.UserRole):
+            dlg.profile_list.item(i).text() for i in range(dlg.profile_list.count())}
+    assert "in use" in rows["local-swedish"], rows
+    assert "in use" not in rows["local"]
+
+
+def test_a_reload_annotates_the_list_from_the_file_not_the_old_combos(qapp):
+    """Finding 3. The list was built from the pairing combos ten lines before
+    those combos were rebuilt, so a discarded edit survived on the other tab."""
+    cfg, dlg, _ = make(qapp)
+    combo = dlg.language_profile_combos["sv"]
+    combo.setCurrentIndex(combo.findData("local"))       # unsaved
+    dlg.reload_from_disk()
+    rows = {dlg.profile_list.item(i).data(Qt.ItemDataRole.UserRole):
+            dlg.profile_list.item(i).text() for i in range(dlg.profile_list.count())}
+    assert "Swedish" in rows["local-swedish"], rows
+    assert "Swedish" not in rows["local"]
+
+
+def test_changing_a_pairing_does_not_throw_away_what_is_typed_elsewhere(qapp):
+    """Finding 4. A General-tab combo tore down the Transcription form, and a
+    form that fails to commit is rebuilt from disk - losing every field, not
+    only the bad one."""
+    cfg, dlg, _ = make(qapp)
+    select_profile(dlg, "local")
+    dlg.profile_form["prompt"].setText("Notes on a meeting.")
+    dlg.profile_form["beam_size"].setText("oops")
+
+    combo = dlg.language_profile_combos["sv"]
+    combo.setCurrentIndex(combo.findData(""))
+    assert dlg.profile_form["prompt"].text() == "Notes on a meeting.", "typed and lost"
+    assert dlg.profile_form["beam_size"].text() == "oops"
+
+
+def test_every_template_already_shipped_is_not_offered_again(qapp):
+    """Finding 7. The shipped config defines every template, so the button did
+    nothing at all on a new install - under a caption and a "?" advertising it."""
+    from voice.ui.settings import PROFILE_TEMPLATES
+
+    cfg, dlg, _ = make(qapp)
+    offered = [dlg.add_profile_combo.itemText(i)
+               for i in range(dlg.add_profile_combo.count())]
+    shipped = set(cfg.get("stt.profiles") or {})
+    assert offered, "nothing at all is offered"
+    assert not (set(offered) & shipped), f"{offered} are already defined"
+    assert set(offered) <= set(PROFILE_TEMPLATES)
+
+    dlg.add_profile_combo.setCurrentText("mistral")
+    dlg.add_profile_button.click()
+    offered = [dlg.add_profile_combo.itemText(i)
+               for i in range(dlg.add_profile_combo.count())]
+    assert "mistral" not in offered, "added, and still on offer"
+
+
+def test_the_add_button_goes_quiet_when_there_is_nothing_left_to_add(qapp):
+    from voice.ui.settings import PROFILE_TEMPLATES
+
+    cfg, dlg, _ = make(qapp)
+    # Bounded. Against the unfixed code the combo never empties, and an
+    # unbounded loop here hangs the suite instead of failing it - pytest-timeout
+    # cannot interrupt a Qt click loop, so it hangs for ever rather than 60s.
+    for _ in range(len(PROFILE_TEMPLATES) + 1):
+        if not dlg.add_profile_combo.count():
+            break
+        dlg.add_profile_button.click()
+    assert dlg.add_profile_combo.count() == 0
+    assert not dlg.add_profile_button.isEnabled()

@@ -32,7 +32,7 @@ sudo pacman-key --lsign-key F2F5DB243D66BBB9
 Then install, now and for every future release:
 
 ```bash
-sudo pacman -U https://github.com/vampyren/voice/releases/download/v0.1.5/voice-0.1.5-1-x86_64.pkg.tar.zst
+sudo pacman -U https://github.com/vampyren/voice/releases/download/v0.1.6/voice-0.1.6-1-x86_64.pkg.tar.zst
 voice doctor
 ```
 

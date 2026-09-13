@@ -124,3 +124,34 @@ def test_feed_and_set_specs_are_mutually_exclusive():
     reloader.join(timeout=2)
     feeder.join(timeout=2)
     assert events == []                        # F13 is no longer bound once the reload landed
+
+
+def test_a_code_with_several_names_gives_one_name_as_a_string():
+    """evdev maps ten codes to more than one name, and hands them back as a
+    *tuple* on the installed version - the check was for a list.
+
+    The tuple went straight through into a Qt Signal(str):
+        _pythonToCppCopy: Cannot copy-convert 0x... (tuple) to C++.
+        the listener could not capture a key:
+    so those keys could not be assigned, and the message said nothing.
+    """
+    from evdev import ecodes
+
+    from voice.hotkey.keyspec import keyspec_name
+
+    aliased = [code for code, names in ecodes.KEY.items() if not isinstance(names, str)]
+    assert aliased, "this evdev has no aliased codes; the guard still has to hold"
+    for code in aliased:
+        name = keyspec_name(code)
+        assert isinstance(name, str), f"{code} gave {name!r}"
+        assert name.startswith(("KEY_", "BTN_")), name
+        # And the name it picks has to be one the config can parse back.
+        from voice.hotkey.keyspec import parse_keyspec
+
+        assert parse_keyspec(name).codes == {code}
+
+
+def test_an_unknown_code_still_gives_a_string():
+    from voice.hotkey.keyspec import keyspec_name
+
+    assert keyspec_name(999999) == "KEY_999999"

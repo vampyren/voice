@@ -30,9 +30,21 @@ def parse_keyspec(text: str) -> KeySpec:
 
 
 def keyspec_name(code: int) -> str:
+    """One name for a key code, always a string.
+
+    Ten codes have more than one name, and evdev hands those back as a list or
+    a tuple depending on its version. Checking only for a list let a tuple
+    through into a Qt `Signal(str)`:
+
+        _pythonToCppCopy: Cannot copy-convert 0x... (tuple) to C++.
+
+    which silently lost the keystroke and told the owner "the listener could
+    not capture a key" with nothing after the colon. Anything that is not a
+    string is reduced to its first name here, whatever container it came in.
+    """
     name = ecodes.KEY.get(code) or ecodes.BTN.get(code)
-    if isinstance(name, list):          # some codes have aliases
-        name = name[0]
+    if name is not None and not isinstance(name, str):
+        name = next(iter(name), None)
     return name or f"KEY_{code}"
 
 

@@ -2172,7 +2172,8 @@ class SettingsDialog(QDialog):
         # A listener that cannot hand back a key name - the desktop keeps the
         # keystroke - answers with a sentence about itself instead. What it
         # means for the user is the same every time, so that is what is shown.
-        log.info("the listener could not capture a key: %s", key)
+        log.info("the listener could not capture a key: %s",
+                 key or "(it returned nothing)")
         self._stop_change(CAPTURE_NOT_POSSIBLE)
 
     # -- the next combination, read here and handed to the desktop -------------

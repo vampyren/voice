@@ -6,4 +6,4 @@ Exec=voice daemon
 Icon=audio-input-microphone
 Terminal=false
 Categories=Utility;Accessibility;
-StartupNotify=false
+StartupNotify=true

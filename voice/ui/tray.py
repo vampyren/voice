@@ -33,6 +33,7 @@ class Tray(QObject):
         self.language_menu = self.menu.addMenu("Language")
         self._language_group = self._exclusive_group()
         self.menu.addSeparator()
+        self._add("guide", "How to use voice…")
         self._add("settings", "Settings…")
         self._add("quit", "Quit")
         self._state = ("idle", "ready")

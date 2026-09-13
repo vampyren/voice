@@ -12,7 +12,7 @@ from typing import Callable
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 
-from voice import APP_NAME, __version__
+from voice import APP_NAME, __version__, paths
 from voice.audio.capture import Recorder, capture_sources
 from voice.config import Config, is_language_code
 from voice.history import History
@@ -484,6 +484,7 @@ class Daemon:
         self._tray = tray
         self._server: Server | None = None
         self._settings: SettingsDialog | None = None
+        self._guide = None
         self._active_profile: tuple[str, dict] | None = None
         #: What the running listener was built from; None until build().
         self._hotkey_settings: tuple | None = None
@@ -1308,6 +1309,7 @@ class Daemon:
         self.overlay.start()
         self.tray.show()
         self.listener.start()
+        self.greet_once()
         self._start_warmup()
         # Before the first hotkey, so the no-microphone guard has an answer to
         # read rather than the "nobody asked yet" it starts out with.
@@ -1321,6 +1323,55 @@ class Daemon:
         code = app.exec()
         self.shutdown()
         return code
+
+    #: Written the first time the daemon runs for this user, so the greeting
+    #: below happens once. In the state directory rather than in config.toml:
+    #: it is not a setting, nothing should have to validate it, and a config key
+    #: that decides whether a window appears is how the first-run wizard went
+    #: wrong.
+    GREETED_MARKER = "greeted"
+
+    def greet_once(self) -> None:
+        """Say the program is running, the first time it ever is.
+
+        Clicking the icon starts the daemon and opens no window: the only sign
+        is a tray icon appearing, and on a desktop with no tray host, nothing
+        at all. A first-time user cannot tell "running" from "did not launch".
+
+        A notification, never a dialog - nothing here may block the start.
+        """
+        marker = paths.state_dir() / self.GREETED_MARKER
+        try:
+            if marker.exists():
+                return
+        except OSError:
+            return
+        self._notifier.notify(
+            f"{APP_NAME} is running",
+            "Give it a key in your desktop's keyboard settings, then hold that key "
+            "and speak. Right-click the tray icon for settings and a short guide.",
+            "normal")
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("")
+        except OSError:
+            # Said once per start rather than once ever, which is the better
+            # way to be wrong: it is a notification, not a dialog.
+            log.debug("could not record that the greeting was shown", exc_info=True)
+
+    def _open_guide(self) -> None:
+        """The guide, from the tray. Shown, never exec()'d.
+
+        A modal dialog inside the daemon is what let the first-run wizard race
+        the IPC socket; this one must not stop the event loop for a moment.
+        """
+        from voice.ui.guide import Guide
+
+        if self._guide is None:
+            self._guide = Guide()
+        self._guide.show()
+        self._guide.raise_()
+        self._guide.activateWindow()
 
     def _hand_over(self) -> int:
         """Defer to the daemon that already owns the socket."""
@@ -1528,7 +1579,11 @@ class Daemon:
         self.dictation.on_hotkey(name, kind)
 
     def _on_tray_action(self, action: str) -> None:
-        if action.startswith("profile:"):
+        if action == "guide":
+            # Not an IPC command: it opens a window in this process and there is
+            # nothing for another process to ask for.
+            self._open_guide()
+        elif action.startswith("profile:"):
             self.handle({"cmd": "profile", "name": action.split(":", 1)[1]})
         elif action.startswith("language:"):
             self.handle({"cmd": "language", "code": action.split(":", 1)[1]})

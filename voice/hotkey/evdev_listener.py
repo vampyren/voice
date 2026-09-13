@@ -10,7 +10,7 @@ from typing import Callable, Iterable
 import evdev
 from evdev import ecodes
 
-from voice.hotkey.keyspec import Tracker, keyspec_name
+from voice.hotkey.keyspec import MODIFIER_CODES, Tracker, keyspec_name
 
 log = logging.getLogger(__name__)
 INPUT_DIR = "/dev/input"
@@ -51,6 +51,8 @@ class EvdevListener:
         self._stop = threading.Event()
         self._wake_r, self._wake_w = os.pipe()
         self._capture: Callable[[str], None] | None = None
+        #: Modifiers pressed so far during a capture, in press order.
+        self._capture_modifiers: list[int] = []
         self._lock = threading.Lock()
         self._devices_ok: bool | None = None
         self._sel: selectors.BaseSelector | None = None
@@ -77,6 +79,7 @@ class EvdevListener:
     def capture_next(self, callback: Callable[[str], None]) -> None:
         with self._lock:
             self._capture = callback
+            self._capture_modifiers = []
 
     def held(self):
         return self._tracker.held()
@@ -143,13 +146,40 @@ class EvdevListener:
         sel.close()
 
     def _handle(self, code: int, value: int) -> None:
+        """One key event: either it answers a capture, or it drives the hotkeys.
+
+        A capture waits for the key the modifiers are being held *for*. Ending
+        on the first press meant Ctrl+Space recorded "KEY_LEFTCTRL", because
+        Ctrl is what arrives first - so no combination could ever be assigned.
+        Letting a modifier go without pressing anything else still means that
+        modifier by itself: right Ctrl as push-to-talk is a normal thing to
+        want.
+        """
+        answer = None
         with self._lock:
             cb = self._capture
-            if cb is not None and value == 1:
-                self._capture = None
-        if cb is not None and value == 1:
-            cb(keyspec_name(code))
+            if cb is not None:
+                if value == 1:
+                    if code in MODIFIER_CODES:
+                        if code not in self._capture_modifiers:
+                            self._capture_modifiers.append(code)
+                        cb = None                     # keep waiting
+                    else:
+                        answer = "+".join(keyspec_name(c) for c in
+                                          [*self._capture_modifiers, code])
+                elif value == 0 and code in self._capture_modifiers:
+                    # Released with nothing pressed after it: the modifier is
+                    # the answer.
+                    answer = keyspec_name(code)
+                else:
+                    cb = None
+                if answer is not None:
+                    self._capture, self._capture_modifiers = None, []
+        if cb is not None and answer is not None:
+            cb(answer)
             return
-        if cb is None and self._capture is None:
+        if cb is not None:
+            return                # swallowed: part of the chord being captured
+        if self._capture is None:
             for name, kind in self._tracker.feed(code, value):
                 self._on_event(name, kind)

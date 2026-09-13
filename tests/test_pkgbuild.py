@@ -649,3 +649,10 @@ def test_the_readme_download_url_names_the_matching_tag():
     for tag, name in urls:
         assert tag == f"v{pkgver}", f"the README installs from tag {tag!r}, but this builds {pkgver!r}"
         assert name == f"voice-{pkgver}-{pkgrel}-x86_64.pkg.tar.zst", name
+
+
+def test_the_desktop_entry_tells_the_desktop_something_is_starting():
+    """StartupNotify=false meant clicking the icon gave no feedback at all -
+    no cursor change, no bounce, and a tray icon a second or two later."""
+    entry = (ROOT / "packaging" / "voice.desktop").read_text()
+    assert "StartupNotify=true" in entry, entry

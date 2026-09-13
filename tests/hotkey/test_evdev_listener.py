@@ -90,6 +90,80 @@ def test_capture_next_reports_name_and_swallows_event():
         listener.stop()
 
 
+def test_capture_waits_for_the_key_a_modifier_is_held_for():
+    """Pressing Ctrl+Space recorded "KEY_LEFTCTRL".
+
+    Ctrl arrives first, and capture ended on the first press it saw - so every
+    combination anyone tried to assign came out as its modifier alone.
+    """
+    dev = FakeDevice()
+    captured = []
+    listener = EvdevListener(Tracker({}), lambda n, k: None, device_factory=lambda: [dev])
+    listener.start()
+    try:
+        listener.capture_next(captured.append)
+        dev.push(e.KEY_LEFTCTRL, 1)
+        time.sleep(0.05)
+        assert captured == [], "it settled for the modifier"
+        dev.push(e.KEY_SPACE, 1)
+        assert wait_for(lambda: captured == ["KEY_LEFTCTRL+KEY_SPACE"])
+    finally:
+        listener.stop()
+
+
+def test_capture_keeps_every_modifier_in_the_order_they_were_pressed():
+    dev = FakeDevice()
+    captured = []
+    listener = EvdevListener(Tracker({}), lambda n, k: None, device_factory=lambda: [dev])
+    listener.start()
+    try:
+        listener.capture_next(captured.append)
+        dev.push(e.KEY_LEFTCTRL, 1)
+        dev.push(e.KEY_LEFTSHIFT, 1)
+        dev.push(e.KEY_V, 1)
+        assert wait_for(lambda: captured == ["KEY_LEFTCTRL+KEY_LEFTSHIFT+KEY_V"])
+    finally:
+        listener.stop()
+
+
+def test_a_modifier_on_its_own_is_still_assignable():
+    """Right Ctrl as push-to-talk is a normal thing to want, so letting go
+    without pressing anything else has to mean "this key, by itself"."""
+    dev = FakeDevice()
+    captured = []
+    listener = EvdevListener(Tracker({}), lambda n, k: None, device_factory=lambda: [dev])
+    listener.start()
+    try:
+        listener.capture_next(captured.append)
+        dev.push(e.KEY_RIGHTCTRL, 1)
+        dev.push(e.KEY_RIGHTCTRL, 0)
+        assert wait_for(lambda: captured == ["KEY_RIGHTCTRL"])
+    finally:
+        listener.stop()
+
+
+def test_capture_ends_after_one_answer():
+    """Whatever was held, the next press belongs to the program again."""
+    dev = FakeDevice()
+    got, captured = [], []
+    tracker = Tracker({"dictate": parse_keyspec("KEY_F13")})
+    listener = EvdevListener(tracker, lambda n, k: got.append((n, k)), device_factory=lambda: [dev])
+    listener.start()
+    try:
+        listener.capture_next(captured.append)
+        dev.push(e.KEY_LEFTCTRL, 1)
+        dev.push(e.KEY_SPACE, 1)
+        assert wait_for(lambda: captured == ["KEY_LEFTCTRL+KEY_SPACE"])
+        dev.push(e.KEY_SPACE, 0)
+        dev.push(e.KEY_LEFTCTRL, 0)
+        time.sleep(0.05)
+        assert got == [], "the keys held during capture were forwarded"
+        dev.push(e.KEY_F13, 1)
+        assert wait_for(lambda: got == [("dictate", "press")])
+    finally:
+        listener.stop()
+
+
 def test_no_devices_marks_not_ok_and_stop_is_clean():
     listener = EvdevListener(Tracker({}), lambda n, k: None, device_factory=lambda: [])
     listener.start()

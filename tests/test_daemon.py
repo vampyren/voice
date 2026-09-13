@@ -3590,3 +3590,87 @@ def test_a_window_command_that_gave_up_is_reported_as_itself(isolated_xdg, qapp,
         assert "will not say which window" not in caplog.text
     finally:
         d.shutdown()
+
+
+# -- what a first-time user actually sees -------------------------------------
+
+def _greeting_daemon(monkeypatch, notifier):
+    monkeypatch.setattr("voice.daemon.make_transcriber", lambda p, s: type("T", (), {
+        "name": "x", "describe": lambda self: "x", "warmup": lambda self: None})())
+    return Daemon(Config.load(), listener=FakeListener(), sender=FakeSender(),
+                  tray=FakeTray(), notifier=notifier)
+
+
+def test_the_first_start_says_something_and_later_ones_do_not(isolated_xdg, qapp, monkeypatch):
+    """Clicking the icon started the daemon and showed nothing but a tray icon -
+    on a desktop with no tray, nothing whatever. A first-time user cannot tell
+    the difference between "running" and "did not launch"."""
+    notifier = QuietNotifier()
+    d = _greeting_daemon(monkeypatch, notifier)
+    d.greet_once()
+    assert len(notifier.sent) == 1
+    title, body, _ = notifier.sent[0]
+    assert "voice" in title.lower()
+    assert "key" in body.lower(), body          # the one thing they must do next
+
+    d.greet_once()
+    assert len(notifier.sent) == 1, "greeted twice"
+    _greeting_daemon(monkeypatch, notifier).greet_once()
+    assert len(notifier.sent) == 1, "a second daemon greeted again"
+
+
+def test_a_greeting_that_cannot_be_recorded_is_not_repeated_for_ever(
+        isolated_xdg, qapp, monkeypatch):
+    """If the marker cannot be written the greeting still happens - once per
+    start, not in a loop - and nothing raises."""
+    notifier = QuietNotifier()
+    d = _greeting_daemon(monkeypatch, notifier)
+    from pathlib import Path
+
+    monkeypatch.setattr(Path, "write_text",
+                        lambda self, *a, **kw: (_ for _ in ()).throw(OSError("read-only")))
+    d.greet_once()          # must not raise
+    assert len(notifier.sent) == 1
+
+
+def test_the_tray_offers_the_guide(isolated_xdg, qapp, monkeypatch):
+    """`voice guide` is a terminal command, and the people who most need it are
+    the ones who never open a terminal."""
+    from voice.ui.tray import Tray
+
+    actions = []
+    tray = Tray(actions.append)
+    labels = [a.text() for a in tray.menu.actions()]
+    assert any("guide" in label.lower() or "how to use" in label.lower()
+               for label in labels), labels
+
+
+def test_the_guide_opens_without_blocking_the_daemon(isolated_xdg, qapp, monkeypatch):
+    """Shown, never exec()'d: a modal dialog inside the daemon is what made the
+    wizard race the IPC socket. The event loop has to keep running."""
+    opened = []
+
+    class FakeGuide:
+        def __init__(self, parent=None):
+            opened.append(self)
+
+        def show(self):
+            self.shown = True
+
+        def raise_(self):
+            pass
+
+        def activateWindow(self):
+            pass
+
+        def exec(self):
+            raise AssertionError("the daemon must never block on the guide")
+
+    monkeypatch.setattr("voice.ui.guide.Guide", FakeGuide)
+    d = _greeting_daemon(monkeypatch, QuietNotifier())
+    d._on_tray_action("guide")
+    qapp.processEvents()
+    assert len(opened) == 1 and opened[0].shown is True
+    d._on_tray_action("guide")
+    qapp.processEvents()
+    assert len(opened) == 1, "a second window instead of raising the first"

@@ -1606,9 +1606,11 @@ class SettingsDialog(QDialog):
         # discard - so a dropped edit lived on in the other tab's labels.
         self._load_language_profiles()
         self._update_profile_mode()
-        self._load_profile_list()
+        # The profile in use, not whatever sorts first: alphabetical order put
+        # `groq` - an empty API-key form - in front of the `local` that is
+        # actually transcribing.
+        self._load_profile_list(select=str(c.get("stt.active") or ""))
         self.active_label.setText(f"Active profile: {c.get('stt.active')}")
-        self.profile_list.setCurrentRow(0)
         words = c.get("dictionary.hotwords", []) or []
         self.hotwords_edit.setText(", ".join(str(word) for word in words)
                                    if isinstance(words, list) else str(words))
@@ -1765,14 +1767,17 @@ class SettingsDialog(QDialog):
         for col, val in enumerate((src, dst, flags)):
             self.replacements_table.setItem(row, col, QTableWidgetItem(str(val)))
 
-    def _load_profile_list(self) -> None:
+    def _load_profile_list(self, select: str | None = None) -> None:
         """The profiles, in name order, each saying which language picks it.
 
         Alphabetical because config order is the order they were added, which
         is nothing to a reader. Annotated because five bare names gave no clue
         which two the owner's own languages actually use.
         """
-        chosen = self._current_profile
+        # Which row to end up on, and - separately - what the form is currently
+        # showing. They are not the same question: a reload asks for a row while
+        # the form holds nothing, and conflating them left the form unbuilt.
+        chosen = select if select is not None else self._current_profile
         # Signals blocked across the rebuild: clear() selects row -1, which
         # tears the profile form down and commits it - and a commit that fails
         # validation rebuilds every field from disk, losing edits on rows that
@@ -1793,7 +1798,7 @@ class SettingsDialog(QDialog):
         self.profile_list.setCurrentRow(row)
         self.profile_list.blockSignals(False)
         self._refresh_templates_on_offer()
-        if self._profile_at(row) != chosen:
+        if self._profile_at(row) != self._current_profile:
             self._show_profile(row)           # a different profile: rebuild the form
         else:
             self._refresh_profile_buttons()   # the same one: only the labels moved
@@ -1874,11 +1879,16 @@ class SettingsDialog(QDialog):
         """
         defined = set(self._cfg.get("stt.profiles", {}) or {})
         wanted = [name for name in PROFILE_TEMPLATES if name not in defined]
-        if wanted == [self.add_profile_combo.itemText(i)
-                      for i in range(self.add_profile_combo.count())]:
-            return
-        self.add_profile_combo.clear()
-        self.add_profile_combo.addItems(wanted)
+        shown = [self.add_profile_combo.itemText(i)
+                 for i in range(self.add_profile_combo.count())]
+        if wanted != shown:
+            # Only the list is skipped when nothing moved - rebuilding it would
+            # throw away the owner's selection on every relabel of the profile
+            # list. What the button *does* is decided every time, unconditionally:
+            # guarding that too left it pressable over an empty dropdown, which
+            # turned a button that did nothing into one that raised KeyError.
+            self.add_profile_combo.clear()
+            self.add_profile_combo.addItems(wanted)
         self.add_profile_combo.setEnabled(bool(wanted))
         self.add_profile_button.setEnabled(bool(wanted))
         self.add_profile_label.setText(
@@ -1968,7 +1978,9 @@ class SettingsDialog(QDialog):
 
     def _add_profile(self) -> None:
         name = self.add_profile_combo.currentText()
-        if self._profile_row(name) >= 0:
+        # Belt as well as braces: the button is disabled when there is nothing
+        # to add, and this is what makes an empty selection harmless anyway.
+        if not name or name not in PROFILE_TEMPLATES or self._profile_row(name) >= 0:
             return
         for field, value in PROFILE_TEMPLATES[name].items():
             self._cfg.set(f"stt.profiles.{name}.{field}", value)

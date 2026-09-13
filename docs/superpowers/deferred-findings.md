@@ -141,3 +141,23 @@ branch.
   shipped config defines `local-swedish`, only a hand edit in the wrong order can reach
   it, and `docs/usage.md` gives the right order; a visible "this profile is not defined"
   next to the row would be better than either.
+
+## The first-run wizard, held back (2026-09-13)
+
+`voice/ui/wizard.py` works and is tested, and `voice setup` runs it. What is
+*not* wired is `Daemon.run()` opening it on a new install. Three review rounds
+found three separate ways for it to misfire at startup, and the last one has no
+small fix:
+
+- It is modal, and `run()` has already started the IPC server by the time it
+  would open. `Daemon.handle()` dispatches `start`/`toggle`/`retry` straight to
+  the pipeline on the IPC thread - no Qt event loop needed - so `voice toggle`
+  from a desktop shortcut begins a dictation, and downloads a model into the
+  default folder, while the dialog is on screen asking where models should go.
+  That is the exact failure the wizard exists to prevent.
+- Re-enabling it needs the dictation-starting commands refused while setup is
+  open (a flag `handle()` checks, with its own tests), not another reordering:
+  moving it before `listener.start()` closed the hotkey path and left this one.
+
+`tests/test_daemon.py::test_starting_the_daemon_never_opens_the_wizard` fails if
+it is wired back in, so this note cannot be lost.

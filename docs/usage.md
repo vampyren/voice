@@ -209,20 +209,19 @@ dictation.
 
 #### The first-run wizard
 
-A new install opens a short setup dialog the first time the daemon starts: where the
-speech models should be kept, which model each language uses, and a reminder that the
-desktop still owns the shortcut key. Nothing is written until **Finish**, and closing it
-leaves it to ask again next time.
+A short setup dialog covering the two settings worth deciding up front: where the speech
+models should be kept, and which model each language uses. Nothing is written until
+**Finish**, and closing it changes nothing.
 
-It never appears on an upgrade — `general.setup_complete` is absent from a config
-written before the wizard existed, and an install that has been dictating for months
-does not need a setup screen. Run it again whenever you like:
+**It does not open by itself.** Until the rest of this settles it is on request only —
+starting the daemon never shows it. Run it when you want it:
 
 ```bash
 voice setup
 ```
 
-A running daemon picks the answers up straight away.
+A running daemon picks the answers up straight away, and `voice setup` exits 1 if you
+close it without answering.
 
 #### Model per language
 

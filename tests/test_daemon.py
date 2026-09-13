@@ -3667,6 +3667,28 @@ def test_a_start_with_no_wizard_still_warms_up(isolated_xdg, qapp, monkeypatch):
     assert started == [1]
 
 
+def test_starting_the_daemon_never_opens_the_wizard(isolated_xdg):
+    """Held back until the rest is stable.
+
+    It is a modal dialog opened from `run()`, and the IPC socket is live by
+    then - `voice toggle` from a desktop shortcut dispatches straight to the
+    pipeline on the IPC thread, so a dictation can start, and download a model
+    into the default folder, while the dialog is on screen asking where models
+    should go. Three rounds of review found three more ways for it to misfire
+    at startup, so it is reachable only on request, by `voice setup`, until the
+    rest of this settles.
+    """
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "voice" / "daemon.py"
+    body = source.read_text()
+    run = body[body.index("    def run(self)"):]
+    run = run[:run.index("\n    def ", 10)]
+    assert "offer_setup" not in run, (
+        "the wizard is wired into startup again; it needs the IPC socket quiet "
+        "first - see docs/superpowers/deferred-findings.md")
+
+
 def test_the_wizard_is_offered_before_the_keyboard_is_listened_to(isolated_xdg):
     """Finding 6. It blocks in a nested event loop, and the hotkey listener was
     already running: a dictate press while it was open started a model download
@@ -3677,6 +3699,8 @@ def test_the_wizard_is_offered_before_the_keyboard_is_listened_to(isolated_xdg):
     body = source.read_text()
     run = body[body.index("    def run(self)"):]
     run = run[:run.index("\n    def ", 10)]
+    if "offer_setup" not in run:
+        pytest.skip("not wired into startup; see the test above")
     assert run.index("self.offer_setup()") < run.index("self.listener.start()"), (
         "offer_setup() blocks; every source of a dictation has to be quiet first")
 

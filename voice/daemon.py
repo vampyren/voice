@@ -1308,14 +1308,15 @@ class Daemon:
             return self._hand_over()
         self.overlay.start()
         self.tray.show()
-        # Before the models are touched - its whole purpose is to be asked where
-        # they should go - and before anything can ask for a dictation. It
-        # blocks in a nested event loop that still delivers queued signals, so
-        # with the listener already running a dictate press while it was open
-        # started the very download it exists to place.
-        answered = self.offer_setup()
+        # The first-run wizard is deliberately NOT opened here. It is a modal
+        # dialog, and by this point the IPC socket is live: `voice toggle` from
+        # a desktop shortcut dispatches straight to the pipeline on the IPC
+        # thread, so a dictation can start - and download a model into the
+        # default folder - while the dialog is still asking where models should
+        # go. `voice setup` runs it on request instead, with nothing else
+        # starting at the same moment. See docs/superpowers/deferred-findings.md.
         self.listener.start()
-        self.warm_up_once(answered=answered)
+        self.warm_up_once(answered=False)
         # Before the first hotkey, so the no-microphone guard has an answer to
         # read rather than the "nobody asked yet" it starts out with.
         self._refresh_sources()

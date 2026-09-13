@@ -213,11 +213,34 @@ class SetupWizard(QDialog):
         "own - a Swedish model for Swedish - pair them afterwards in Settings, on "
         "the General tab.")
 
+    #: And the same page again where nothing on this machine transcribes at
+    #: all - every language on a cloud profile. There is no model to choose, so
+    #: the page says that rather than describing rows it has not got.
+    CLOUD_QUALITY = Page(
+        "quality", "Nothing to download",
+        "Nothing on this computer does the transcribing: your profile sends the "
+        "audio to an online service, which has its own models.\n\n"
+        "To transcribe on this computer instead - private, and free - pick a "
+        "profile marked \"On this computer\" in Settings, on the Transcription "
+        "tab. The model it names is downloaded the first time you dictate.")
+
     def _page(self, index: int) -> Page:
         page = PAGES[index]
-        if page.key == "quality" and not any(self._local_profiles_in_use().values()):
+        if page.key != "quality":
+            return page
+        in_use = self._local_profiles_in_use()
+        if not in_use:
+            return self.CLOUD_QUALITY
+        if not any(in_use.values()):
             return self.UNPAIRED_QUALITY
         return page
+
+    def pages_shown(self) -> tuple[Page, ...]:
+        """The pages as this config will actually show them."""
+        return tuple(self._page(i) for i in range(len(PAGES)))
+
+    def page_at(self, index: int) -> Page:
+        return self._page(index)
 
     def _show_page(self, index: int) -> None:
         self.pages.setCurrentIndex(index)
@@ -246,10 +269,29 @@ class SetupWizard(QDialog):
 
     # -- the answers ---------------------------------------------------------
 
-    #: The settings this wizard is allowed to fail over. Anything else wrong in
-    #: the file was wrong before it opened and is not its to fix - and blocking
-    #: on it trapped the owner in a modal dialog that reopened at every start.
-    OWN_KEYS = ("stt.model_dir", ".model")
+
+    def _own_keys(self) -> tuple[str, ...]:
+        """Exactly the settings this dialog writes.
+
+        Anything else wrong in the file was wrong before it opened and is not
+        its to fix: blocking on one trapped the owner in a modal dialog that
+        reopened at every start. Named in full rather than matched loosely - a
+        substring `.model` also matched `stt.profiles.<name>.model_dir`, a key
+        this never touches, and re-made the very trap it was written to avoid.
+        """
+        return ("stt.model_dir",
+                *(f"stt.profiles.{name}.model" for name in self.model_combos))
+
+    def _is_ours(self, error: str) -> bool:
+        """Config errors open with the setting's name, so a prefix is the test.
+
+        `stt.profiles.local.model` must not swallow a complaint about
+        `stt.profiles.local.model_dir`, hence the boundary check.
+        """
+        for key in self._own_keys():
+            if error.startswith(key) and not error[len(key):].startswith(("_", ".")):
+                return True
+        return False
 
     def finish(self) -> bool:
         """Write the answers. False - and nothing written - if they do not hold."""
@@ -263,8 +305,7 @@ class SetupWizard(QDialog):
             if chosen:
                 self._cfg.set(f"stt.profiles.{name}.model", chosen)
         self._cfg.set("general.setup_complete", True)
-        mine = [e for e in self._cfg.errors()
-                if any(key in e for key in self.OWN_KEYS)]
+        mine = [e for e in self._cfg.errors() if self._is_ours(e)]
         if mine:
             # Reloaded, not patched back: the config object is the daemon's, and
             # leaving half-applied answers on it would outlive this dialog.
